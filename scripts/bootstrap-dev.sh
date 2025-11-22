@@ -6,24 +6,14 @@ echo "The Private AI Guardian - Bootstrap Script"
 echo "=========================================="
 echo ""
 
-PUBLIC_SUBMODULES=("edge-oss" "crypto-oss" "proto-oss")
 PRIVATE_SUBMODULES=("kvm-agent" "saas-backend" "saas-frontend" "infra")
 
-echo "Step 1: Initializing public submodules..."
-for submodule in "${PUBLIC_SUBMODULES[@]}"; do
-    if [ -f ".gitmodules" ] && grep -q "\[submodule.*$submodule" .gitmodules 2>/dev/null; then
-        echo "  → Initializing $submodule..."
-        if git submodule update --init "$submodule" 2>/dev/null; then
-            echo "    ✓ $submodule initialized"
-        else
-            echo "    ⚠ $submodule not found in .gitmodules (will be added later)"
-        fi
-    else
-        echo "    ⚠ $submodule not configured yet (will be added when repositories are created)"
-    fi
-done
-
+echo "Step 1: Public components are already available in the repository"
+echo "  → edge/ - Edge Appliance software"
+echo "  → crypto/ - Encryption libraries"
+echo "  → proto/ - Protocol definitions"
 echo ""
+
 echo "Step 2: Attempting to initialize private submodules (if you have access)..."
 PRIVATE_INITIALIZED=0
 for submodule in "${PRIVATE_SUBMODULES[@]}"; do
@@ -47,16 +37,16 @@ if [ $PRIVATE_INITIALIZED -eq 0 ]; then
 fi
 
 echo ""
-echo "Step 3: Running sanity checks on public repos..."
+echo "Step 3: Running sanity checks on public components..."
 
-if [ -d "edge-oss" ] && [ -f "edge-oss/go.mod" ]; then
-    echo "  → Checking edge-oss..."
-    pushd edge-oss >/dev/null 2>&1 || true
+if [ -d "edge" ] && [ -f "edge/go.mod" ]; then
+    echo "  → Checking edge/..."
+    pushd edge >/dev/null 2>&1 || true
     if command -v go >/dev/null 2>&1; then
         if go test ./... 2>/dev/null; then
-            echo "    ✓ edge-oss tests passed"
+            echo "    ✓ edge/ tests passed"
         else
-            echo "    ⚠ edge-oss tests failed or no tests found"
+            echo "    ⚠ edge/ tests failed or no tests found"
         fi
     else
         echo "    ⚠ Go not installed, skipping tests"
@@ -64,14 +54,29 @@ if [ -d "edge-oss" ] && [ -f "edge-oss/go.mod" ]; then
     popd >/dev/null 2>&1 || true
 fi
 
-if [ -d "proto-oss" ] && [ -f "proto-oss/go.mod" ]; then
-    echo "  → Checking proto-oss..."
-    pushd proto-oss >/dev/null 2>&1 || true
+if [ -d "proto" ] && [ -f "proto/go.mod" ]; then
+    echo "  → Checking proto/..."
+    pushd proto >/dev/null 2>&1 || true
     if command -v go >/dev/null 2>&1; then
         if go test ./... 2>/dev/null || true; then
-            echo "    ✓ proto-oss checks passed"
+            echo "    ✓ proto/ checks passed"
         else
-            echo "    ⚠ proto-oss checks failed or no tests found"
+            echo "    ⚠ proto/ checks failed or no tests found"
+        fi
+    else
+        echo "    ⚠ Go not installed, skipping tests"
+    fi
+    popd >/dev/null 2>&1 || true
+fi
+
+if [ -d "crypto" ] && [ -f "crypto/go/go.mod" ]; then
+    echo "  → Checking crypto/..."
+    pushd crypto/go >/dev/null 2>&1 || true
+    if command -v go >/dev/null 2>&1; then
+        if go test ./... 2>/dev/null || true; then
+            echo "    ✓ crypto/go checks passed"
+        else
+            echo "    ⚠ crypto/go checks failed or no tests found"
         fi
     else
         echo "    ⚠ Go not installed, skipping tests"
@@ -87,8 +92,7 @@ echo ""
 echo "Public components are ready for development."
 echo ""
 echo "Next steps:"
-echo "  1. Review the documentation in the root directory"
-echo "  2. Check out individual component repositories for detailed setup"
-echo "  3. See PROJECT_STRUCTURE.md for repository organization"
+echo "  1. Review the documentation in docs/ directory"
+echo "  2. Check out component directories (edge/, crypto/, proto/) for detailed setup"
+echo "  3. See docs/PROJECT_STRUCTURE.md for repository organization"
 echo ""
-

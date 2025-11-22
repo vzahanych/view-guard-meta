@@ -9,8 +9,8 @@ This document defines the repository structure, open source strategy, and organi
 The project is organized into **public open-source repositories** (for privacy-critical components that run on customer hardware) and **private repositories** (for multi-tenant SaaS, billing, and infrastructure). This structure supports our **"trust us / verify us" privacy story** while protecting commercial IP.
 
 **Key Structure Decision**: The meta repository (`view-guard-meta`) is **public** and serves as the **developer landing page** for the entire ecosystem. It:
+- Contains all public open-source components (edge, crypto, protocols) developed directly in the repo
 - Documents the architecture, threat model, and what is verifiable
-- Links to all public components (edge, crypto, protocols, SDKs)
 - Explains how customers can audit and self-host
 - Makes wire protocols discoverable as potential standards
 - **Does NOT contain** internal roadmaps, production infrastructure, or private code
@@ -87,8 +87,9 @@ The meta repository (`view-guard-meta`) is **public** and serves as the **entry 
 ```
 view-guard-meta/                    (PUBLIC - Developer landing page)
 ├── README.md                       (Main project overview, "trust us / verify us" story)
-├── VERSIONS.md                     (Pinned versions of all submodules)
-├── .gitmodules                     (Git submodule definitions)
+├── LICENSE                         (Apache 2.0)
+├── VERSIONS.md                     (Component version tracking)
+├── .gitmodules                     (Git submodule definitions - private repos only)
 │
 ├── docs/                           (Public documentation)
 │   ├── ARCHITECTURE.md             (High-level architecture, threat model)
@@ -104,10 +105,23 @@ view-guard-meta/                    (PUBLIC - Developer landing page)
 ├── scripts/
 │   └── bootstrap-dev.sh            (Bootstrap script for developers)
 │
-├── Public Submodules:
-│   ├── edge-oss/                   (git submodule → view-guard-edge)
-│   ├── crypto-oss/                 (git submodule → view-guard-crypto)
-│   └── proto-oss/                  (git submodule → view-guard-proto)
+├── Public Components (developed directly in meta repo):
+│   ├── edge/                       (Edge Appliance software)
+│   │   ├── orchestrator/         (Go orchestrator service)
+│   │   ├── ai-service/           (Python AI inference service)
+│   │   ├── shared/                (Shared Go libraries)
+│   │   └── go.mod                 (Go module)
+│   │
+│   ├── crypto/                     (Encryption libraries)
+│   │   ├── go/                    (Go encryption library)
+│   │   ├── typescript/             (Browser/Node.js library)
+│   │   └── python/                 (Python library)
+│   │
+│   └── proto/                      (Protocol buffer definitions)
+│       ├── proto/                  (Protocol definitions)
+│       ├── go/                     (Generated Go stubs)
+│       ├── typescript/             (Generated TypeScript stubs)
+│       └── python/                 (Generated Python stubs)
 │
 └── Private Submodules (optional, require access):
     ├── kvm-agent/                  (git submodule → view-guard-kvm-agent)
@@ -138,19 +152,21 @@ view-guard-internal/                (PRIVATE - Internal docs only)
 
 ---
 
-## Public Repository Details
+## Public Component Details
 
-### 1. `view-guard-edge` (Public - Apache 2.0)
+Public components are developed directly in the meta repository as directories, not as separate repositories or submodules.
 
-**GitHub Description**: "Open-source Edge Appliance software for The Private AI Guardian - local video processing, AI inference, and privacy-first security"
+### 1. `edge/` (Public - Apache 2.0)
+
+**Location**: `view-guard-meta/edge/`
+
+**Description**: Edge Appliance software for The Private AI Guardian - local video processing, AI inference, and privacy-first security
 
 **Contents:**
 
 ```
-view-guard-edge/
+edge/
 ├── README.md                       (Edge Appliance overview, privacy guarantees)
-├── LICENSE                         (Apache 2.0)
-├── CONTRIBUTING.md
 ├── orchestrator/                   (Go orchestrator service)
 │   ├── camera/                     (RTSP/ONVIF client, discovery)
 │   ├── video/                      (FFmpeg integration, decoding)
@@ -158,7 +174,7 @@ view-guard-edge/
 │   ├── events/                     (Event generation, queueing)
 │   ├── wireguard/                  (WireGuard client)
 │   ├── telemetry/                  (Telemetry collection)
-│   └── encryption/                 (Uses view-guard-crypto as dependency)
+│   └── encryption/                 (Uses ../crypto/go as dependency)
 │
 ├── ai-service/                     (Python AI inference service)
 │   ├── inference/                  (OpenVINO/ONNX Runtime)
@@ -172,8 +188,8 @@ view-guard-edge/
 │   └── utils/
 │
 ├── go.mod                          (Go module dependencies)
-│   ├── view-guard-crypto/go        (Crypto library dependency)
-│   └── view-guard-proto/go         (Proto stubs dependency)
+│   ├── github.com/yourorg/view-guard-meta/crypto/go  (Crypto library)
+│   └── github.com/yourorg/view-guard-meta/proto/go  (Proto stubs)
 │
 ├── config/                         (Configuration examples)
 ├── scripts/                        (Build and deployment scripts)
@@ -191,12 +207,12 @@ view-guard-edge/
 - ✅ Event generation and queueing
 - ✅ WireGuard client implementation
 - ✅ Telemetry collection (local metrics)
-- ✅ Uses `view-guard-crypto` library for encryption (no duplication)
+- ✅ Uses `crypto/go` library for encryption (no duplication)
 
 **Dependencies:**
-- Imports `view-guard-crypto/go` as Go module for all encryption operations
-- Imports `view-guard-proto/go` as Go module for gRPC proto stubs
-- **Fully buildable independently** - can be cloned and built without meta repo
+- Imports `crypto/go` from the same meta repo for all encryption operations
+- Imports `proto/go` from the same meta repo for gRPC proto stubs
+- **Fully buildable** as part of the meta repository
 
 **What's Private (or split):**
 - ❌ License checks or feature flags
@@ -207,16 +223,17 @@ view-guard-edge/
 
 ---
 
-### 2. `view-guard-crypto` (Public - Apache 2.0)
+### 2. `crypto/` (Public - Apache 2.0)
 
-**GitHub Description**: "End-to-end encryption libraries for The Private AI Guardian - client-side decryption tools for privacy-first video archiving"
+**Location**: `view-guard-meta/crypto/`
+
+**Description**: End-to-end encryption libraries for The Private AI Guardian - client-side decryption tools for privacy-first video archiving
 
 **Contents:**
 
 ```
-view-guard-crypto/
+crypto/
 ├── README.md                       (Encryption model, key derivation)
-├── LICENSE                         (Apache 2.0)
 ├── go/                             (Go encryption library)
 │   ├── encryption/                 (AES-256-GCM encryption)
 │   ├── keyderivation/              (Argon2id key derivation)
@@ -242,7 +259,7 @@ view-guard-crypto/
 
 **What's Public:**
 - ✅ **Single source of truth** for all encryption primitives
-- ✅ Edge encryption client (AES-256-GCM, Argon2id) - used by `view-guard-edge`
+- ✅ Edge encryption client (AES-256-GCM, Argon2id) - used by `edge/`
 - ✅ Browser-based decryption library (TypeScript)
 - ✅ CLI decryption tool (optional)
 - ✅ Key derivation implementation (Argon2id)
@@ -250,24 +267,25 @@ view-guard-crypto/
 
 **Why Public:**
 - This is the **heart of the end-to-end encryption guarantee**
-- **No duplication** - `view-guard-edge` imports this library, ensuring one canonical implementation
+- **No duplication** - `edge/` imports this library, ensuring one canonical implementation
 - Enables auditors and power users to verify "no backdoors"
 - Critical for trust in the privacy model
 
-**Note**: `view-guard-edge` uses this library as a Go module dependency. There is no crypto code duplicated in the edge repository.
+**Note**: `edge/` uses this library as a Go module dependency from the same meta repo. There is no crypto code duplicated in the edge directory.
 
 ---
 
-### 3. `view-guard-proto` (Public - Apache 2.0)
+### 3. `proto/` (Public - Apache 2.0)
 
-**GitHub Description**: "Protocol buffer definitions and SDKs for The Private AI Guardian platform APIs"
+**Location**: `view-guard-meta/proto/`
+
+**Description**: Protocol buffer definitions and SDKs for The Private AI Guardian platform APIs
 
 **Contents:**
 
 ```
-view-guard-proto/
+proto/
 ├── README.md                       (API overview, protocol documentation)
-├── LICENSE                         (Apache 2.0)
 ├── proto/                          (Protocol buffer definitions - SINGLE SOURCE OF TRUTH)
 │   ├── edge/                       (Edge ↔ KVM VM)
 │   │   ├── events.proto
@@ -307,15 +325,15 @@ view-guard-proto/
 - ❌ HTTP REST API definitions (OpenAPI/Swagger in private `saas-backend` repo)
 
 **Usage:**
-- `view-guard-edge` imports this as Go module dependency (`view-guard-proto/go`)
-- `kvm-agent` imports this as Go module dependency
-- **No copying, no symlinks** - all repos depend on this single source
+- `edge/` imports this as Go module dependency from the same meta repo
+- `kvm-agent` (private submodule) imports this as Go module dependency
+- **No copying, no symlinks** - all components depend on this single source
 
 **Why Public:**
 - Encourages integrations and third-party tooling
 - Locks in wire protocol as an open standard
 - Enables community contributions and alternative implementations
-- **Fully buildable independently** - can generate stubs without meta repo
+- **Fully buildable** as part of the meta repository
 
 ---
 
@@ -464,7 +482,7 @@ view-guard-infra/
 
 ---
 
-## Git Submodule Workflow
+## Development Workflow
 
 ### Initial Setup
 
@@ -476,18 +494,21 @@ cd view-guard-meta
 # Use bootstrap script (recommended)
 ./scripts/bootstrap-dev.sh
 
-# Or manually initialize submodules
+# Or manually initialize private submodules (if you have access)
 # Note: Private submodules require access to private repos
 git submodule update --init --recursive
 ```
 
 **Access Requirements:**
-- **Public submodules**: Anyone can clone and initialize
+- **Public components**: Available immediately - they're part of the meta repo
+  - `edge/` - Edge Appliance software
+  - `crypto/` - Encryption libraries
+  - `proto/` - Protocol definitions
 - **Private submodules**: Require access to private repositories
-  - `view-guard-kvm-agent`
-  - `view-guard-saas-backend`
-  - `view-guard-saas-frontend`
-  - `view-guard-infra`
+  - `kvm-agent/` → `view-guard-kvm-agent`
+  - `saas-backend/` → `view-guard-saas-backend`
+  - `saas-frontend/` → `view-guard-saas-frontend`
+  - `infra/` → `view-guard-infra`
 
 ### Bootstrap Script
 
@@ -497,9 +518,8 @@ The meta repository includes `scripts/bootstrap-dev.sh`:
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Always init public submodules (no auth required)
-echo "Initializing public submodules..."
-git submodule update --init edge-oss crypto-oss proto-oss
+# Public components are already in the repo, no initialization needed
+echo "Public components (edge/, crypto/, proto/) are already available."
 
 # Try to init private submodules, but don't fail if they are inaccessible
 echo "Attempting to initialize private submodules (if you have access)..."
@@ -507,39 +527,40 @@ if ! git submodule update --init kvm-agent saas-backend saas-frontend infra 2>/d
   echo "Warning: Some private submodules could not be initialized. This is expected if you are an external contributor."
 fi
 
-echo "Running sanity checks on public repos..."
-pushd edge-oss && go test ./... && popd
-pushd proto-oss && go test ./... || true && popd
+echo "Running sanity checks on public components..."
+pushd edge && go test ./... && popd
+pushd proto && go test ./... || true && popd
 
 echo "Bootstrap complete! Public components are ready."
 ```
 
 **Important**: The bootstrap script **never fails** just because you don't have access to private repos. It will still set up and test the public components, making it friendly for external contributors.
 
-This gives new developers a single command to get started. Public contributors can work with public submodules even without access to private repos.
+This gives new developers a single command to get started. Public contributors can work with public components even without access to private repos.
 
-### Working with Submodules
+### Working with Private Submodules
 
 ```bash
-# Update submodules to latest commits
+# Update private submodules to latest commits
 git submodule update --remote
 
 # Update to specific tagged version (recommended)
-cd edge-oss
+cd kvm-agent
 git checkout v0.1.0
 cd ..
-git add edge-oss
-git commit -m "Pin edge-oss to v0.1.0"
+git add kvm-agent
+git commit -m "Pin kvm-agent to v0.1.0"
 
-# Update all submodules to latest
+# Update all private submodules to latest
 git submodule update --remote --merge
 ```
 
 ### Development Workflow
 
-1. **Working on public repos**: Make changes directly in submodule directories
-2. **Committing changes**: Commit to submodule repo, then commit submodule reference in meta repo
-3. **Tagging releases**: Tag public repos (v0.1.0, v0.2.0), then update meta repo to pin versions
+1. **Working on public components**: Make changes directly in `edge/`, `crypto/`, or `proto/` directories
+2. **Committing changes**: Commit directly to the meta repository
+3. **Tagging releases**: Tag the meta repo (v0.1.0, v0.2.0) when releasing public components
+4. **Working on private components**: Make changes in private submodule directories, commit to submodule repo, then commit submodule reference in meta repo
 
 ### Versioning Strategy
 
@@ -568,34 +589,35 @@ view-guard-proto: v0.4.0
 
 **Best practice**: Pin submodules to **tags**, not arbitrary commits, whenever possible.
 
-### Independent Buildability
+### Buildability
 
-**Each public repository must be fully buildable on its own:**
+**Public components are built as part of the meta repository:**
 
-- `view-guard-edge`: Can be cloned and built independently
-  - Imports `view-guard-crypto/go` as Go module
-  - Imports `view-guard-proto/go` as Go module
-  - Has its own CI/CD pipeline
+- `edge/`: Built as part of the meta repo
+  - Imports `crypto/go` as Go module from the same repo
+  - Imports `proto/go` as Go module from the same repo
+  - Can be built independently within the repo structure
 
-- `view-guard-crypto`: Can be cloned and built independently
+- `crypto/`: Built as part of the meta repo
   - No external dependencies (except standard libraries)
-  - Has its own CI/CD pipeline
+  - Can be built independently within the repo structure
 
-- `view-guard-proto`: Can be cloned and built independently
-  - Generates stubs without dependencies
-  - Has its own CI/CD pipeline
+- `proto/`: Built as part of the meta repo
+  - Generates stubs without external dependencies
+  - Can be built independently within the repo structure
 
 **Benefits:**
-- OSS contributors can work on individual repos
-- Simpler CI/CD (each repo has its own pipeline)
-- Meta repo becomes "glue & product packaging" only
+- Single repository for all public components simplifies development
+- Unified CI/CD pipeline for all public components
+- Easier cross-component changes and refactoring
+- Single source of truth for versioning
 
 ### CI/CD Considerations
 
-- **Public repos**: Each has its own CI/CD pipeline
-  - Tests run independently
-  - Releases are tagged independently
-- **Meta repo**: CI/CD pulls in submodules at specific versions
+- **Public components**: Built and tested together in the meta repo CI/CD pipeline
+  - Tests run for all public components
+  - Releases are tagged on the meta repo
+- **Private submodules**: CI/CD pulls in private submodules at specific versions
   - Uses `git submodule update --init --recursive` in CI scripts
   - Integration tests run against pinned versions
 
@@ -722,18 +744,18 @@ If you later open a "community KVM agent" reference implementation:
 
 ### From Implementation Plan to Repositories
 
-| Implementation Plan Location | Repository | Public/Private | Notes |
-|-----------------------------|-----------|----------------|-------|
-| `edge/orchestrator/` | `view-guard-edge/orchestrator/` | Public | Imports crypto & proto as modules |
-| `edge/ai-service/` | `view-guard-edge/ai-service/` | Public | |
-| `edge/shared/` | `view-guard-edge/shared/` | Public | |
-| `edge/proto/` | `view-guard-proto/proto/edge/` | Public | Imported as Go module, not copied |
-| `edge/encryption/` | `view-guard-crypto/go/` | Public | Imported as Go module, not duplicated |
+| Implementation Plan Location | Meta Repo Location | Public/Private | Notes |
+|-----------------------------|-------------------|----------------|-------|
+| `edge/orchestrator/` | `edge/orchestrator/` | Public | Imports crypto & proto as modules |
+| `edge/ai-service/` | `edge/ai-service/` | Public | |
+| `edge/shared/` | `edge/shared/` | Public | |
+| `edge/proto/` | `proto/proto/edge/` | Public | Imported as Go module, not copied |
+| `edge/encryption/` | `crypto/go/` | Public | Imported as Go module, not duplicated |
 | `kvm-agent/wireguard-server/` | `view-guard-kvm-agent/wireguard-server/` | Private | Separate private repo |
 | `kvm-agent/event-cache/` | `view-guard-kvm-agent/event-cache/` | Private | Separate private repo |
 | `kvm-agent/stream-relay/` | `view-guard-kvm-agent/stream-relay/` | Private | Separate private repo |
 | `kvm-agent/filecoin-sync/` | `view-guard-kvm-agent/filecoin-sync/` | Private | Separate private repo |
-| `kvm-agent/proto/` | `view-guard-proto/proto/kvm/` | Public | Imported as Go module |
+| `kvm-agent/proto/` | `proto/proto/kvm/` | Public | Imported as Go module |
 | `saas/api/` | `view-guard-saas-backend/api/` | Private | HTTP REST API (OpenAPI), separate private repo |
 | `saas/auth/` | `view-guard-saas-backend/auth/` | Private | Separate private repo |
 | `saas/events/` | `view-guard-saas-backend/events/` | Private | Separate private repo |
@@ -750,10 +772,10 @@ If you later open a "community KVM agent" reference implementation:
 
 ## Next Steps
 
-1. **Create public repositories**:
-   - `view-guard-edge` (initialize with basic structure)
-   - `view-guard-crypto` (initialize with encryption libraries)
-   - `view-guard-proto` (initialize with proto definitions)
+1. **Set up public components in meta repository**:
+   - Create `edge/` directory with basic structure
+   - Create `crypto/` directory with encryption libraries
+   - Create `proto/` directory with proto definitions
 
 2. **Create private repositories**:
    - `view-guard-kvm-agent` (production KVM VM agent)
@@ -763,7 +785,8 @@ If you later open a "community KVM agent" reference implementation:
 
 3. **Set up public meta repository**:
    - Create public `view-guard-meta` repository (developer landing page)
-   - Add submodules pointing to both public and private repos
+   - Add public components directly in the repo (`edge/`, `crypto/`, `proto/`)
+   - Add submodules pointing to private repos (optional, for internal developers)
    - Add public documentation (architecture, technical stack, threat model)
    - Add examples and reference deployments
    - Add bootstrap script
@@ -775,19 +798,19 @@ If you later open a "community KVM agent" reference implementation:
    - Keep separate from public meta to maintain clean public-facing repo
 
 5. **Add licenses**:
-   - Apache 2.0 LICENSE files to all public repos
-   - README files explaining the open source strategy
+   - Apache 2.0 LICENSE file in the meta repo root
+   - README files in each public component directory explaining the open source strategy
 
 6. **Documentation**:
-   - Public repos: Installation, configuration, privacy guarantees
+   - Public components: Installation, configuration, privacy guarantees (in component directories)
    - Private repos: Internal documentation, operational runbooks
    - Public meta repo: Project overview, architecture, "trust us / verify us" story
    - Internal meta repo (if created): Roadmaps, ops, GTM materials
 
 7. **CI/CD setup**:
-   - Separate CI/CD pipelines for each repository (public and private)
-   - Meta repo CI/CD that pulls submodules at specific versions
-   - Public repos have public CI/CD (visible to community)
+   - Unified CI/CD pipeline for all public components in the meta repo
+   - Meta repo CI/CD that pulls private submodules at specific versions
+   - Public CI/CD visible to community
 
 ---
 
@@ -834,14 +857,15 @@ The public meta repository is **not** where the commercial moat lives - it's whe
 - **NOT** where commercial moat lives - that's in private repos
 
 ### 2. Single Source of Truth
-- **Crypto**: All encryption primitives in `view-guard-crypto` only - no duplication
-- **Protocols**: All `.proto` files in `view-guard-proto` only - no copying or symlinks
-- **Dependencies**: Repos import as Go modules, ensuring consistency
+- **Crypto**: All encryption primitives in `crypto/` only - no duplication
+- **Protocols**: All `.proto` files in `proto/` only - no copying or symlinks
+- **Dependencies**: Components import as Go modules from the same repo, ensuring consistency
 
-### 3. Independent Buildability
-- Each public repository can be cloned and built independently
-- No dependency on meta repo for building individual components
-- Enables OSS contributors and simpler CI/CD
+### 3. Unified Development
+- All public components developed in the same repository
+- Easier cross-component changes and refactoring
+- Unified CI/CD pipeline for all public components
+- Single source of truth for versioning
 
 ### 4. Clear Boundaries
 - **Public**: Privacy-critical code (edge, crypto, protocols) that runs on customer hardware
@@ -850,8 +874,8 @@ The public meta repository is **not** where the commercial moat lives - it's whe
 - **Future flexibility**: Structure allows for community KVM agent without reorganization
 
 ### 5. Versioning & Maintenance
-- Semantic versioning for all public repos
-- Tag-based pinning in meta repo
+- Semantic versioning for public components
+- Tag-based releases on the meta repo
 - Clear version tracking in `VERSIONS.md`
 
 ### 6. Developer Experience
