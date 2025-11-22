@@ -16,6 +16,17 @@ Each phase builds upon the previous one, allowing for incremental validation and
 
 **Target Timeline**: 12-16 weeks for complete PoC
 
+**Repository Structure Note:**
+- **Public components** (Edge Appliance, Crypto libraries, Protocol definitions) are developed directly in the meta repository:
+  - `edge/` - Edge Appliance software
+  - `crypto/` - Encryption libraries
+  - `proto/` - Protocol buffer definitions
+- **Private components** (KVM VM agent, SaaS backend, SaaS frontend, Infrastructure) are in separate private repositories (git submodules):
+  - `kvm-agent/` - KVM VM agent (private submodule)
+  - `saas-backend/` - SaaS backend (private submodule)
+  - `saas-frontend/` - SaaS frontend (private submodule)
+  - `infra/` - Infrastructure (private submodule)
+
 ## Priority Tags
 
 Epics are tagged with priority levels:
@@ -101,19 +112,21 @@ Key simplifications:
 **Priority: P0**
 
 #### Step 1.1.1: Repository & Project Structure
-- **Substep 1.1.1.1**: Initialize Git repository
-  - Create monorepo structure
-  - Set up `.gitignore` files
-  - Initialize Go modules for Edge services
+- **Substep 1.1.1.1**: Verify meta repository structure
+  - Public components are developed directly in the meta repository
+  - Edge Appliance code lives in `edge/` directory
+  - Crypto libraries live in `crypto/` directory
+  - Protocol definitions live in `proto/` directory
+  - Set up `.gitignore` files if needed
 - **Substep 1.1.1.2**: Create Edge Appliance directory structure
   - `edge/orchestrator/` - Go main orchestrator service
   - `edge/ai-service/` - Python AI inference service
   - `edge/shared/` - Shared Go libraries
-  - `edge/proto/` - gRPC proto definitions
   - `edge/config/` - Configuration files
   - `edge/scripts/` - Build and deployment scripts
+  - Note: gRPC proto definitions are in `proto/proto/edge/` (not in edge/)
 - **Substep 1.1.1.3**: Set up CI/CD basics
-  - GitHub Actions for Edge services
+  - GitHub Actions for Edge services (in meta repo)
   - Docker image builds for Go and Python services
   - Linting and basic tests
 
@@ -309,12 +322,11 @@ Key simplifications:
 
 #### Step 1.6.2: gRPC Communication
 - **Substep 1.6.2.1**: Proto definitions
-  - Define Edge ↔ KVM VM proto files
-  - Event transmission proto
-  - Control commands proto
-  - Telemetry proto
+  - Proto definitions are in meta repo `proto/proto/edge/` directory
+  - Define Edge ↔ KVM VM proto files (events, control, telemetry, streaming)
+  - Import proto stubs from `proto/go` as Go module dependency
 - **Substep 1.6.2.2**: gRPC client implementation
-  - gRPC client setup
+  - gRPC client setup using proto stubs from `proto/go`
   - Event transmission over WireGuard tunnel
   - Acknowledge receipt handling
   - Error handling and retries
@@ -365,13 +377,15 @@ Key simplifications:
 
 #### Step 1.8.1: Encryption Service
 - **Substep 1.8.1.1**: Clip encryption implementation
-  - **P0**: AES-256-GCM encryption
-  - **P0**: Argon2id key derivation from user secret
+  - **P0**: Use encryption library from meta repo `crypto/go/`
+  - **P0**: AES-256-GCM encryption (via crypto library)
+  - **P0**: Argon2id key derivation from user secret (via crypto library)
   - **P1**: Encryption metadata generation
 - **Substep 1.8.1.2**: Key management
   - **P0**: User secret handling (never transmitted)
-  - **P0**: Key derivation logic
+  - **P0**: Key derivation logic (via crypto library)
   - **P0**: Key storage (local only)
+  - Import `crypto/go` as Go module dependency
 - **Substep 1.8.1.3**: Archive queue (basic)
   - **P1**: Encrypted clip queue
   - **P1**: Basic transmission to KVM VM
@@ -396,15 +410,16 @@ Key simplifications:
 
 #### Step 2.1.1: Project Structure
 - **Substep 2.1.1.1**: Create KVM VM agent directory structure
+  - Note: KVM VM agent is a private repository (git submodule in meta repo)
   - `kvm-agent/` - Main agent services
   - `kvm-agent/wireguard-server/` - WireGuard server service
   - `kvm-agent/event-cache/` - Event cache service
   - `kvm-agent/stream-relay/` - Stream relay service
   - `kvm-agent/filecoin-sync/` - Filecoin sync service
-  - `kvm-agent/proto/` - gRPC proto definitions
+  - Note: gRPC proto definitions are in meta repo `proto/proto/kvm/` (imported as Go module)
 - **Substep 2.1.1.2**: Go modules setup
   - Initialize Go modules
-  - Dependency management
+  - Dependency management (imports `proto/go` from meta repo)
   - Shared libraries
 
 #### Step 2.1.2: Database & Storage Setup
@@ -595,14 +610,17 @@ Key simplifications:
 
 #### Step 3.1.1: Project Structure
 - **Substep 3.1.1.1**: Create SaaS backend directory structure
+  - Note: SaaS backend is a private repository (git submodule in meta repo)
   - `saas/api/` - REST API service
   - `saas/auth/` - Authentication service
   - `saas/events/` - Event inventory service
   - `saas/provisioning/` - VM provisioning service
   - `saas/billing/` - Billing service
   - `saas/shared/` - Shared libraries
+  - Note: gRPC proto definitions for KVM VM ↔ SaaS are in meta repo `proto/proto/kvm/` (imported as Go module)
 - **Substep 3.1.1.2**: Go modules and dependencies
   - Initialize Go modules
+  - Import `proto/go` from meta repo as Go module dependency
   - Database drivers (PostgreSQL, Redis)
   - External service clients
 
@@ -779,6 +797,8 @@ Key simplifications:
 ### Epic 4.1: Frontend Project Setup
 
 **Priority: P0**
+
+**Note**: SaaS frontend is a private repository (git submodule in meta repo).
 
 #### Step 4.1.1: React Project Structure
 - **Substep 4.1.1.1**: Initialize React + TypeScript project

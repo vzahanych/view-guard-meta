@@ -1,0 +1,98 @@
+name: Crypto Libraries CI
+
+on:
+  push:
+    paths:
+      - 'crypto/**'
+      - '.github/workflows/crypto.yml'
+  pull_request:
+    paths:
+      - 'crypto/**'
+      - '.github/workflows/crypto.yml'
+
+jobs:
+  test-go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-crypto-${{ hashFiles('crypto/go/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-crypto-
+
+      - name: Install dependencies
+        run: |
+          cd crypto/go
+          go mod download
+
+      - name: Run tests
+        run: |
+          cd crypto/go
+          go test ./... -v
+
+      - name: Build
+        run: |
+          cd crypto/go
+          go build ./...
+
+  test-python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          cd crypto/python
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          fi
+
+      - name: Run tests
+        run: |
+          cd crypto/python
+          if [ -f pytest.ini ] || [ -d tests ]; then
+            pytest
+          else
+            echo "No tests found, skipping"
+          fi
+
+  test-typescript:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: |
+          cd crypto/typescript
+          if [ -f package.json ]; then
+            npm ci
+          fi
+
+      - name: Run tests
+        run: |
+          cd crypto/typescript
+          if [ -f package.json ]; then
+            npm test
+          else
+            echo "No tests found, skipping"
+          fi
+
