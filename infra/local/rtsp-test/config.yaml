@@ -1,0 +1,16 @@
+protocols: [tcp, udp]
+encryption: no
+rtspAddress: :8554
+rtpAddress: :8000
+rtcpAddress: :8001
+hlsAddress: :8888
+hlsAlwaysRemux: yes
+logLevel: info
+logDestinations: [stdout]
+logFile: rtsp-server.log
+
+paths:
+  test:
+    source: publisher
+    sourceOnDemand: no
+

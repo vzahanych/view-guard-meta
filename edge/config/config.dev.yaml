@@ -1,0 +1,40 @@
+edge:
+  orchestrator:
+    log_level: debug
+    log_format: text
+    data_dir: ./data
+    config_file: ./config/config.dev.yaml
+
+  wireguard:
+    enabled: false
+    config_path: ""
+    kvm_endpoint: "localhost:51820"
+
+  cameras:
+    discovery:
+      enabled: true
+      interval: 60s
+    rtsp:
+      timeout: 30s
+      reconnect_interval: 5s
+
+  storage:
+    clips_dir: ./data/clips
+    snapshots_dir: ./data/snapshots
+    retention_days: 1
+    max_disk_usage_percent: 90
+
+  ai:
+    service_url: "http://localhost:8080"
+    inference_interval: 1s
+    confidence_threshold: 0.5
+
+  events:
+    queue_size: 100
+    batch_size: 5
+    transmission_interval: 2s
+
+  telemetry:
+    interval: 30s
+    enabled: true
+

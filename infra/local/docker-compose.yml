@@ -1,0 +1,36 @@
+version: '3.8'
+
+services:
+  rtsp-simulator:
+    image: aler9/rtsp-simple-server:latest
+    container_name: view-guard-rtsp-simulator
+    ports:
+      - "8554:8554"
+      - "1935:1935"
+    volumes:
+      - ./rtsp-test:/rtsp-test
+    command:
+      - rtsp-simple-server
+      - /rtsp-test/config.yaml
+    networks:
+      - view-guard-dev
+
+  rtsp-test-stream:
+    image: michaelbach/rtsp-test-pattern:latest
+    container_name: view-guard-rtsp-test-stream
+    depends_on:
+      - rtsp-simulator
+    environment:
+      - RTSP_URL=rtsp://rtsp-simulator:8554/test
+    networks:
+      - view-guard-dev
+
+networks:
+  view-guard-dev:
+    driver: bridge
+
+volumes:
+  # Uncomment if using PostgreSQL/Redis services above
+  # postgres-data:
+  # redis-data:
+

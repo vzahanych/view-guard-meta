@@ -1,0 +1,40 @@
+edge:
+  orchestrator:
+    log_level: info
+    log_format: json
+    data_dir: /var/lib/view-guard-edge
+    config_file: /etc/view-guard-edge/config.yaml
+
+  wireguard:
+    enabled: true
+    config_path: /etc/wireguard/wg0.conf
+    kvm_endpoint: ""
+
+  cameras:
+    discovery:
+      enabled: true
+      interval: 300s
+    rtsp:
+      timeout: 30s
+      reconnect_interval: 10s
+
+  storage:
+    clips_dir: /var/lib/view-guard-edge/clips
+    snapshots_dir: /var/lib/view-guard-edge/snapshots
+    retention_days: 7
+    max_disk_usage_percent: 80
+
+  ai:
+    service_url: "http://localhost:8080"
+    inference_interval: 1s
+    confidence_threshold: 0.5
+
+  events:
+    queue_size: 1000
+    batch_size: 10
+    transmission_interval: 5s
+
+  telemetry:
+    interval: 60s
+    enabled: true
+

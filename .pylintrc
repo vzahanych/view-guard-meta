@@ -1,0 +1,29 @@
+[MASTER]
+init-hook='import sys; sys.path.append(".")'
+load-plugins=pylint.extensions.code_style
+
+[MESSAGES CONTROL]
+disable=
+    missing-module-docstring,
+    missing-class-docstring,
+    missing-function-docstring,
+    too-few-public-methods,
+    too-many-arguments,
+    too-many-instance-attributes
+
+[FORMAT]
+max-line-length=100
+indent-string='    '
+
+[BASIC]
+good-names=i,j,k,ex,Run,_,id,db
+
+[DESIGN]
+max-args=10
+max-attributes=15
+
+[TYPECHECK]
+ignored-modules=
+    cv2,
+    openvino
+
