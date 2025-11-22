@@ -121,11 +121,6 @@ func Load(configPath string) (*Config, error) {
 	// Set defaults
 	cfg.setDefaults()
 
-	// Validate configuration
-	if err := cfg.Validate(); err != nil {
-		return nil, fmt.Errorf("invalid configuration: %w", err)
-	}
-
 	return &cfg, nil
 }
 
@@ -222,28 +217,4 @@ func (c *Config) setDefaults() {
 	}
 }
 
-// Validate validates the configuration
-func (c *Config) Validate() error {
-	if c.Edge.Orchestrator.DataDir == "" {
-		return fmt.Errorf("data_dir is required")
-	}
-
-	if c.Edge.Storage.MaxDiskUsagePercent < 0 || c.Edge.Storage.MaxDiskUsagePercent > 100 {
-		return fmt.Errorf("max_disk_usage_percent must be between 0 and 100")
-	}
-
-	if c.Edge.AI.ConfidenceThreshold < 0 || c.Edge.AI.ConfidenceThreshold > 1 {
-		return fmt.Errorf("confidence_threshold must be between 0 and 1")
-	}
-
-	if c.Edge.Events.QueueSize <= 0 {
-		return fmt.Errorf("queue_size must be greater than 0")
-	}
-
-	if c.Edge.Events.BatchSize <= 0 {
-		return fmt.Errorf("batch_size must be greater than 0")
-	}
-
-	return nil
-}
 
