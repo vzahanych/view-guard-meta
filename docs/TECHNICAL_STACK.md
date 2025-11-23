@@ -297,6 +297,16 @@ This section defines the minimal, production-ready stack for initial implementat
 **Video Processing:**
 
 - **Baseline**: **FFmpeg**
+  - Hardware-accelerated decoding (Intel QSV via VAAPI, NVIDIA NVENC if available)
+  - Software fallback for unsupported hardware
+  - Frame extraction and preprocessing
+  - Clip encoding (H.264/MP4)
+- **Camera Access:**
+  - **Network Cameras**: RTSP client (`gortsplib`) for IP cameras
+  - **USB Cameras**: V4L2 (Video4Linux2) for direct USB camera access
+    - Automatic detection via `/dev/video*` devices
+    - Device information via `v4l2-ctl` or sysfs
+    - Direct device path access (e.g., `/dev/video0`) for FFmpeg
   - Video decoding, encoding, transcoding
   - RTSP/ONVIF stream handling
   - Hardware acceleration support (Intel QSV, NVIDIA NVENC)
@@ -331,8 +341,15 @@ This section defines the minimal, production-ready stack for initial implementat
 
 - **WireGuard** (Go client or `wg` command)
   - Persistent tunnel to KVM VM
-- **RTSP/ONVIF** clients
-  - Camera discovery and streaming
+- **Network Camera Access:**
+  - **RTSP/ONVIF** clients for IP cameras
+    - Camera discovery and streaming
+    - WS-Discovery for ONVIF cameras
+- **USB Camera Access:**
+  - **V4L2 (Video4Linux2)** for USB cameras
+    - Automatic device detection (`/dev/video*`)
+    - Direct device path access for FFmpeg
+    - Hotplug support (detect cameras when plugged/unplugged)
 
 ### 4.5 Local Storage
 

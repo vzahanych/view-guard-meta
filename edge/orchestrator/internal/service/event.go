@@ -17,6 +17,7 @@ const (
 
 	// Camera events
 	EventTypeCameraDiscovered EventType = "camera.discovered"
+	EventTypeCameraRegistered EventType = "camera.registered"
 	EventTypeCameraConnected   EventType = "camera.connected"
 	EventTypeCameraDisconnected EventType = "camera.disconnected"
 

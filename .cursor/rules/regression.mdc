@@ -1,0 +1,11 @@
+---
+alwaysApply: true
+---
+rule:
+  description: "After each implementation step, always test regression by running all available tests to ensure no previous functionality is broken."
+  onStepEnd: |
+    - Run the project's full test suite at the end of every implementation step.
+    - Address any test failures before considering the step complete.
+    - Document test results for each step.
+  rationale: "This ensures continuous regression coverage and prevents the introduction of bugs that could compromise existing features."
+---

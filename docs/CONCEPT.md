@@ -51,7 +51,7 @@ Our platform aims to combine the **control of DIY** with the **experience of man
 
 **Privacy-focused prosumers & power users** who:
 
-- Already own IP cameras (RTSP/ONVIF).
+- Already own IP cameras (RTSP/ONVIF) or USB cameras.
 - Are willing to run a Mini PC / NUC at home.
 - Want remote access and intelligence, but **not** cloud lock-in.
 
@@ -192,8 +192,9 @@ All workflows below are **conceptual**, describing behavior, not concrete protoc
    - KVM VM issues stable credentials and long-lived WireGuard configuration.
 
 6. **Camera Discovery & Configuration**  
-   - Edge scans LAN for RTSP/ONVIF-compatible cameras.
-   - SaaS UI displays discovered cameras.
+   - Edge scans LAN for RTSP/ONVIF-compatible network cameras.
+   - Edge detects USB cameras connected directly to the Mini PC (via V4L2).
+   - SaaS UI displays discovered cameras (both network and USB).
    - User labels/configures cameras (e.g., "Front Door", "Parking Lot", schedules, zones).
 
 Result: the tenant has a functioning **local AI appliance** connected to their **private cloud node**, visible and configurable through the SaaS UI.
@@ -203,7 +204,8 @@ Result: the tenant has a functioning **local AI appliance** connected to their *
 ### 6.2 Normal Operation: Detection → Event → Alert
 
 1. **Continuous Video Ingest (Edge)**  
-   - Edge connects to each camera's RTSP/ONVIF feed.
+   - Edge connects to network cameras via RTSP/ONVIF feeds.
+   - Edge accesses USB cameras directly via device paths (e.g., `/dev/video0`).
    - Video is decoded locally; AI is run at configured intervals (e.g., every N frames).
 
 2. **AI Detection (Edge)**  

@@ -169,7 +169,8 @@ This section breaks down each of the three architectural layers in detail, showi
 │                                                                              │
 │  ┌────────────────────────────────────────────────────────────────────┐    │
 │  │ Video Ingest Engine                                                │    │
-│  │ • Connects to RTSP/ONVIF cameras                                   │    │
+│  │ • Connects to RTSP/ONVIF cameras (network)                         │    │
+│  │ • Connects to USB cameras (V4L2, direct device access)             │    │
 │  │ • Decodes streams using hardware acceleration where available      │    │
 │  └────────────────────────────────────────────────────────────────────┘    │
 │                                                                              │
@@ -213,14 +214,15 @@ This section breaks down each of the three architectural layers in detail, showi
 │                                                                              │
 └──────────────────────────────────────────────────────────────────────────────┘
                                     │
-                                    │ RTSP/ONVIF
+                                    │ RTSP/ONVIF (network)
+                                    │ V4L2 (USB)
                                     │ (Local network only)
                                     │
                           ┌─────────┴─────────┐
                           │                   │
                     ┌─────▼─────┐      ┌─────▼─────┐
                     │  Camera 1  │      │  Camera N  │
-                    │  (RTSP)    │      │  (ONVIF)   │
+                    │  (RTSP)    │      │  (ONVIF)   │      │  (USB/V4L2) │
                     └───────────┘      └───────────┘
 ```
 
@@ -619,6 +621,11 @@ This section defines the privacy boundaries, threat model, key management, and s
 │  │ IP Cameras (RTSP/ONVIF)                                            │    │
 │  │  ✅ Never connect to internet directly                             │    │
 │  │  ✅ Only accessible on local network                              │    │
+│  │                                                                     │    │
+│  │ USB Cameras (V4L2)                                                │    │
+│  │  ✅ Connected directly to Mini PC via USB                         │    │
+│  │  ✅ Accessible via /dev/video* device paths                        │    │
+│  │  ✅ Automatic detection via V4L2                                  │    │
 │  └────────────────────────────────────────────────────────────────────┘    │
 └──────────────────────────────────────────────────────────────────────────────┘
                                     │
@@ -844,13 +851,22 @@ This section illustrates the network architecture, showing how components commun
 │  └────────────────────────────────────────────────────────────────────┘    │
 │                                                                              │
 │  ┌────────────────────────────────────────────────────────────────────┐    │
-│  │ IP Cameras (Local Network Only)                                    │    │
+│  │ Network Cameras (Local Network Only)                              │    │
 │  │ • Camera 1 (RTSP: rtsp://192.168.1.100:554/stream)                 │    │
 │  │ • Camera 2 (ONVIF: http://192.168.1.101:8080)                      │    │
 │  │ • Camera N (RTSP/ONVIF)                                            │    │
 │  │                                                                     │    │
 │  │  ⚠️  Never directly accessible from internet                        │    │
 │  │  ✅ Only accessible on local network                               │    │
+│  │                                                                     │    │
+│  │ USB Cameras (Direct Connection)                                    │    │
+│  │ • Camera 1 (USB: /dev/video0 via V4L2)                             │    │
+│  │ • Camera 2 (USB: /dev/video1 via V4L2)                             │    │
+│  │ • Camera N (USB/V4L2)                                              │    │
+│  │                                                                     │    │
+│  │  ✅ Connected directly to Mini PC via USB                         │    │
+│  │  ✅ Automatic detection via V4L2                                  │    │
+│  │  ✅ Accessible via device path (/dev/video*)                       │    │
 │  └────────────────────────────────────────────────────────────────────┘    │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -863,8 +879,9 @@ This section illustrates the network architecture, showing how components commun
 | SaaS API | 443 | HTTPS | API calls | User/Mobile → SaaS |
 | KVM VM Control | 443 | HTTPS (mTLS) | Management API | SaaS → KVM VM |
 | WireGuard | 51820 | UDP | Encrypted tunnel | Edge ↔ KVM VM |
-| RTSP | 554 | RTSP | Video stream | Edge → Camera |
-| ONVIF | 8080 | HTTP | Camera discovery | Edge → Camera |
+| RTSP | 554 | RTSP | Video stream | Edge → Network Camera |
+| ONVIF | 8080 | HTTP | Camera discovery | Edge → Network Camera |
+| V4L2 | N/A | Device | USB camera access | Edge → USB Camera (via /dev/video*) |
 | Filecoin/IPFS | 443 | HTTPS | Archive upload/retrieval | KVM VM ↔ Provider |
 
 ---

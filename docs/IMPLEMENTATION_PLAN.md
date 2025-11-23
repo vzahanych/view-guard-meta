@@ -16,6 +16,40 @@ Each phase builds upon the previous one, allowing for incremental validation and
 
 **Target Timeline**: 12-16 weeks for complete PoC
 
+## Testing Strategy
+
+**Unit Tests**: Unit test substeps are included in each implementation step. These should be written **during implementation** (not deferred) to enable regression testing as the codebase grows. Each unit test substep specifies what should be tested with priority levels (P0 = critical, P1 = important, P2 = nice-to-have).
+
+**Integration & E2E Tests**: Phase 6 includes comprehensive integration testing, end-to-end testing, and regression test suites that verify all components work together.
+
+**Test-Driven Development**: While not strictly required, writing unit tests alongside implementation helps catch regressions early and ensures code quality throughout development.
+
+## Progress Tracking
+
+**Status Legend:**
+- ✅ **DONE** - Completed and tested
+- ⬜ **TODO** - Not yet started
+- 🚧 **IN_PROGRESS** - Currently being worked on
+- ⏸️ **BLOCKED** - Waiting on dependencies or blocked by issues
+
+**Current Progress Summary:**
+- **Phase 1 (Edge Appliance)**: ~15% complete
+  - ✅ Development environment setup
+  - ✅ Core framework (service manager, config, state, health checks)
+  - ✅ Camera discovery (RTSP, ONVIF, USB/V4L2)
+  - ⬜ Video processing (FFmpeg integration)
+  - ⬜ AI inference service
+  - ⬜ Event management
+  - ⬜ WireGuard client
+  - ⬜ Telemetry & encryption
+- **Phase 2 (KVM VM Agent)**: 0% complete
+- **Phase 3 (SaaS Backend)**: 0% complete
+- **Phase 4 (SaaS UI)**: 0% complete
+- **Phase 5 (ISO & Deployment)**: 0% complete
+- **Phase 6 (Integration & Testing)**: 0% complete
+
+*Last Updated: 2025-11-22*
+
 **Repository Structure Note:**
 - **Public components** (Edge Appliance, Crypto libraries, Protocol definitions) are developed directly in the meta repository:
   - `edge/` - Edge Appliance software
@@ -113,12 +147,14 @@ Key simplifications:
 
 #### Step 1.1.1: Repository & Project Structure
 - **Substep 1.1.1.1**: Verify meta repository structure
+  - **Status**: ✅ DONE
   - Public components are developed directly in the meta repository
   - Edge Appliance code lives in `edge/` directory
   - Crypto libraries live in `crypto/` directory
   - Protocol definitions live in `proto/` directory
   - Set up `.gitignore` files if needed
 - **Substep 1.1.1.2**: Create Edge Appliance directory structure
+  - **Status**: ✅ DONE
   - `edge/orchestrator/` - Go main orchestrator service
   - `edge/ai-service/` - Python AI inference service
   - `edge/shared/` - Shared Go libraries
@@ -126,20 +162,24 @@ Key simplifications:
   - `edge/scripts/` - Build and deployment scripts
   - Note: gRPC proto definitions are in `proto/proto/edge/` (not in edge/)
 - **Substep 1.1.1.3**: Set up CI/CD basics
+  - **Status**: ⬜ TODO
   - GitHub Actions for Edge services (in meta repo)
   - Docker image builds for Go and Python services
   - Linting and basic tests
 
 #### Step 1.1.2: Local Development Environment
 - **Substep 1.1.2.1**: Development tooling setup
+  - **Status**: ✅ DONE
   - Install Go 1.25+, Python 3.12+ (as per TECHNICAL_STACK.md)
   - Set up code formatters (gofmt, black)
   - Configure linters (golangci-lint, pylint)
 - **Substep 1.1.2.2**: Local testing environment
+  - **Status**: ✅ DONE
   - Docker Compose for local services (if needed)
   - Mock camera setup (RTSP test stream)
   - Local SQLite database setup
 - **Substep 1.1.2.3**: IDE configuration
+  - **Status**: ✅ DONE
   - VS Code / Cursor workspace settings
   - Debugging configurations for Go and Python
   - Code snippets
@@ -150,28 +190,48 @@ Key simplifications:
 
 #### Step 1.2.1: Orchestrator Service Structure
 - **Substep 1.2.1.1**: Main service framework
+  - **Status**: ✅ DONE
   - Service initialization
   - Configuration management (YAML/JSON config)
   - Logging setup (structured JSON logging)
   - Graceful shutdown handling
 - **Substep 1.2.1.2**: Service architecture
+  - **Status**: ✅ DONE
   - Service manager pattern
   - Service lifecycle management
   - Inter-service communication (channels/events)
 - **Substep 1.2.1.3**: Health check system
+  - **Status**: ✅ DONE
   - Health check endpoints
   - Service status reporting
   - Dependency health checks
+- **Substep 1.2.1.4**: Unit tests for orchestrator service structure
+  - **Status**: ✅ DONE
+  - **P0**: Test service initialization and shutdown
+  - **P0**: Test service manager registration and lifecycle
+  - **P0**: Test event bus integration
+  - **P0**: Test health check endpoints and responses
+  - **P1**: Test service status tracking and reporting
 
 #### Step 1.2.2: Configuration & State Management
 - **Substep 1.2.2.1**: Configuration service
+  - **Status**: ✅ DONE
   - Config file loading
   - Environment variable support
   - Config validation
 - **Substep 1.2.2.2**: State management
+  - **Status**: ✅ DONE
   - System state persistence (SQLite)
   - State recovery on restart
   - State synchronization
+- **Substep 1.2.2.3**: Unit tests for configuration and state management
+  - **Status**: ✅ DONE
+  - **P0**: Test config file loading and validation ✅
+  - **P0**: Test environment variable overrides ✅
+  - **P0**: Test state persistence and recovery ✅
+  - **P0**: Test camera state CRUD operations ✅
+  - **P0**: Test event state storage and retrieval ✅
+  - **P1**: Test config hot reload functionality ✅
 
 ### Epic 1.3: Video Ingest & Processing (Go)
 
@@ -179,55 +239,100 @@ Key simplifications:
 
 #### Step 1.3.1: Camera Discovery & Connection
 - **Substep 1.3.1.1**: RTSP client implementation
+  - **Status**: ✅ DONE
   - **P0**: Go RTSP client using `gortsplib`
   - **P0**: Stream connection and reconnection logic
   - **P0**: Error handling for network issues
   - **P0**: Stream health monitoring
   - **P0**: Manual RTSP URL configuration (for PoC)
 - **Substep 1.3.1.2**: ONVIF camera discovery
+  - **Status**: ✅ DONE
   - **P1**: ONVIF device discovery (WS-Discovery)
   - **P1**: Camera capability detection
   - **P1**: Stream URL extraction
   - **P2**: Camera configuration retrieval
-- **Substep 1.3.1.3**: Camera management service
+- **Substep 1.3.1.3**: USB camera discovery (V4L2)
+  - **Status**: ✅ DONE
+  - **P0**: USB camera detection via V4L2 (Video4Linux2)
+  - **P0**: Scan `/dev/video*` devices automatically
+  - **P0**: Device information extraction (manufacturer, model via `v4l2-ctl` or sysfs)
+  - **P0**: Hotplug support (detect cameras when plugged/unplugged)
+  - **P0**: Device path access for FFmpeg integration
+  - **P1**: Capability detection (video streams, snapshot support)
+- **Substep 1.3.1.4**: Camera management service
+  - **Status**: ✅ DONE
   - **P0**: Camera registration and storage (SQLite)
+  - **P0**: Unified camera interface for both network (RTSP/ONVIF) and USB cameras
   - **P0**: Basic camera configuration management
   - **P0**: Support for 1-2 cameras (PoC scope)
   - **P0**: Basic camera status monitoring
+- **Substep 1.3.1.5**: Unit tests for camera discovery and management
+  - **Status**: ⬜ TODO
+  - **P0**: Test RTSP client connection and reconnection
+  - **P0**: Test ONVIF discovery (mock WS-Discovery responses)
+  - **P0**: Test USB camera detection (mock V4L2 devices)
+  - **P0**: Test camera registration and storage
+  - **P0**: Test camera status monitoring
+  - **P0**: Test unified camera interface (network and USB)
+  - **P1**: Test camera configuration updates
+  - **P1**: Test camera enable/disable operations
 
 #### Step 1.3.2: Video Decoding with FFmpeg
 - **Substep 1.3.2.1**: FFmpeg integration
+  - **Status**: ⬜ TODO
   - Go wrapper for FFmpeg (CGO bindings or exec)
   - Hardware acceleration detection (Intel QSV via VAAPI)
   - Software fallback implementation
   - Codec detection and selection
 - **Substep 1.3.2.2**: Frame extraction pipeline
+  - **Status**: ⬜ TODO
   - Extract frames at configurable intervals
   - Frame buffer management
   - Frame preprocessing (resize, normalize)
   - Frame distribution to AI service
 - **Substep 1.3.2.3**: Video clip recording
+  - **Status**: ⬜ TODO
   - Start/stop recording on events
   - MP4 encoding with H.264
   - Clip metadata generation (duration, size, camera)
   - Concurrent recording for multiple cameras
+- **Substep 1.3.2.4**: Unit tests for video decoding and recording
+  - **Status**: ⬜ TODO
+  - **P0**: Test FFmpeg wrapper initialization
+  - **P0**: Test frame extraction pipeline
+  - **P0**: Test video clip recording start/stop
+  - **P0**: Test clip metadata generation
+  - **P1**: Test hardware acceleration detection
+  - **P1**: Test concurrent recording for multiple cameras
+  - **P2**: Test codec detection and selection
 
 #### Step 1.3.3: Local Storage Management
 - **Substep 1.3.3.1**: Clip storage service
+  - **Status**: ⬜ TODO
   - **P0**: File system organization (date/camera structure)
   - **P0**: Clip naming convention
   - **P0**: Basic disk space monitoring
   - **P1**: Advanced storage quota management
 - **Substep 1.3.3.2**: Retention policy enforcement
+  - **Status**: ⬜ TODO
   - **P0**: Simple "delete oldest when disk > X% full" rule
   - **P0**: Basic retention (e.g., 7 days default)
   - **P1**: Configurable retention periods and thresholds
   - **P1**: Advanced backpressure handling (pause recording when disk full)
 - **Substep 1.3.3.3**: Snapshot generation
+  - **Status**: ⬜ TODO
   - **P1**: JPEG snapshot capture on events
   - **P1**: Thumbnail generation
   - **P1**: Snapshot storage management
   - **P2**: Snapshot cleanup automation
+- **Substep 1.3.3.4**: Unit tests for local storage management
+  - **Status**: ⬜ TODO
+  - **P0**: Test clip storage service (file organization, naming)
+  - **P0**: Test retention policy enforcement
+  - **P0**: Test disk space monitoring
+  - **P1**: Test snapshot generation and storage
+  - **P1**: Test storage quota management
+  - **P2**: Test snapshot cleanup automation
 
 ### Epic 1.4: Python AI Inference Service
 
@@ -235,11 +340,13 @@ Key simplifications:
 
 #### Step 1.4.1: AI Service Framework
 - **Substep 1.4.1.1**: Python service structure
+  - **Status**: ⬜ TODO
   - FastAPI or Flask service for HTTP/gRPC
   - Service initialization
   - Health check endpoints
   - Logging setup
 - **Substep 1.4.1.2**: OpenVINO installation and setup
+  - **Status**: ⬜ TODO
   - Install OpenVINO toolkit
   - Hardware detection (CPU/iGPU)
   - Model conversion tools setup
@@ -247,11 +354,13 @@ Key simplifications:
 
 #### Step 1.4.2: Model Management
 - **Substep 1.4.2.1**: Model loader service
+  - **Status**: ⬜ TODO
   - Model loading from filesystem
   - Model versioning
   - Model hot-reload capability
   - Model validation
 - **Substep 1.4.2.2**: YOLOv8 model integration
+  - **Status**: ⬜ TODO
   - Download pre-trained YOLOv8 model
   - Convert to ONNX format
   - Convert to OpenVINO IR
@@ -259,20 +368,32 @@ Key simplifications:
 
 #### Step 1.4.3: Inference Pipeline
 - **Substep 1.4.3.1**: Inference service implementation
+  - **Status**: ⬜ TODO
   - Frame preprocessing for YOLO (resize, normalize)
   - Inference execution with OpenVINO
   - Post-processing (NMS, confidence filtering)
   - Bounding box extraction
 - **Substep 1.4.3.2**: Detection logic
+  - **Status**: ⬜ TODO
   - Person detection
   - Vehicle detection
   - Custom detection classes
   - Detection threshold configuration
 - **Substep 1.4.3.3**: gRPC/HTTP API for inference
+  - **Status**: ⬜ TODO
   - Inference request handling
   - Response formatting
   - Error handling
   - Performance metrics
+- **Substep 1.4.3.4**: Unit tests for AI inference service
+  - **Status**: ⬜ TODO
+  - **P0**: Test model loading and validation
+  - **P0**: Test inference pipeline (preprocessing, inference, post-processing)
+  - **P0**: Test detection logic (person, vehicle)
+  - **P0**: Test gRPC/HTTP API endpoints
+  - **P1**: Test model hot-reload capability
+  - **P1**: Test inference performance metrics
+  - **P2**: Test custom detection classes
 
 ### Epic 1.5: Event Management & Queue
 
@@ -280,29 +401,42 @@ Key simplifications:
 
 #### Step 1.5.1: Event Detection & Generation
 - **Substep 1.5.1.1**: Event structure definition
+  - **Status**: ⬜ TODO
   - Event schema (timestamp, camera, type, confidence, bounding boxes)
   - Event ID generation (UUID)
   - Event state management
 - **Substep 1.5.1.2**: Event creation service
+  - **Status**: ⬜ TODO
   - Trigger on AI detection
   - Associate clips and snapshots with events
   - Generate event metadata JSON
   - Event deduplication logic
 - **Substep 1.5.1.3**: Event storage
+  - **Status**: ⬜ TODO
   - Store events in SQLite
   - Event querying
   - Event expiration
 
 #### Step 1.5.2: Event Queue Management
 - **Substep 1.5.2.1**: Local event queue
+  - **Status**: ⬜ TODO
   - Queue implementation (in-memory + SQLite persistence)
   - Queue priority handling
   - Queue size limits
 - **Substep 1.5.2.2**: Transmission logic
+  - **Status**: ⬜ TODO
   - Queue processing service
   - Retry logic for failed transmissions
   - Queue persistence on restart
   - Queue recovery
+- **Substep 1.5.2.3**: Unit tests for event management and queue
+  - **Status**: ⬜ TODO
+  - **P0**: Test event structure and ID generation
+  - **P0**: Test event creation and storage
+  - **P0**: Test event queue operations (enqueue, dequeue, priority)
+  - **P0**: Test queue persistence and recovery
+  - **P0**: Test retry logic for failed transmissions
+  - **P1**: Test event deduplication logic
 
 ### Epic 1.6: WireGuard Client & Communication
 
@@ -310,11 +444,13 @@ Key simplifications:
 
 #### Step 1.6.1: WireGuard Client Service
 - **Substep 1.6.1.1**: WireGuard client implementation
+  - **Status**: ⬜ TODO
   - Go WireGuard client using `golang.zx2c4.com/wireguard`
   - Connection to KVM VM
   - Configuration management
   - Key management
 - **Substep 1.6.1.2**: Tunnel management
+  - **Status**: ⬜ TODO
   - Tunnel health monitoring
   - Automatic reconnection logic
   - Connection state management
@@ -322,10 +458,12 @@ Key simplifications:
 
 #### Step 1.6.2: gRPC Communication
 - **Substep 1.6.2.1**: Proto definitions
+  - **Status**: ⬜ TODO
   - Proto definitions are in meta repo `proto/proto/edge/` directory
   - Define Edge ↔ KVM VM proto files (events, control, telemetry, streaming)
   - Import proto stubs from `proto/go` as Go module dependency
 - **Substep 1.6.2.2**: gRPC client implementation
+  - **Status**: ⬜ TODO
   - gRPC client setup using proto stubs from `proto/go`
   - Event transmission over WireGuard tunnel
   - Acknowledge receipt handling
@@ -333,13 +471,23 @@ Key simplifications:
 
 #### Step 1.6.3: Event Transmission
 - **Substep 1.6.3.1**: Event sender service
+  - **Status**: ⬜ TODO
   - Send event metadata over WireGuard/gRPC
   - Handle transmission failures
   - Transmission status tracking
 - **Substep 1.6.3.2**: Clip streaming (on-demand)
+  - **Status**: ⬜ TODO
   - Stream clip on request from KVM VM
   - Handle stream interruptions
   - Stream metadata transmission
+- **Substep 1.6.3.3**: Unit tests for WireGuard client and communication
+  - **Status**: ⬜ TODO
+  - **P0**: Test WireGuard client connection and configuration
+  - **P0**: Test tunnel health monitoring and reconnection
+  - **P0**: Test gRPC client setup and proto stub usage
+  - **P0**: Test event transmission over WireGuard/gRPC
+  - **P1**: Test clip streaming (on-demand)
+  - **P1**: Test error handling and retries
 
 ### Epic 1.7: Telemetry & Health Reporting
 
@@ -347,29 +495,41 @@ Key simplifications:
 
 #### Step 1.7.1: Telemetry Collection
 - **Substep 1.7.1.1**: System metrics collection
+  - **Status**: ⬜ TODO
   - CPU utilization monitoring
   - Memory usage tracking
   - Disk usage monitoring
   - Network statistics
 - **Substep 1.7.1.2**: Application metrics
+  - **Status**: ⬜ TODO
   - Camera status (online/offline)
   - Event queue length
   - AI inference performance
   - Storage usage per camera
 - **Substep 1.7.1.3**: Health status aggregation
+  - **Status**: ⬜ TODO
   - Overall system health calculation
   - Component health status
   - Alert conditions
 
 #### Step 1.7.2: Health Reporting
 - **Substep 1.7.2.1**: Periodic heartbeat
+  - **Status**: ⬜ TODO
   - Send heartbeat to KVM VM
   - Heartbeat interval configuration
   - Heartbeat failure handling
 - **Substep 1.7.2.2**: Telemetry transmission
+  - **Status**: ⬜ TODO
   - Send telemetry data to KVM VM
   - Telemetry batching
   - Telemetry persistence
+- **Substep 1.7.2.3**: Unit tests for telemetry and health reporting
+  - **Status**: ⬜ TODO
+  - **P0**: Test system metrics collection (CPU, memory, disk, network)
+  - **P0**: Test application metrics (camera status, event queue length)
+  - **P0**: Test health status aggregation
+  - **P0**: Test periodic heartbeat transmission
+  - **P1**: Test telemetry batching and persistence
 
 ### Epic 1.8: Encryption & Archive Client (Basic)
 
@@ -377,19 +537,29 @@ Key simplifications:
 
 #### Step 1.8.1: Encryption Service
 - **Substep 1.8.1.1**: Clip encryption implementation
+  - **Status**: ⬜ TODO
   - **P0**: Use encryption library from meta repo `crypto/go/`
   - **P0**: AES-256-GCM encryption (via crypto library)
   - **P0**: Argon2id key derivation from user secret (via crypto library)
   - **P1**: Encryption metadata generation
 - **Substep 1.8.1.2**: Key management
+  - **Status**: ⬜ TODO
   - **P0**: User secret handling (never transmitted)
   - **P0**: Key derivation logic (via crypto library)
   - **P0**: Key storage (local only)
   - Import `crypto/go` as Go module dependency
 - **Substep 1.8.1.3**: Archive queue (basic)
+  - **Status**: ⬜ TODO
   - **P1**: Encrypted clip queue
   - **P1**: Basic transmission to KVM VM
   - **P2**: Advanced queue management
+- **Substep 1.8.1.4**: Unit tests for encryption and archive client
+  - **Status**: ⬜ TODO
+  - **P0**: Test clip encryption using crypto library
+  - **P0**: Test key derivation (Argon2id)
+  - **P0**: Test key management (local storage, never transmitted)
+  - **P1**: Test encrypted clip queue
+  - **P1**: Test basic transmission to KVM VM
 
 ---
 
@@ -410,6 +580,7 @@ Key simplifications:
 
 #### Step 2.1.1: Project Structure
 - **Substep 2.1.1.1**: Create KVM VM agent directory structure
+  - **Status**: ⬜ TODO
   - Note: KVM VM agent is a private repository (git submodule in meta repo)
   - `kvm-agent/` - Main agent services
   - `kvm-agent/wireguard-server/` - WireGuard server service
@@ -418,20 +589,28 @@ Key simplifications:
   - `kvm-agent/filecoin-sync/` - Filecoin sync service
   - Note: gRPC proto definitions are in meta repo `proto/proto/kvm/` (imported as Go module)
 - **Substep 2.1.1.2**: Go modules setup
+  - **Status**: ⬜ TODO
   - Initialize Go modules
   - Dependency management (imports `proto/go` from meta repo)
   - Shared libraries
 
 #### Step 2.1.2: Database & Storage Setup
 - **Substep 2.1.2.1**: SQLite schema design
+  - **Status**: ⬜ TODO
   - Event cache table
   - CID storage table
   - Telemetry buffer table
   - Edge Appliance registry
 - **Substep 2.1.2.2**: Database migration system
+  - **Status**: ⬜ TODO
   - Migration tool setup
   - Initial migrations
   - Migration rollback
+- **Substep 2.1.2.3**: Unit tests for KVM VM agent project setup
+  - **Status**: ⬜ TODO
+  - **P0**: Test database schema initialization
+  - **P0**: Test database migration system
+  - **P1**: Test Go module dependencies
 
 ### Epic 2.2: WireGuard Server Service
 
@@ -439,28 +618,40 @@ Key simplifications:
 
 #### Step 2.2.1: WireGuard Server Implementation
 - **Substep 2.2.1.1**: WireGuard server service
+  - **Status**: ⬜ TODO
   - Go service using `golang.zx2c4.com/wireguard`
   - Server configuration management
   - Server key management
 - **Substep 2.2.1.2**: Client management
+  - **Status**: ⬜ TODO
   - Client key generation
   - Client configuration generation
   - Client registration and storage
 - **Substep 2.2.1.3**: Bootstrap process
+  - **Status**: ⬜ TODO
   - Bootstrap token validation
   - Initial client registration
   - Long-lived credential issuance
 
 #### Step 2.2.2: Tunnel Management
 - **Substep 2.2.2.1**: Connection monitoring
+  - **Status**: ⬜ TODO
   - Track connected Edge Appliances
   - Connection state management
   - Disconnection detection and handling
 - **Substep 2.2.2.2**: Tunnel health monitoring
+  - **Status**: ⬜ TODO
   - Ping/pong mechanism
   - Latency tracking
   - Bandwidth monitoring
   - Tunnel statistics collection
+- **Substep 2.2.2.3**: Unit tests for WireGuard server service
+  - **Status**: ⬜ TODO
+  - **P0**: Test WireGuard server initialization and configuration
+  - **P0**: Test client key generation and management
+  - **P0**: Test bootstrap process and token validation
+  - **P0**: Test connection monitoring and state management
+  - **P1**: Test tunnel health monitoring (ping/pong, latency, bandwidth)
 
 ### Epic 2.3: Event Cache Service
 
@@ -468,11 +659,13 @@ Key simplifications:
 
 #### Step 2.3.1: Event Reception & Storage
 - **Substep 2.3.1.1**: Event reception from Edge
+  - **Status**: ⬜ TODO
   - gRPC server for Edge connections
   - Receive events over WireGuard tunnel
   - Validate event structure
   - Store in SQLite cache with rich metadata
 - **Substep 2.3.1.2**: Event cache management
+  - **Status**: ⬜ TODO
   - Rich metadata storage (bounding boxes, detection scores)
   - Event querying and retrieval
   - Cache expiration policies
@@ -480,14 +673,23 @@ Key simplifications:
 
 #### Step 2.3.2: Event Forwarding to SaaS
 - **Substep 2.3.2.1**: Event summarization
+  - **Status**: ⬜ TODO
   - Privacy-minimized metadata extraction
   - Remove sensitive details (bounding boxes, raw scores)
   - Create summarized event record
 - **Substep 2.3.2.2**: SaaS communication
+  - **Status**: ⬜ TODO
   - gRPC client to SaaS
   - Forward summarized events
   - Handle forwarding failures and retries
   - Acknowledgment handling
+- **Substep 2.3.2.3**: Unit tests for event cache service
+  - **Status**: ⬜ TODO
+  - **P0**: Test event reception from Edge (gRPC server)
+  - **P0**: Test event validation and storage
+  - **P0**: Test event cache management (querying, expiration, cleanup)
+  - **P0**: Test event summarization (privacy-minimized metadata)
+  - **P0**: Test event forwarding to SaaS (gRPC client, retries, acknowledgments)
 
 ### Epic 2.4: Telemetry Aggregation Service
 
@@ -495,22 +697,33 @@ Key simplifications:
 
 #### Step 2.4.1: Telemetry Collection
 - **Substep 2.4.1.1**: Telemetry reception
+  - **Status**: ⬜ TODO
   - **P0**: Receive telemetry from Edge Appliances
   - **P0**: Validate telemetry data
   - **P0**: Store raw-ish telemetry records in SQLite buffer
 - **Substep 2.4.1.2**: Telemetry aggregation
+  - **Status**: ⬜ TODO
   - **P0**: Simple "healthy/unhealthy" status calculation
   - **P1**: Aggregate per-tenant metrics (averages, totals)
   - **P1**: Advanced health status calculation
 
 #### Step 2.4.2: Telemetry Forwarding
 - **Substep 2.4.2.1**: Telemetry summarization
+  - **Status**: ⬜ TODO
   - **P0**: Forward simple health status to SaaS
   - **P1**: Summarize telemetry (remove detailed metrics, create summaries)
 - **Substep 2.4.2.2**: Forward to SaaS
+  - **Status**: ⬜ TODO
   - **P0**: Send basic health status to SaaS
   - **P0**: Periodic reporting
   - **P1**: Advanced alert forwarding
+- **Substep 2.4.2.3**: Unit tests for telemetry aggregation service
+  - **Status**: ⬜ TODO
+  - **P0**: Test telemetry reception and validation
+  - **P0**: Test telemetry aggregation (healthy/unhealthy status)
+  - **P0**: Test telemetry summarization
+  - **P0**: Test telemetry forwarding to SaaS
+  - **P1**: Test advanced metrics aggregation
 
 ### Epic 2.5: Stream Relay Service
 
@@ -518,22 +731,31 @@ Key simplifications:
 
 #### Step 2.5.1: Stream Request Handling
 - **Substep 2.5.1.1**: Token validation
+  - **Status**: ⬜ TODO
   - Receive time-bound tokens from SaaS
   - Validate token signature and expiration
   - Extract event ID and user info from token
 - **Substep 2.5.1.2**: Stream orchestration
+  - **Status**: ⬜ TODO
   - Request clip from Edge Appliance via gRPC
   - Handle Edge Appliance response
   - Stream setup coordination
 
 #### Step 2.5.2: Stream Relay Implementation
 - **Substep 2.5.2.1**: HTTP-based relay (P0 for PoC)
+  - **Status**: ⬜ TODO
   - **P0**: Simple HTTP progressive download relay from Edge via KVM to client
   - **P0**: Request clip from Edge over WireGuard/gRPC
   - **P0**: Stream clip data via HTTP(S) to client
   - **P0**: Basic error handling and stream interruptions
   - **P1**: WebRTC relay using Pion (ICE, STUN/TURN, SDP exchange)
   - **P2**: Advanced WebRTC features (transcoding, reconnection logic)
+- **Substep 2.5.2.2**: Unit tests for stream relay service
+  - **Status**: ⬜ TODO
+  - **P0**: Test token validation
+  - **P0**: Test stream orchestration (request clip from Edge)
+  - **P0**: Test HTTP-based relay (progressive download)
+  - **P1**: Test WebRTC relay (if implemented)
 
 ### Epic 2.6: Filecoin Sync Service (Basic/Stub)
 
@@ -541,10 +763,12 @@ Key simplifications:
 
 #### Step 2.6.1: Basic Archive Upload (PoC)
 - **Substep 2.6.1.1**: Encrypted clip reception
+  - **Status**: ⬜ TODO
   - **P0**: Receive encrypted clips from Edge (already encrypted)
   - **P0**: Store temporarily during upload
   - **P0**: Automatic cleanup after upload
 - **Substep 2.6.1.2**: Upload implementation (basic)
+  - **Status**: ⬜ TODO
   - **P0 Option**: Stub with S3 + fake CIDs for PoC demo
   - **P1 Option**: Basic IPFS gateway upload
   - **P2**: Full Filecoin integration
@@ -552,23 +776,34 @@ Key simplifications:
 
 #### Step 2.6.2: Quota Management (Basic)
 - **Substep 2.6.2.1**: Simple quota tracking
+  - **Status**: ⬜ TODO
   - **P0**: Hard-coded quota limit for PoC
   - **P0**: Track archive size per tenant
   - **P2**: Complex quota policies from SaaS
 - **Substep 2.6.2.2**: Basic quota enforcement
+  - **Status**: ⬜ TODO
   - **P0**: Check quota before upload
   - **P0**: Reject uploads if over quota
   - **P2**: Advanced quota management
 
 #### Step 2.6.3: Archive Metadata Management
 - **Substep 2.6.3.1**: CID storage
+  - **Status**: ⬜ TODO
   - **P0**: Store CIDs in SQLite
   - **P0**: Associate CIDs with events
   - **P1**: Basic metadata storage
 - **Substep 2.6.3.2**: Archive status updates
+  - **Status**: ⬜ TODO
   - **P0**: Update SaaS with archive status
   - **P0**: CID transmission to SaaS
   - **P2**: Advanced notification system
+- **Substep 2.6.3.3**: Unit tests for Filecoin sync service
+  - **Status**: ⬜ TODO
+  - **P0**: Test encrypted clip reception
+  - **P0**: Test upload implementation (S3 stub or IPFS gateway)
+  - **P0**: Test quota tracking and enforcement
+  - **P0**: Test CID storage and retrieval
+  - **P0**: Test archive status updates
 
 ### Epic 2.7: KVM VM Agent Orchestration
 
@@ -576,22 +811,32 @@ Key simplifications:
 
 #### Step 2.7.1: Agent Service Manager
 - **Substep 2.7.1.1**: Main agent service
+  - **Status**: ⬜ TODO
   - Service initialization
   - Service lifecycle management
   - Configuration management
 - **Substep 2.7.1.2**: Service coordination
+  - **Status**: ⬜ TODO
   - Inter-service communication
   - Service health monitoring
   - Graceful shutdown
 
 #### Step 2.7.2: SaaS Communication
 - **Substep 2.7.2.1**: gRPC client to SaaS
+  - **Status**: ⬜ TODO
   - **P0**: Connection setup
   - **P0**: mTLS configuration
   - **P0**: Connection health monitoring
 - **Substep 2.7.2.2**: Command handling (basic)
+  - **Status**: ⬜ TODO
   - **P1**: Basic command handling from SaaS
   - **P2**: Advanced command orchestration
+- **Substep 2.7.2.3**: Unit tests for KVM VM agent orchestration
+  - **Status**: ⬜ TODO
+  - **P0**: Test agent service manager initialization
+  - **P0**: Test service coordination and lifecycle
+  - **P0**: Test gRPC client to SaaS (connection, mTLS)
+  - **P1**: Test command handling from SaaS
 
 ---
 
@@ -610,6 +855,7 @@ Key simplifications:
 
 #### Step 3.1.1: Project Structure
 - **Substep 3.1.1.1**: Create SaaS backend directory structure
+  - **Status**: ⬜ TODO
   - Note: SaaS backend is a private repository (git submodule in meta repo)
   - `saas/api/` - REST API service
   - `saas/auth/` - Authentication service
@@ -619,6 +865,7 @@ Key simplifications:
   - `saas/shared/` - Shared libraries
   - Note: gRPC proto definitions for KVM VM ↔ SaaS are in meta repo `proto/proto/kvm/` (imported as Go module)
 - **Substep 3.1.1.2**: Go modules and dependencies
+  - **Status**: ⬜ TODO
   - Initialize Go modules
   - Import `proto/go` from meta repo as Go module dependency
   - Database drivers (PostgreSQL, Redis)
@@ -626,6 +873,7 @@ Key simplifications:
 
 #### Step 3.1.2: Database Setup
 - **Substep 3.1.2.1**: PostgreSQL schema design
+  - **Status**: ⬜ TODO
   - Users table
   - Tenants table
   - KVM VM assignments table
@@ -633,9 +881,15 @@ Key simplifications:
   - Subscriptions table
   - Billing records table
 - **Substep 3.1.2.2**: Database migration system
+  - **Status**: ⬜ TODO
   - Migration tool setup (golang-migrate)
   - Initial migrations
   - Migration rollback capability
+- **Substep 3.1.2.3**: Unit tests for SaaS backend project setup
+  - **Status**: ⬜ TODO
+  - **P0**: Test PostgreSQL schema initialization
+  - **P0**: Test database migration system
+  - **P1**: Test Go module dependencies
 
 ### Epic 3.2: Authentication & User Management
 
@@ -643,17 +897,20 @@ Key simplifications:
 
 #### Step 3.2.1: Auth0 Integration
 - **Substep 3.2.1.1**: Auth0 application setup
+  - **Status**: ⬜ TODO
   - **P0**: Create Auth0 application
   - **P0**: Configure OAuth2/OIDC settings
   - **P0**: Set up callback URLs
   - **P1**: Configure user roles (single "tenant admin" role is P0)
 - **Substep 3.2.1.2**: Backend authentication service
+  - **Status**: ⬜ TODO
   - **P0**: JWT token validation middleware
   - **P0**: User session management
   - **P0**: Simple tenant mapping (single role: "tenant admin")
   - **P1**: Full RBAC implementation with multiple roles
   - **P0**: Token refresh handling
 - **Substep 3.2.1.3**: User service
+  - **Status**: ⬜ TODO
   - User CRUD operations
   - User profile management
   - User preferences storage
@@ -661,14 +918,24 @@ Key simplifications:
 
 #### Step 3.2.2: Tenant Management
 - **Substep 3.2.2.1**: Tenant service
+  - **Status**: ⬜ TODO
   - Tenant creation and management
   - Tenant settings
   - Tenant-KVM VM assignment
   - Tenant subscription association
 - **Substep 3.2.2.2**: Multi-tenancy isolation
+  - **Status**: ⬜ TODO
   - Tenant context middleware
   - Data isolation enforcement
   - Cross-tenant access prevention
+- **Substep 3.2.2.3**: Unit tests for authentication and user management
+  - **Status**: ⬜ TODO
+  - **P0**: Test JWT token validation middleware
+  - **P0**: Test user session management
+  - **P0**: Test tenant mapping and isolation
+  - **P0**: Test user CRUD operations
+  - **P0**: Test tenant service (creation, VM assignment)
+  - **P1**: Test RBAC implementation (if implemented)
 
 ### Epic 3.3: Event Inventory Service
 
@@ -676,25 +943,38 @@ Key simplifications:
 
 #### Step 3.3.1: Event Storage & Querying
 - **Substep 3.3.1.1**: Event service implementation
+  - **Status**: ⬜ TODO
   - **P0**: Store summarized event metadata in PostgreSQL
   - **P0**: Basic event querying API
   - **P0**: Basic filtering (camera, type, date range)
   - **P2**: Advanced indexing and full-text search
 - **Substep 3.3.1.2**: Event search functionality
+  - **Status**: ⬜ TODO
   - **P1**: Basic search by metadata fields
   - **P2**: Full-text search (PostgreSQL pg_trgm)
 - **Substep 3.3.1.3**: Event retention policies
+  - **Status**: ⬜ TODO
   - **P1**: Basic retention (simple cleanup)
   - **P2**: Configurable retention periods, archive status tracking
 
 #### Step 3.3.2: Real-time Event Updates
 - **Substep 3.3.2.1**: Event updates mechanism
+  - **Status**: ⬜ TODO
   - **P0**: Basic polling (`/events` endpoint with periodic refresh)
   - **P1**: Server-Sent Events (SSE) for live updates
   - **P2**: Advanced SSE reconnection handling
 - **Substep 3.3.2.2**: Event aggregation
+  - **Status**: ⬜ TODO
   - **P1**: Basic event counts
   - **P2**: Advanced statistics and dashboard data
+- **Substep 3.3.2.3**: Unit tests for event inventory service
+  - **Status**: ⬜ TODO
+  - **P0**: Test event storage and retrieval
+  - **P0**: Test event querying and filtering
+  - **P0**: Test event updates mechanism (polling)
+  - **P1**: Test event search functionality
+  - **P1**: Test Server-Sent Events (if implemented)
+  - **P1**: Test event aggregation
 
 ### Epic 3.4: KVM VM Management Service (Basic)
 
@@ -702,11 +982,13 @@ Key simplifications:
 
 #### Step 3.4.1: Basic VM Assignment
 - **Substep 3.4.1.1**: Manual VM provisioning (PoC)
+  - **Status**: ⬜ TODO
   - **P0**: Pre-provision 1-2 KVM VMs manually
   - Simple CLI script or manual setup
   - Store VM connection details in database
   - **P2**: Full Terraform automation (post-PoC)
 - **Substep 3.4.1.2**: VM assignment service (basic)
+  - **Status**: ⬜ TODO
   - Assign pre-provisioned VM to tenant on signup
   - Store tenant-VM mapping in database
   - Basic VM status tracking
@@ -714,14 +996,23 @@ Key simplifications:
 
 #### Step 3.4.2: VM Communication
 - **Substep 3.4.2.1**: gRPC server for VM agents
+  - **Status**: ⬜ TODO
   - gRPC server setup
   - mTLS configuration
   - Command handling
 - **Substep 3.4.2.2**: VM agent management
+  - **Status**: ⬜ TODO
   - Agent registration
   - Agent health monitoring
   - Agent command execution
   - Agent configuration updates
+- **Substep 3.4.2.3**: Unit tests for KVM VM management service
+  - **Status**: ⬜ TODO
+  - **P0**: Test VM assignment service
+  - **P0**: Test tenant-VM mapping storage
+  - **P0**: Test gRPC server for VM agents (mTLS, command handling)
+  - **P0**: Test agent registration and health monitoring
+  - **P1**: Test VM lifecycle management (if implemented)
 
 ### Epic 3.5: ISO Generation Service (Basic)
 
@@ -729,17 +1020,25 @@ Key simplifications:
 
 #### Step 3.5.1: Basic ISO Setup (PoC)
 - **Substep 3.5.1.1**: Generic ISO preparation
+  - **Status**: ⬜ TODO
   - **P0**: Single generic ISO with hard-coded config or manual bootstrap script
   - Base Ubuntu 24.04 LTS ISO
   - Manual configuration editing for PoC
   - **P2**: Full Packer pipeline with tenant-specific generation
 - **Substep 3.5.1.2**: Basic bootstrap (PoC)
+  - **Status**: ⬜ TODO
   - **P0**: Manual bootstrap token generation and configuration
   - Simple script-based configuration injection
   - **P2**: Automated tenant-specific ISO generation
 - **Substep 3.5.1.3**: ISO download (basic)
+  - **Status**: ⬜ TODO
   - **P0**: Simple download endpoint or manual distribution
   - **P2**: Secure download API with CDN integration
+- **Substep 3.5.1.4**: Unit tests for ISO generation service
+  - **Status**: ⬜ TODO
+  - **P1**: Test generic ISO preparation
+  - **P1**: Test bootstrap token generation
+  - **P1**: Test ISO download endpoint
 
 ### Epic 3.6: Billing & Subscription Service (Basic)
 
@@ -747,13 +1046,19 @@ Key simplifications:
 
 #### Step 3.6.1: Basic Plan Management (PoC)
 - **Substep 3.6.1.1**: Simple plan model
+  - **Status**: ⬜ TODO
   - **P0**: Hard-coded "free plan" for PoC
   - Basic plan assignment to tenants
   - **P2**: Full Stripe integration with webhooks
 - **Substep 3.6.1.2**: Quota management (basic)
+  - **Status**: ⬜ TODO
   - **P0**: Hard-coded quota limits for PoC
   - Basic quota tracking
   - **P2**: Full quota service with plan-based limits
+- **Substep 3.6.1.3**: Unit tests for billing and subscription service
+  - **Status**: ⬜ TODO
+  - **P2**: Test plan management (if implemented)
+  - **P2**: Test quota management (if implemented)
 
 ### Epic 3.7: REST API Service
 
@@ -761,27 +1066,39 @@ Key simplifications:
 
 #### Step 3.7.1: API Framework
 - **Substep 3.7.1.1**: Gin framework setup
+  - **Status**: ⬜ TODO
   - Router configuration
   - Middleware setup (auth, logging, CORS)
   - Error handling
 - **Substep 3.7.1.2**: API endpoints
+  - **Status**: ⬜ TODO
   - User endpoints
   - Event endpoints
   - Camera endpoints
   - Subscription endpoints
   - VM management endpoints
 - **Substep 3.7.1.3**: API documentation
+  - **Status**: ⬜ TODO
   - OpenAPI/Swagger specification
   - API endpoint documentation
   - Request/response examples
 
 #### Step 3.7.2: API Features (Basic)
 - **Substep 3.7.2.1**: Rate limiting
+  - **Status**: ⬜ TODO
   - **P1**: Basic rate limiting middleware
   - **P2**: Advanced per-user rate limits
 - **Substep 3.7.2.2**: Caching
+  - **Status**: ⬜ TODO
   - **P1**: Basic Redis caching for critical data
   - **P2**: Advanced caching strategies
+- **Substep 3.7.2.3**: Unit tests for REST API service
+  - **Status**: ⬜ TODO
+  - **P0**: Test API endpoints (user, event, camera, subscription, VM management)
+  - **P0**: Test authentication middleware
+  - **P0**: Test error handling
+  - **P1**: Test rate limiting middleware
+  - **P1**: Test Redis caching (if implemented)
 
 ---
 
@@ -802,10 +1119,12 @@ Key simplifications:
 
 #### Step 4.1.1: React Project Structure
 - **Substep 4.1.1.1**: Initialize React + TypeScript project
+  - **Status**: ⬜ TODO
   - Create React app with Vite or Create React App
   - TypeScript configuration
   - Tailwind CSS setup
 - **Substep 4.1.1.2**: Project structure
+  - **Status**: ⬜ TODO
   - `src/components/` - React components
   - `src/pages/` - Page components
   - `src/hooks/` - Custom hooks
@@ -813,20 +1132,28 @@ Key simplifications:
   - `src/store/` - State management (Zustand)
   - `src/utils/` - Utility functions
 - **Substep 4.1.1.3**: Development tooling
+  - **Status**: ⬜ TODO
   - ESLint configuration
   - Prettier configuration
   - Testing setup (Vitest/Jest)
 
 #### Step 4.1.2: API Client Setup
 - **Substep 4.1.2.1**: API client implementation
+  - **Status**: ⬜ TODO
   - Axios or fetch wrapper
   - Request/response interceptors
   - Error handling
 - **Substep 4.1.2.2**: API service layer
+  - **Status**: ⬜ TODO
   - Event API service
   - User API service
   - Camera API service
   - Subscription API service
+- **Substep 4.1.2.3**: Unit tests for frontend project setup
+  - **Status**: ⬜ TODO
+  - **P0**: Test API client implementation (request/response interceptors, error handling)
+  - **P0**: Test API service layer (event, user, camera, subscription services)
+  - **P1**: Test React component structure and utilities
 
 ### Epic 4.2: Authentication UI
 
@@ -834,10 +1161,12 @@ Key simplifications:
 
 #### Step 4.2.1: Auth0 Integration
 - **Substep 4.2.1.1**: Auth0 React SDK setup
+  - **Status**: ⬜ TODO
   - Install and configure Auth0 React SDK
   - Auth0Provider setup
   - Configuration
 - **Substep 4.2.1.2**: Authentication flows
+  - **Status**: ⬜ TODO
   - Login page
   - Logout functionality
   - Protected route wrapper
@@ -845,13 +1174,22 @@ Key simplifications:
 
 #### Step 4.2.2: User Profile UI
 - **Substep 4.2.2.1**: User profile page
+  - **Status**: ⬜ TODO
   - Profile information display
   - Profile editing
   - User preferences
 - **Substep 4.2.2.2**: User settings
+  - **Status**: ⬜ TODO
   - Settings page
   - Notification preferences
   - Account management
+- **Substep 4.2.2.3**: Unit tests for authentication UI
+  - **Status**: ⬜ TODO
+  - **P0**: Test Auth0 React SDK integration
+  - **P0**: Test login/logout flows
+  - **P0**: Test protected route wrapper
+  - **P0**: Test token management
+  - **P1**: Test user profile and settings components
 
 ### Epic 4.3: Dashboard & Navigation
 
@@ -859,11 +1197,13 @@ Key simplifications:
 
 #### Step 4.3.1: Main Layout
 - **Substep 4.3.1.1**: Layout component
+  - **Status**: ⬜ TODO
   - Header with user info
   - Navigation sidebar
   - Main content area
   - Responsive design
 - **Substep 4.3.1.2**: Navigation
+  - **Status**: ⬜ TODO
   - Route configuration (React Router)
   - Navigation menu
   - Active route highlighting
@@ -871,12 +1211,20 @@ Key simplifications:
 
 #### Step 4.3.2: Dashboard Page (Basic)
 - **Substep 4.3.2.1**: Basic dashboard
+  - **Status**: ⬜ TODO
   - **P0**: Simple "Events" nav item
   - **P0**: Basic camera status label (e.g., "Cameras: 2 online")
   - **P1**: Dashboard widgets (camera overview, recent events, health indicators)
 - **Substep 4.3.2.2**: Updates
+  - **Status**: ⬜ TODO
   - **P0**: Basic polling refresh
   - **P1**: SSE connection for live updates
+- **Substep 4.3.2.3**: Unit tests for dashboard and navigation
+  - **Status**: ⬜ TODO
+  - **P0**: Test layout component (header, sidebar, responsive)
+  - **P0**: Test navigation and routing
+  - **P0**: Test dashboard page (basic polling, camera status)
+  - **P1**: Test SSE connection (if implemented)
 
 ### Epic 4.4: Event Timeline UI
 
@@ -884,12 +1232,14 @@ Key simplifications:
 
 #### Step 4.4.1: Timeline Component
 - **Substep 4.4.1.1**: Timeline layout
+  - **Status**: ⬜ TODO
   - **P0**: Simple table/list of events
   - **P0**: Event card rendering
   - **P0**: Basic pagination
   - **P1**: Date grouping
   - **P1**: Infinite scroll
 - **Substep 4.4.1.2**: Event cards
+  - **Status**: ⬜ TODO
   - **P0**: Event metadata display
   - **P0**: Event type indicators
   - **P0**: Timestamp formatting
@@ -897,25 +1247,36 @@ Key simplifications:
 
 #### Step 4.4.2: Event Filtering & Search
 - **Substep 4.4.2.1**: Filter UI
+  - **Status**: ⬜ TODO
   - **P0**: Basic filters (camera, type, date range)
   - **P0**: Simple filter state management
   - **P1**: Advanced date range picker
 - **Substep 4.4.2.2**: Search functionality
+  - **Status**: ⬜ TODO
   - **P1**: Search input and basic search
   - **P1**: Search API integration
   - **P2**: Search history
 
 #### Step 4.4.3: Event Details View
 - **Substep 4.4.3.1**: Event detail modal/page
+  - **Status**: ⬜ TODO
   - Event metadata display
   - Thumbnail/snapshot display
   - Detection details (bounding boxes if available)
   - Camera information
 - **Substep 4.4.3.2**: Event actions
+  - **Status**: ⬜ TODO
   - "View Clip" button
   - "Download" button
   - "Archive" button (if applicable)
   - Event deletion (if allowed)
+- **Substep 4.4.3.3**: Unit tests for event timeline UI
+  - **Status**: ⬜ TODO
+  - **P0**: Test timeline component (event list, cards, pagination)
+  - **P0**: Test event filtering (camera, type, date range)
+  - **P0**: Test event details view and actions
+  - **P1**: Test event search functionality
+  - **P1**: Test date grouping and infinite scroll
 
 ### Epic 4.5: Clip Viewing UI
 
@@ -923,27 +1284,37 @@ Key simplifications:
 
 #### Step 4.5.1: Video Player Component
 - **Substep 4.5.1.1**: Video player integration
+  - **Status**: ⬜ TODO
   - **P0**: Standard HTML5 `<video>` element with HTTP URL
   - **P0**: React video player component using HTTP progressive download
   - **P0**: Basic playback controls (play/pause, seek)
   - **P1**: WebRTC stream handling (if WebRTC implemented)
   - **P1**: Fullscreen support
 - **Substep 4.5.1.2**: Stream request flow
+  - **Status**: ⬜ TODO
   - **P0**: "View Clip" button requests HTTP URL from SaaS
   - **P0**: Loading states and error handling
   - **P1**: WebRTC connection management (if WebRTC implemented)
 
 #### Step 4.5.2: Clip Player Features
 - **Substep 4.5.2.1**: Playback features
+  - **Status**: ⬜ TODO
   - Play/pause
   - Seek
   - Volume control
   - Playback speed
 - **Substep 4.5.2.2**: Clip information
+  - **Status**: ⬜ TODO
   - Clip metadata display
   - Camera information
   - Timestamp display
   - Download option
+- **Substep 4.5.2.3**: Unit tests for clip viewing UI
+  - **Status**: ⬜ TODO
+  - **P0**: Test video player component (HTTP progressive download)
+  - **P0**: Test stream request flow (loading states, error handling)
+  - **P0**: Test playback features (play/pause, seek, volume)
+  - **P1**: Test WebRTC stream handling (if implemented)
 
 ### Epic 4.6: Camera Management UI (Basic)
 
@@ -951,13 +1322,20 @@ Key simplifications:
 
 #### Step 4.6.1: Basic Camera List
 - **Substep 4.6.1.1**: Camera list page (simple)
+  - **Status**: ⬜ TODO
   - **P0**: Display discovered cameras from Edge
   - Camera status indicators (online/offline)
   - Basic camera information
   - **P2**: Camera thumbnail/preview, advanced actions
 - **Substep 4.6.1.2**: Basic camera configuration
+  - **Status**: ⬜ TODO
   - **P0**: Camera naming and labeling
   - **P2**: Detection zones, schedules, advanced settings
+- **Substep 4.6.1.3**: Unit tests for camera management UI
+  - **Status**: ⬜ TODO
+  - **P0**: Test camera list page (display, status indicators)
+  - **P0**: Test camera configuration (naming, labeling)
+  - **P2**: Test advanced camera settings (if implemented)
 
 ### Epic 4.7: Subscription & Billing UI
 
@@ -965,9 +1343,11 @@ Key simplifications:
 
 #### Step 4.7.1: Basic Plan Display (PoC)
 - **Substep 4.7.1.1**: Simple plan indicator
+  - **Status**: ⬜ TODO
   - **P0**: Display "Free Plan" or plan name (hard-coded for PoC)
   - **P2**: Full subscription management UI, plan comparison, upgrade/downgrade
 - **Substep 4.7.1.2**: Billing UI
+  - **Status**: ⬜ TODO
   - **P2**: Payment method management, billing history, Stripe integration
 
 ### Epic 4.8: Onboarding & ISO Download
@@ -976,15 +1356,21 @@ Key simplifications:
 
 #### Step 4.8.1: Onboarding Flow
 - **Substep 4.8.1.1**: Onboarding wizard
+  - **Status**: ⬜ TODO
   - Welcome screen
   - Plan selection
   - ISO download instructions
   - Setup guide
 - **Substep 4.8.1.2**: ISO download page
+  - **Status**: ⬜ TODO
   - ISO download button
   - Download instructions
   - Installation guide
   - Troubleshooting tips
+- **Substep 4.8.1.3**: Unit tests for onboarding and ISO download
+  - **Status**: ⬜ TODO
+  - **P1**: Test onboarding flow components
+  - **P1**: Test ISO download page
 
 ---
 
@@ -1005,24 +1391,34 @@ Key simplifications:
 
 #### Step 5.1.1: Basic ISO Setup
 - **Substep 5.1.1.1**: Generic ISO preparation
+  - **Status**: ⬜ TODO
   - **P0**: Single generic Ubuntu 24.04 LTS Server ISO
   - Manual configuration or simple bootstrap script
   - Basic auto-install configuration
   - **P2**: Full Packer automation with tenant-specific generation
 - **Substep 5.1.1.2**: Software pre-installation (basic)
+  - **Status**: ⬜ TODO
   - **P0**: Manual installation of Edge Appliance software
   - Or simple installation script
   - **P2**: Automated packaging and pre-installation
 
 #### Step 5.1.2: Basic Configuration
 - **Substep 5.1.2.1**: Bootstrap configuration (simple)
+  - **Status**: ⬜ TODO
   - **P0**: Manual bootstrap token generation
   - Manual KVM VM connection details configuration
   - Simple first-boot script
   - **P2**: Automated tenant-specific configuration injection
 - **Substep 5.1.2.2**: Build automation (basic)
+  - **Status**: ⬜ TODO
   - **P0**: Simple build script on developer machine
   - **P2**: Full CI/CD pipeline with Packer
+- **Substep 5.1.2.3**: Unit tests for ISO build pipeline
+  - **Status**: ⬜ TODO
+  - **P1**: Test ISO preparation scripts
+  - **P1**: Test bootstrap configuration generation
+  - **P1**: Test build automation scripts
+  - **P2**: Test Packer automation (if implemented)
 
 ### Epic 5.2: Deployment Automation (Basic)
 
@@ -1030,24 +1426,33 @@ Key simplifications:
 
 #### Step 5.2.1: Basic Deployment
 - **Substep 5.2.1.1**: Manual deployment (PoC)
+  - **Status**: ⬜ TODO
   - **P0**: Manual KVM VM setup (1-2 VMs)
   - Manual agent installation and configuration
   - Manual SaaS deployment (Docker Compose or simple K8s)
   - **P2**: Full Terraform automation
 - **Substep 5.2.1.2**: Basic automation scripts
+  - **Status**: ⬜ TODO
   - **P1**: Simple deployment scripts
   - Basic configuration management
   - **P2**: Full Infrastructure as Code
 
 #### Step 5.2.2: SaaS Deployment (Basic)
 - **Substep 5.2.2.1**: Simple deployment
+  - **Status**: ⬜ TODO
   - **P0**: Docker Compose for local PoC or simple K8s deployment
   - Basic service configuration
   - **P2**: Full EKS setup with advanced configuration
 - **Substep 5.2.2.2**: Database setup
+  - **Status**: ⬜ TODO
   - **P0**: Manual PostgreSQL setup or managed database
   - Basic migration execution
   - **P2**: Automated database deployment and backups
+- **Substep 5.2.2.3**: Unit tests for deployment automation
+  - **Status**: ⬜ TODO
+  - **P1**: Test deployment scripts
+  - **P1**: Test configuration management
+  - **P2**: Test Infrastructure as Code (if implemented)
 
 ### Epic 5.3: Update & Maintenance Automation
 
@@ -1055,6 +1460,7 @@ Key simplifications:
 
 #### Step 5.3.1: Update Mechanisms
 - **Substep 5.3.1.1**: Manual updates for PoC
+  - **Status**: ⬜ TODO
   - **P0**: Manual update process for PoC
   - **P2**: Automated update delivery, signed packages, rollback mechanisms
 
@@ -1073,25 +1479,30 @@ Key simplifications:
 
 #### Step 6.1.1: Complete Data Flow Integration
 - **Substep 6.1.1.1**: Event flow end-to-end
+  - **Status**: ⬜ TODO
   - Camera → Edge → KVM VM → SaaS → UI
   - Verify data integrity at each step
   - Test error handling and recovery
 - **Substep 6.1.1.2**: Stream flow end-to-end
+  - **Status**: ⬜ TODO
   - UI request → SaaS → KVM VM → Edge → Stream → UI
   - **P0**: Test HTTP clip streaming (progressive download)
   - **P0**: Test stream interruptions and basic error handling
   - **P1/P2**: Test WebRTC stream quality (if WebRTC implemented)
 - **Substep 6.1.1.3**: Telemetry flow end-to-end
+  - **Status**: ⬜ TODO
   - Edge → KVM VM → SaaS → Dashboard
   - Verify telemetry accuracy
   - Test aggregation and reporting
 
 #### Step 6.1.2: Multi-Tenant Isolation Testing
 - **Substep 6.1.2.1**: Tenant isolation verification
+  - **Status**: ⬜ TODO
   - Create multiple test tenants
   - Verify data isolation in SaaS
   - Test cross-tenant access prevention
 - **Substep 6.1.2.2**: KVM VM isolation
+  - **Status**: ⬜ TODO
   - Verify WireGuard tunnel isolation
   - Test VM resource isolation
   - Verify network isolation
@@ -1099,11 +1510,13 @@ Key simplifications:
 
 #### Step 6.1.3: Archive Integration (Basic)
 - **Substep 6.1.3.1**: Archive flow end-to-end (P0: S3 stub)
+  - **Status**: ⬜ TODO
   - **P0**: Edge encryption → KVM VM → S3 stub → fake CID storage
   - **P0**: Verify encryption throughout
   - **P0**: Test basic quota enforcement
   - **P2**: Full Filecoin integration with real CIDs
 - **Substep 6.1.3.2**: Archive retrieval flow
+  - **Status**: ⬜ TODO
   - **P0**: UI request → SaaS → fake CID → S3 stub (basic verification)
   - **P2**: Browser-based decryption using Filecoin blob (full implementation)
 
@@ -1111,39 +1524,48 @@ Key simplifications:
 
 **Priority: P0** (Focus on critical paths for PoC)
 
-#### Step 6.2.1: Critical Path Unit Tests
-- **Substep 6.2.1.1**: Essential unit tests
-  - **P0**: Edge event generation & queueing
-  - **P0**: Edge↔KVM VM gRPC contracts
-  - **P0**: KVM VM↔SaaS event/telemetry contracts
-  - **P0**: Basic auth flows
-  - **P2**: Full test coverage > 70%
-- **Substep 6.2.1.2**: Python AI service tests
-  - **P0**: Model loading and basic inference
+#### Step 6.2.1: Critical Path Unit Tests (Regression Suite)
+- **Substep 6.2.1.1**: Essential unit tests (regression verification)
+  - **Status**: ⬜ TODO
+  - **P0**: Verify all unit tests from previous phases pass (regression check)
+  - **P0**: Edge event generation & queueing (comprehensive coverage)
+  - **P0**: Edge↔KVM VM gRPC contracts (contract testing)
+  - **P0**: KVM VM↔SaaS event/telemetry contracts (contract testing)
+  - **P0**: Basic auth flows (security-critical paths)
+  - **P2**: Full test coverage > 70% (comprehensive coverage audit)
+- **Substep 6.2.1.2**: Python AI service tests (regression verification)
+  - **Status**: ⬜ TODO
+  - **P0**: Verify all Python unit tests pass (regression check)
+  - **P0**: Model loading and basic inference (comprehensive coverage)
   - **P2**: Comprehensive edge case testing
 
 #### Step 6.2.2: Integration Testing (Essential)
 - **Substep 6.2.2.1**: Critical integration tests
+  - **Status**: ⬜ TODO
   - **P0**: Edge ↔ KVM VM event flow
   - **P0**: KVM VM ↔ SaaS event forwarding
   - **P0**: Full stack event flow
   - **P2**: Comprehensive integration test suite
 - **Substep 6.2.2.2**: Database tests (basic)
+  - **Status**: ⬜ TODO
   - **P0**: Data persistence verification
   - **P2**: Transaction and performance tests
 
 #### Step 6.2.3: End-to-End Testing (Key Scenarios)
 - **Substep 6.2.3.1**: Critical E2E scenarios
+  - **Status**: ⬜ TODO
   - **P0**: Event detection and display in UI
   - **P0**: Clip viewing flow
   - **P1**: Basic archive flow (if Filecoin implemented)
   - **P2**: Full E2E test automation with Playwright/Cypress
 - **Substep 6.2.3.2**: Manual testing
+  - **Status**: ⬜ TODO
   - **P0**: Manual test scenarios for PoC demo
   - **P2**: Automated E2E test suite
 
 #### Step 6.2.4: Performance Testing (Basic)
 - **Substep 6.2.4.1**: Basic performance verification
+  - **Status**: ⬜ TODO
   - **P0**: Single camera, single user performance
   - **P1**: Basic load testing (2-3 concurrent users)
   - **P2**: Comprehensive load and performance testing
@@ -1155,15 +1577,18 @@ Key simplifications:
 
 #### Step 6.3.1: Error Handling Implementation
 - **Substep 6.3.1.1**: Error handling patterns
+  - **Status**: ⬜ TODO
   - **P0**: Standardized error types
   - **P0**: Error propagation
   - **P0**: Error logging
   - **P0**: Basic user-friendly error messages
 - **Substep 6.3.1.2**: Retry mechanisms
+  - **Status**: ⬜ TODO
   - **P0**: Network operation retries with exponential backoff
   - **P0**: Database operation retries
   - **P1**: Circuit breakers
 - **Substep 6.3.1.3**: Resilience testing
+  - **Status**: ⬜ TODO
   - Network failure scenarios
   - Service crash scenarios
   - Database failure scenarios
@@ -1175,27 +1600,33 @@ Key simplifications:
 
 #### Step 6.4.1: Basic Security Review
 - **Substep 6.4.1.1**: Essential security checks
+  - **Status**: ⬜ TODO
   - **P0**: Dependency vulnerability scanning
   - **P0**: Basic security best practices review
   - **P2**: Full static analysis (CodeQL, SonarQube)
 - **Substep 6.4.1.2**: Basic security testing
+  - **Status**: ⬜ TODO
   - **P0**: API authentication/authorization testing
   - **P0**: Input validation testing
   - **P2**: Full penetration testing
 - **Substep 6.4.1.3**: Security fixes
+  - **Status**: ⬜ TODO
   - **P0**: Address critical vulnerabilities
   - **P2**: Comprehensive security hardening
 
 #### Step 6.4.2: Essential Security Enhancements
 - **Substep 6.4.2.1**: Input validation
+  - **Status**: ⬜ TODO
   - **P0**: Sanitize all user inputs
   - **P0**: Validate API parameters
   - **P0**: SQL injection prevention
   - **P1**: XSS prevention
 - **Substep 6.4.2.2**: Basic rate limiting
+  - **Status**: ⬜ TODO
   - **P1**: Basic API rate limiting
   - **P2**: Advanced rate limiting and DDoS protection
 - **Substep 6.4.2.3**: Security headers
+  - **Status**: ⬜ TODO
   - **P0**: HTTPS enforcement
   - **P1**: Basic security headers
   - **P2**: Comprehensive security headers (CSP, HSTS, etc.)
@@ -1206,18 +1637,22 @@ Key simplifications:
 
 #### Step 6.5.1: Essential Backend Optimization
 - **Substep 6.5.1.1**: Basic database optimization
+  - **Status**: ⬜ TODO
   - **P0**: Essential index creation
   - **P1**: Query optimization for critical paths
   - **P2**: Advanced optimization and caching
 - **Substep 6.5.1.2**: Service optimization (basic)
+  - **Status**: ⬜ TODO
   - **P1**: Profile and fix obvious performance issues
   - **P2**: Comprehensive optimization
 
 #### Step 6.5.2: Basic Frontend Optimization
 - **Substep 6.5.2.1**: Essential bundle optimization
+  - **Status**: ⬜ TODO
   - **P1**: Basic code splitting
   - **P2**: Advanced optimization (tree shaking, lazy loading)
 - **Substep 6.5.2.2**: Performance optimization (basic)
+  - **Status**: ⬜ TODO
   - **P1**: Fix obvious React performance issues
   - **P2**: Comprehensive optimization
 
@@ -1227,25 +1662,31 @@ Key simplifications:
 
 #### Step 6.6.1: Basic Metrics Implementation
 - **Substep 6.6.1.1**: Essential metrics
+  - **Status**: ⬜ TODO
   - **P0**: Basic service health metrics
   - **P1**: Prometheus setup with basic metrics
   - **P2**: Comprehensive metrics (business, system)
 - **Substep 6.6.1.2**: Basic dashboards
+  - **Status**: ⬜ TODO
   - **P1**: Simple Grafana dashboard for health
   - **P2**: Comprehensive dashboards
 - **Substep 6.6.1.3**: Basic alerting
+  - **Status**: ⬜ TODO
   - **P1**: Essential alerts (service down, critical errors)
   - **P2**: Comprehensive alerting setup
 
 #### Step 6.6.2: Basic Logging Implementation
 - **Substep 6.6.2.1**: Structured logging
+  - **Status**: ⬜ TODO
   - **P0**: JSON log format
   - **P0**: Basic log levels
   - **P2**: Advanced contextual logging
 - **Substep 6.6.2.2**: Log aggregation (basic)
+  - **Status**: ⬜ TODO
   - **P1**: Basic log collection (Loki or simple file aggregation)
   - **P2**: Full log aggregation and analysis
 - **Substep 6.6.2.3**: Privacy-aware logging
+  - **Status**: ⬜ TODO
   - **P0**: Ensure no PII in logs (critical for PoC)
   - **P0**: Basic log sanitization
   - **P2**: Comprehensive sensitive data filtering
@@ -1256,24 +1697,29 @@ Key simplifications:
 
 #### Step 6.7.1: Technical Documentation
 - **Substep 6.7.1.1**: API documentation
+  - **Status**: ⬜ TODO
   - OpenAPI/Swagger specs
   - API endpoint documentation
   - Request/response examples
 - **Substep 6.7.1.2**: Code documentation
+  - **Status**: ⬜ TODO
   - GoDoc comments
   - Python docstrings
   - Architecture decision records (ADRs)
 - **Substep 6.7.1.3**: Deployment documentation
+  - **Status**: ⬜ TODO
   - Infrastructure setup guide
   - Service deployment procedures
   - Configuration reference
 
 #### Step 6.7.2: User Documentation
 - **Substep 6.7.2.1**: User guide
+  - **Status**: ⬜ TODO
   - Getting started guide
   - Feature documentation
   - Troubleshooting guide
 - **Substep 6.7.2.2**: Developer guide
+  - **Status**: ⬜ TODO
   - Development environment setup
   - Contribution guidelines
   - Testing guidelines
@@ -1284,20 +1730,24 @@ Key simplifications:
 
 #### Step 6.8.1: Demo Environment Setup
 - **Substep 6.8.1.1**: Clean demo environment
+  - **Status**: ⬜ TODO
   - Fresh deployment
   - Sample data setup
   - Test cameras configuration
 - **Substep 6.8.1.2**: Demo script preparation
+  - **Status**: ⬜ TODO
   - Demo flow outline
   - Key features to showcase
   - Backup scenarios
 
 #### Step 6.8.2: Demo Materials
 - **Substep 6.8.2.1**: Presentation materials
+  - **Status**: ⬜ TODO
   - Architecture overview slides
   - Key features slides
   - Demo video recording
 - **Substep 6.8.2.2**: Demo data
+  - **Status**: ⬜ TODO
   - Sample events
   - Sample clips
   - Test scenarios
