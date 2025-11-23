@@ -128,6 +128,19 @@ func applyEnvOverrides(cfg *Config) {
 			cfg.Edge.AI.ConfidenceThreshold = threshold
 		}
 	}
+	if val := os.Getenv("EDGE_AI_INFERENCE_INTERVAL"); val != "" {
+		if interval, err := time.ParseDuration(val); err == nil {
+			cfg.Edge.AI.InferenceInterval = interval
+		}
+	}
+	if val := os.Getenv("EDGE_AI_ENABLED_CLASSES"); val != "" {
+		// Parse comma-separated class names
+		classes := strings.Split(val, ",")
+		for i := range classes {
+			classes[i] = strings.TrimSpace(classes[i])
+		}
+		cfg.Edge.AI.EnabledClasses = classes
+	}
 
 	// Storage settings
 	if val := os.Getenv("EDGE_STORAGE_CLIPS_DIR"); val != "" {

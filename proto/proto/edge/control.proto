@@ -1,0 +1,52 @@
+syntax = "proto3";
+
+package edge.control;
+
+option go_package = "github.com/vzahanych/view-guard-meta/proto/go/generated/edge";
+
+// ControlService handles control commands from KVM VM to Edge
+service ControlService {
+  // GetConfig retrieves current Edge configuration
+  rpc GetConfig(GetConfigRequest) returns (GetConfigResponse);
+  
+  // UpdateConfig updates Edge configuration
+  rpc UpdateConfig(UpdateConfigRequest) returns (UpdateConfigResponse);
+  
+  // RestartService restarts a specific service
+  rpc RestartService(RestartServiceRequest) returns (RestartServiceResponse);
+}
+
+// GetConfigRequest requests current configuration
+message GetConfigRequest {
+  // Empty for now, can be extended with filter options
+}
+
+// GetConfigResponse contains current configuration
+message GetConfigResponse {
+  bool success = 1;
+  string config_json = 2; // JSON-encoded configuration
+  string error_message = 3;
+}
+
+// UpdateConfigRequest contains configuration updates
+message UpdateConfigRequest {
+  string config_json = 1; // JSON-encoded configuration updates
+}
+
+// UpdateConfigResponse contains update result
+message UpdateConfigResponse {
+  bool success = 1;
+  string error_message = 2;
+}
+
+// RestartServiceRequest requests service restart
+message RestartServiceRequest {
+  string service_name = 1; // Service name to restart
+}
+
+// RestartServiceResponse contains restart result
+message RestartServiceResponse {
+  bool success = 1;
+  string error_message = 2;
+}
+

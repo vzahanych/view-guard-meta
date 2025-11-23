@@ -72,6 +72,7 @@ type AIConfig struct {
 	ServiceURL          string        `yaml:"service_url"`
 	InferenceInterval  time.Duration `yaml:"inference_interval"`
 	ConfidenceThreshold float64      `yaml:"confidence_threshold"`
+	EnabledClasses     []string      `yaml:"enabled_classes"` // Optional: filter by class names
 }
 
 // EventsConfig contains event management configuration

@@ -2,194 +2,190 @@ package camera
 
 import (
 	"context"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/logger"
+	svc "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/service"
 )
 
-// TestONVIFDiscoveryHomeNetwork is a manual test to verify ONVIF discovery on home network
-// Run with: go test -v -run TestONVIFDiscoveryHomeNetwork -timeout 30s
-func TestONVIFDiscoveryHomeNetwork(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping network test in short mode")
+func TestNewONVIFDiscoveryService(t *testing.T) {
+	log, _ := logger.New(logger.LogConfig{Level: "info", Format: "text"})
+
+	service := NewONVIFDiscoveryService(30*time.Second, log)
+	if service == nil {
+		t.Fatal("NewONVIFDiscoveryService returned nil")
 	}
 
-	// Check if we should run this test (set ONVIF_TEST_NETWORK=1 to enable)
-	if os.Getenv("ONVIF_TEST_NETWORK") == "" {
-		t.Skip("Set ONVIF_TEST_NETWORK=1 to run network discovery test")
+	if service.discoveryInterval != 30*time.Second {
+		t.Errorf("Expected discovery interval 30s, got %v", service.discoveryInterval)
+	}
+}
+
+func TestONVIFDiscoveryService_StartStop(t *testing.T) {
+	log, _ := logger.New(logger.LogConfig{Level: "info", Format: "text"})
+
+	service := NewONVIFDiscoveryService(30*time.Second, log)
+
+	ctx := context.Background()
+
+	err := service.Start(ctx)
+	if err != nil {
+		t.Fatalf("Start failed: %v", err)
 	}
 
-	// Create logger
-	log, err := logger.New(logger.LogConfig{
-		Level:  "debug",
-		Format: "text",
+	// Give it a moment
+	time.Sleep(50 * time.Millisecond)
+
+	// Verify running
+	status := service.GetStatus().GetStatus()
+	expectedRunning := svc.StatusRunning
+	if status != expectedRunning {
+		t.Errorf("Expected status %s, got %s", expectedRunning, status)
+	}
+
+	err = service.Stop(ctx)
+	if err != nil {
+		t.Fatalf("Stop failed: %v", err)
+	}
+
+	// Verify stopped
+	status = service.GetStatus().GetStatus()
+	expectedStopped := svc.StatusStopped
+	if status != expectedStopped {
+		t.Errorf("Expected status %s, got %s", expectedStopped, status)
+	}
+}
+
+func TestONVIFDiscoveryService_GetCameraByID(t *testing.T) {
+	log, _ := logger.New(logger.LogConfig{Level: "info", Format: "text"})
+
+	service := NewONVIFDiscoveryService(30*time.Second, log)
+
+	// Initially no cameras
+	camera := service.GetCameraByID("test-id")
+	if camera != nil {
+		t.Error("GetCameraByID should return nil for nonexistent camera")
+	}
+
+	// Add a discovered camera
+	discovered := &DiscoveredCamera{
+		ID:            "test-id",
+		Manufacturer:  "Test",
+		Model:         "Model",
+		IPAddress:     "192.168.1.100",
+		ONVIFEndpoint: "http://192.168.1.100/onvif",
+		RTSPURLs:      []string{"rtsp://192.168.1.100/stream"},
+		Capabilities:  CameraCapabilities{HasVideoStreams: true},
+		LastSeen:      time.Now(),
+		DiscoveredAt:  time.Now(),
+	}
+
+	service.mu.Lock()
+	service.discoveredCameras["test-id"] = discovered
+	service.mu.Unlock()
+
+	// Retrieve camera
+	retrieved := service.GetCameraByID("test-id")
+	if retrieved == nil {
+		t.Fatal("GetCameraByID should return camera")
+	}
+
+	if retrieved.ID != "test-id" {
+		t.Errorf("Expected ID 'test-id', got '%s'", retrieved.ID)
+	}
+
+	if retrieved.Manufacturer != "Test" {
+		t.Errorf("Expected manufacturer 'Test', got '%s'", retrieved.Manufacturer)
+	}
+}
+
+func TestONVIFDiscoveryService_ListDiscoveredCameras(t *testing.T) {
+	log, _ := logger.New(logger.LogConfig{Level: "info", Format: "text"})
+
+	service := NewONVIFDiscoveryService(30*time.Second, log)
+
+	// Add multiple cameras
+	cameras := []*DiscoveredCamera{
+		{
+			ID:           "cam-1",
+			Manufacturer: "Manufacturer 1",
+			Model:        "Model 1",
+			IPAddress:    "192.168.1.100",
+			RTSPURLs:     []string{"rtsp://192.168.1.100/stream"},
+			Capabilities: CameraCapabilities{HasVideoStreams: true},
+			LastSeen:     time.Now(),
+			DiscoveredAt: time.Now(),
+		},
+		{
+			ID:           "cam-2",
+			Manufacturer: "Manufacturer 2",
+			Model:        "Model 2",
+			IPAddress:    "192.168.1.101",
+			RTSPURLs:     []string{"rtsp://192.168.1.101/stream"},
+			Capabilities: CameraCapabilities{HasVideoStreams: true},
+			LastSeen:     time.Now(),
+			DiscoveredAt: time.Now(),
+		},
+	}
+
+	service.mu.Lock()
+	for _, cam := range cameras {
+		service.discoveredCameras[cam.ID] = cam
+	}
+	service.mu.Unlock()
+
+	// List cameras
+	list := service.GetDiscoveredCameras()
+	if len(list) != 2 {
+		t.Errorf("Expected 2 cameras, got %d", len(list))
+	}
+}
+
+func TestONVIFDiscoveryService_EventPublishing(t *testing.T) {
+	log, _ := logger.New(logger.LogConfig{Level: "info", Format: "text"})
+	eventBus := svc.NewEventBus(100)
+
+	service := NewONVIFDiscoveryService(30*time.Second, log)
+	service.SetEventBus(eventBus)
+
+	// Subscribe to discovery events
+	eventType := svc.EventTypeCameraDiscovered
+	ch := eventBus.Subscribe(eventType)
+
+	// Manually add a camera (simulating discovery)
+	discovered := &DiscoveredCamera{
+		ID:           "test-cam",
+		Manufacturer: "Test",
+		Model:        "Model",
+		IPAddress:    "192.168.1.100",
+		RTSPURLs:     []string{"rtsp://192.168.1.100/stream"},
+		Capabilities: CameraCapabilities{HasVideoStreams: true},
+		DiscoveredAt: time.Now(),
+	}
+
+	service.mu.Lock()
+	service.discoveredCameras[discovered.ID] = discovered
+	service.mu.Unlock()
+
+	// Publish event manually (normally done in discoverCameras)
+	service.PublishEvent(eventType, map[string]interface{}{
+		"camera_id":    discovered.ID,
+		"manufacturer": discovered.Manufacturer,
+		"model":        discovered.Model,
+		"ip_address":   discovered.IPAddress,
 	})
-	if err != nil {
-		t.Fatalf("Failed to create logger: %v", err)
-	}
-	defer log.Sync()
 
-	t.Log("Starting ONVIF discovery test on home network...")
-	t.Log("This test will scan your local network for ONVIF cameras")
-	t.Log("Make sure your development laptop and cameras are on the same WiFi network")
-
-	// Create discovery service with short interval for testing
-	discovery := NewONVIFDiscoveryService(1*time.Minute, log)
-
-	// Start discovery
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	err = discovery.Start(ctx)
-	if err != nil {
-		t.Fatalf("Failed to start discovery service: %v", err)
-	}
-
-	// Trigger immediate discovery
-	t.Log("Triggering immediate discovery scan...")
-	discovery.TriggerDiscovery()
-
-	// Wait a bit for discovery to complete
-	time.Sleep(5 * time.Second)
-
-	// Get discovered cameras
-	cameras := discovery.GetDiscoveredCameras()
-
-	t.Logf("\n=== Discovery Results ===")
-	t.Logf("Found %d camera(s) on network\n", len(cameras))
-
-	if len(cameras) == 0 {
-		t.Log("No cameras found. This could mean:")
-		t.Log("  - No ONVIF cameras on the network")
-		t.Log("  - Cameras are on a different subnet")
-		t.Log("  - Multicast is blocked by router/firewall")
-		t.Log("  - Cameras don't support WS-Discovery")
-		t.Log("\nTrying to trigger another discovery scan...")
-		
-		// Try one more time
-		discovery.TriggerDiscovery()
-		time.Sleep(5 * time.Second)
-		cameras = discovery.GetDiscoveredCameras()
-		t.Logf("After second scan: Found %d camera(s)", len(cameras))
-	}
-
-	// Print details of discovered cameras
-	for i, cam := range cameras {
-		t.Logf("\n--- Camera %d ---", i+1)
-		t.Logf("ID:              %s", cam.ID)
-		t.Logf("Manufacturer:    %s", cam.Manufacturer)
-		t.Logf("Model:           %s", cam.Model)
-		t.Logf("IP Address:      %s", cam.IPAddress)
-		t.Logf("ONVIF Endpoint:  %s", cam.ONVIFEndpoint)
-		t.Logf("Last Seen:       %s", cam.LastSeen.Format(time.RFC3339))
-		t.Logf("Discovered At:   %s", cam.DiscoveredAt.Format(time.RFC3339))
-		t.Logf("RTSP URLs:")
-		if len(cam.RTSPURLs) == 0 {
-			t.Logf("  (none detected)")
-		} else {
-			for _, url := range cam.RTSPURLs {
-				t.Logf("  - %s", url)
-			}
+	// Wait for event
+	select {
+	case event := <-ch:
+		if event.Type != eventType {
+			t.Errorf("Expected event type %s, got %s", eventType, event.Type)
 		}
-		t.Logf("Capabilities:")
-		t.Logf("  PTZ:           %v", cam.Capabilities.HasPTZ)
-		t.Logf("  Snapshot:      %v", cam.Capabilities.HasSnapshot)
-		t.Logf("  Video Streams: %v", cam.Capabilities.HasVideoStreams)
-	}
-
-	// Stop discovery
-	err = discovery.Stop(ctx)
-	if err != nil {
-		t.Logf("Warning: Error stopping discovery: %v", err)
-	}
-
-	// Test passes if we can at least run the discovery
-	// Finding cameras is optional (depends on network setup)
-	if len(cameras) > 0 {
-		t.Logf("\n✅ SUCCESS: Found %d camera(s) on your network!", len(cameras))
-	} else {
-		t.Logf("\n⚠️  No cameras found, but discovery service ran successfully")
-		t.Logf("   This is OK if you don't have ONVIF cameras on the network")
+		if event.Data["camera_id"] != "test-cam" {
+			t.Errorf("Expected camera_id 'test-cam', got %v", event.Data["camera_id"])
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatal("Event not received within timeout")
 	}
 }
-
-// TestONVIFDiscoveryNetworkInterface tests network interface detection
-func TestONVIFDiscoveryNetworkInterface(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping network test in short mode")
-	}
-
-	// Create logger
-	log, err := logger.New(logger.LogConfig{
-		Level:  "info",
-		Format: "text",
-	})
-	if err != nil {
-		t.Fatalf("Failed to create logger: %v", err)
-	}
-	defer log.Sync()
-
-	// Create discovery service
-	discovery := NewONVIFDiscoveryService(1*time.Minute, log)
-
-	// Test network interface detection
-	t.Log("Testing network interface detection...")
-	localAddr, err := discovery.findLocalNetworkInterface()
-	if err != nil {
-		t.Logf("⚠️  Could not detect local network interface: %v", err)
-		t.Log("   This is OK - discovery will use default interface")
-	} else {
-		t.Logf("✅ Found local network interface: %s", localAddr)
-	}
-}
-
-// TestONVIFDiscoveryWSDiscoveryProbe tests the WS-Discovery probe mechanism
-func TestONVIFDiscoveryWSDiscoveryProbe(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping network test in short mode")
-	}
-
-	if os.Getenv("ONVIF_TEST_NETWORK") == "" {
-		t.Skip("Set ONVIF_TEST_NETWORK=1 to run network discovery test")
-	}
-
-	// Create logger
-	log, err := logger.New(logger.LogConfig{
-		Level:  "debug",
-		Format: "text",
-	})
-	if err != nil {
-		t.Fatalf("Failed to create logger: %v", err)
-	}
-	defer log.Sync()
-
-	// Create discovery service
-	discovery := NewONVIFDiscoveryService(1*time.Minute, log)
-
-	t.Log("Testing WS-Discovery probe...")
-	t.Log("Sending multicast probe on local network...")
-
-	// Test WS-Discovery probe
-	devices, err := discovery.wsDiscoveryProbe()
-	if err != nil {
-		t.Fatalf("WS-Discovery probe failed: %v", err)
-	}
-
-	t.Logf("WS-Discovery probe completed: found %d device endpoint(s)", len(devices))
-	for i, device := range devices {
-		t.Logf("  Device %d: %s", i+1, device)
-	}
-
-	if len(devices) == 0 {
-		t.Log("\n⚠️  No devices responded to WS-Discovery probe")
-		t.Log("   This could mean:")
-		t.Log("   - No ONVIF devices on the network")
-		t.Log("   - Devices are on a different subnet")
-		t.Log("   - Multicast is blocked")
-	} else {
-		t.Logf("\n✅ SUCCESS: WS-Discovery probe found %d device(s)", len(devices))
-	}
-}
-

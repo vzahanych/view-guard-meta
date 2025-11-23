@@ -1,0 +1,56 @@
+syntax = "proto3";
+
+package edge.streaming;
+
+option go_package = "github.com/vzahanych/view-guard-meta/proto/go/generated/edge";
+
+// StreamingService handles on-demand clip streaming from Edge to KVM VM
+service StreamingService {
+  // StreamClip streams a video clip on-demand (client-side streaming: Edge streams to KVM VM)
+  rpc StreamClip(stream StreamClipChunk) returns (StreamClipResponse);
+  
+  // GetClipInfo retrieves information about a clip without streaming
+  rpc GetClipInfo(GetClipInfoRequest) returns (GetClipInfoResponse);
+}
+
+// StreamClipResponse contains the result of streaming a clip
+message StreamClipResponse {
+  bool success = 1;
+  uint64 total_bytes = 2; // Total bytes received
+  string error_message = 3; // Error message if streaming failed
+}
+
+// StreamClipChunk contains a chunk of video data or metadata
+message StreamClipChunk {
+  oneof payload {
+    StreamClipHeader header = 1; // First chunk: header with metadata
+    bytes data = 2; // Subsequent chunks: video data
+  }
+  int64 offset = 3; // Byte offset in the clip
+  bool eof = 4; // End of file flag
+  string error_message = 5; // Error message if streaming failed
+}
+
+// StreamClipHeader contains metadata for the clip stream
+message StreamClipHeader {
+  string event_id = 1; // Event ID associated with the clip
+  string clip_path = 2; // Local path to clip on Edge
+  int64 start_offset = 3; // Start offset in bytes (for resuming)
+  uint64 total_size = 4; // Total size of the clip in bytes
+}
+
+// GetClipInfoRequest requests clip information
+message GetClipInfoRequest {
+  string event_id = 1; // Event ID associated with the clip
+  string clip_path = 2; // Local path to clip on Edge
+}
+
+// GetClipInfoResponse contains clip information
+message GetClipInfoResponse {
+  bool success = 1;
+  uint64 size_bytes = 2; // Clip size in bytes
+  int64 duration_seconds = 3; // Clip duration in seconds
+  string format = 4; // Video format (e.g., "mp4", "h264")
+  string error_message = 5;
+}
+

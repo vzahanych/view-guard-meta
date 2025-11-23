@@ -1,0 +1,64 @@
+syntax = "proto3";
+
+package edge.events;
+
+option go_package = "github.com/vzahanych/view-guard-meta/proto/go/generated/edge";
+
+// EventService handles event transmission from Edge to KVM VM
+service EventService {
+  // SendEvents sends a batch of events to the KVM VM
+  rpc SendEvents(SendEventsRequest) returns (SendEventsResponse);
+  
+  // SendEvent sends a single event (convenience method)
+  rpc SendEvent(SendEventRequest) returns (SendEventResponse);
+}
+
+// SendEventsRequest contains a batch of events
+message SendEventsRequest {
+  repeated Event events = 1;
+}
+
+// SendEventsResponse contains acknowledgment for batch transmission
+message SendEventsResponse {
+  bool success = 1;
+  int32 received_count = 2;
+  repeated string event_ids = 3; // IDs of successfully received events
+  string error_message = 4; // Error message if success is false
+}
+
+// SendEventRequest contains a single event
+message SendEventRequest {
+  Event event = 1;
+}
+
+// SendEventResponse contains acknowledgment for single event
+message SendEventResponse {
+  bool success = 1;
+  string event_id = 2;
+  string error_message = 3; // Error message if success is false
+}
+
+// Event represents a detected event
+message Event {
+  string id = 1; // UUID
+  string camera_id = 2; // Camera that detected the event
+  string event_type = 3; // Event type (e.g., "person_detected", "vehicle_detected")
+  int64 timestamp = 4; // Unix timestamp in nanoseconds
+  double confidence = 5; // Detection confidence (0.0 to 1.0)
+  BoundingBox bounding_box = 6; // Bounding box of detected object (optional)
+  map<string, string> metadata = 7; // Additional event metadata (string values only for proto)
+  string clip_path = 8; // Path to associated video clip (local path on Edge)
+  string snapshot_path = 9; // Path to associated snapshot (local path on Edge)
+}
+
+// BoundingBox represents a bounding box for detected objects
+message BoundingBox {
+  double x1 = 1; // Top-left X coordinate
+  double y1 = 2; // Top-left Y coordinate
+  double x2 = 3; // Bottom-right X coordinate
+  double y2 = 4; // Bottom-right Y coordinate
+  double confidence = 5; // Detection confidence
+  int32 class_id = 6; // COCO class ID
+  string class_name = 7; // Class name (e.g., "person", "car")
+}
+

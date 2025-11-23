@@ -1,0 +1,80 @@
+syntax = "proto3";
+
+package edge.telemetry;
+
+option go_package = "github.com/vzahanych/view-guard-meta/proto/go/generated/edge";
+
+// TelemetryService handles telemetry transmission from Edge to KVM VM
+service TelemetryService {
+  // SendTelemetry sends telemetry data to the KVM VM
+  rpc SendTelemetry(SendTelemetryRequest) returns (SendTelemetryResponse);
+  
+  // Heartbeat sends a heartbeat to the KVM VM
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+}
+
+// SendTelemetryRequest contains telemetry data
+message SendTelemetryRequest {
+  TelemetryData telemetry = 1;
+}
+
+// SendTelemetryResponse contains acknowledgment
+message SendTelemetryResponse {
+  bool success = 1;
+  string error_message = 2;
+}
+
+// HeartbeatRequest contains heartbeat data
+message HeartbeatRequest {
+  int64 timestamp = 1; // Unix timestamp in nanoseconds
+  string edge_id = 2; // Edge appliance identifier
+}
+
+// HeartbeatResponse contains heartbeat acknowledgment
+message HeartbeatResponse {
+  bool success = 1;
+  int64 server_timestamp = 2; // Server timestamp for clock sync
+}
+
+// TelemetryData contains system and application metrics
+message TelemetryData {
+  int64 timestamp = 1; // Unix timestamp in nanoseconds
+  string edge_id = 2; // Edge appliance identifier
+  
+  // System metrics
+  SystemMetrics system = 3;
+  
+  // Application metrics
+  ApplicationMetrics application = 4;
+  
+  // Camera status
+  repeated CameraStatus cameras = 5;
+}
+
+// SystemMetrics contains system-level metrics
+message SystemMetrics {
+  double cpu_usage_percent = 1; // CPU usage percentage
+  uint64 memory_used_bytes = 2; // Memory used in bytes
+  uint64 memory_total_bytes = 3; // Total memory in bytes
+  uint64 disk_used_bytes = 4; // Disk used in bytes
+  uint64 disk_total_bytes = 5; // Total disk in bytes
+  double disk_usage_percent = 6; // Disk usage percentage
+}
+
+// ApplicationMetrics contains application-level metrics
+message ApplicationMetrics {
+  int32 event_queue_length = 1; // Number of events in queue
+  int32 active_cameras = 2; // Number of active cameras
+  double ai_inference_time_ms = 3; // Average AI inference time in milliseconds
+  int32 storage_clips_count = 4; // Number of stored clips
+  uint64 storage_clips_size_bytes = 5; // Total size of stored clips in bytes
+}
+
+// CameraStatus contains status information for a camera
+message CameraStatus {
+  string camera_id = 1;
+  bool online = 2; // Camera is online/connected
+  string last_seen = 3; // ISO 8601 timestamp of last activity
+  string status_message = 4; // Status message or error
+}
+
