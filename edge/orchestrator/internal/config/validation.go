@@ -46,6 +46,18 @@ func (c *Config) Validate() error {
 		errors = append(errors, "ai.service_url is required")
 	}
 
+	if c.Edge.AI.AnomalyThreshold < 0 {
+		errors = append(errors, fmt.Sprintf("ai.anomaly_threshold must be >= 0, got: %.2f", c.Edge.AI.AnomalyThreshold))
+	}
+
+	if c.Edge.AI.ClipDuration < 0 {
+		errors = append(errors, fmt.Sprintf("ai.clip_duration must be >= 0, got: %v", c.Edge.AI.ClipDuration))
+	}
+
+	if c.Edge.AI.PreEventDuration < 0 {
+		errors = append(errors, fmt.Sprintf("ai.pre_event_duration must be >= 0, got: %v", c.Edge.AI.PreEventDuration))
+	}
+
 	// Validate events settings
 	if c.Edge.Events.QueueSize <= 0 {
 		errors = append(errors, fmt.Sprintf("events.queue_size must be > 0, got: %d", c.Edge.Events.QueueSize))
@@ -109,10 +121,16 @@ func (c *Config) Validate() error {
 		errors = append(errors, fmt.Sprintf("events.transmission_interval must be > 0, got: %v", c.Edge.Events.TransmissionInterval))
 	}
 
+	// Normalize dataset export dir if relative
+	if c.Edge.AI.DatasetExportDir != "" {
+		if !filepath.IsAbs(c.Edge.AI.DatasetExportDir) && !strings.HasPrefix(c.Edge.AI.DatasetExportDir, "./") {
+			c.Edge.AI.DatasetExportDir = filepath.Join(c.Edge.Orchestrator.DataDir, c.Edge.AI.DatasetExportDir)
+		}
+	}
+
 	if len(errors) > 0 {
 		return fmt.Errorf("configuration validation failed:\n  - %s", strings.Join(errors, "\n  - "))
 	}
 
 	return nil
 }
-

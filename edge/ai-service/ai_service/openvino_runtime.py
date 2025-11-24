@@ -12,10 +12,15 @@ logger = logging.getLogger(__name__)
 # Try to import OpenVINO, handle gracefully if not available
 try:
     from openvino import Core, get_version
-    from openvino.runtime import Device
+    # Device is not needed for basic operations, skip if not available
+    try:
+        from openvino.runtime import Device
+    except ImportError:
+        Device = None  # Device enum not critical for basic operations
     OPENVINO_AVAILABLE = True
 except ImportError:
     OPENVINO_AVAILABLE = False
+    Device = None
     logger.warning("OpenVINO not available. Install with: pip install openvino")
 
 

@@ -115,10 +115,11 @@ class FramePreprocessor:
         normalized = rgb_frame.astype(np.float32) / 255.0
         
         # Convert to NCHW format (batch, channels, height, width)
-        nchw = np.transpose(normalized, (2, 0, 1))
+        # Use copy() to avoid numpy 2.x view issues
+        nchw = np.transpose(normalized.copy(), (2, 0, 1))
         
         # Add batch dimension
-        batch = np.expand_dims(nchw, axis=0)
+        batch = np.expand_dims(nchw.copy(), axis=0)
         
         return batch, scale, (pad_x, pad_y)
     
@@ -218,19 +219,20 @@ class PostProcessor:
         # Each detection: [x_center, y_center, width, height, conf_class_0, conf_class_1, ...]
         # We need to reshape if needed
         if len(output.shape) == 3:
-            # Remove batch dimension if present
-            detections = output[0] if output.shape[0] == 1 else output
+            # Remove batch dimension if present (use copy() for numpy 2.x compatibility)
+            detections = output[0].copy() if output.shape[0] == 1 else output.copy()
         else:
-            detections = output
+            detections = output.copy()
         
         boxes = []
         
         for detection in detections:
-            # Extract box coordinates (normalized)
-            x_center, y_center, width, height = detection[:4]
+            # Extract box coordinates (normalized) - use copy() for numpy 2.x compatibility
+            detection = np.asarray(detection)  # Ensure it's a numpy array
+            x_center, y_center, width, height = detection[:4].copy()
             
             # Extract class confidences (remaining values)
-            class_scores = detection[4:]
+            class_scores = detection[4:].copy()
             
             # Find class with highest confidence
             class_id = int(np.argmax(class_scores))
@@ -443,8 +445,9 @@ class InferenceEngine:
         result = compiled_model([preprocessed])
         
         # Get output (assuming single output)
+        # Convert to numpy array explicitly to avoid numpy 2.x view issues
         output_tensor = list(result.values())[0]
-        output = output_tensor.data
+        output = np.asarray(output_tensor.data).copy()
         
         # Post-process
         boxes = self.postprocessor.process_output(

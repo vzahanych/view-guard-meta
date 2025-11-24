@@ -28,6 +28,12 @@ edge:
     service_url: "http://localhost:8080"
     inference_interval: 1s
     confidence_threshold: 0.5
+    local_inference_enabled: true
+    baseline_label: "normal"
+    anomaly_threshold: 12
+    clip_duration: 10s
+    pre_event_duration: 2s
+    dataset_export_dir: ./data/exports
 
   events:
     queue_size: 100

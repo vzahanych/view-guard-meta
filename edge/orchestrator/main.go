@@ -6,15 +6,38 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
+	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/ai"
+	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/camera"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/config"
+	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/events"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/health"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/logger"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/service"
-	"path/filepath"
+	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/state"
+	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/storage"
+	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/telemetry"
+	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/video"
+	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/web"
+	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/web/screenshots"
+	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/wireguard"
 )
+
+// telemetryCollectorAdapter adapts telemetry.Collector to web.TelemetryCollector interface
+type telemetryCollectorAdapter struct {
+	collector *telemetry.Collector
+}
+
+func (a *telemetryCollectorAdapter) GetLastMetrics() interface{} {
+	return a.collector.GetLastMetrics()
+}
+
+func (a *telemetryCollectorAdapter) Collect(ctx context.Context) (interface{}, error) {
+	return a.collector.Collect(ctx)
+}
 
 var (
 	version   = "dev"
@@ -59,6 +82,172 @@ func main() {
 
 	// Create service manager
 	svcMgr := service.NewManager(log)
+
+	// Initialize state manager (required for cameras, events, storage)
+	stateMgr, err := state.NewManager(cfg, log)
+	if err != nil {
+		log.Error("Failed to create state manager", "error", err)
+		os.Exit(1)
+	}
+	defer stateMgr.Close()
+
+	// Initialize camera discovery services
+	var onvifDiscovery *camera.ONVIFDiscoveryService
+	var usbDiscovery *camera.USBDiscoveryService
+	if cfg.Edge.Cameras.Discovery.Enabled {
+		discoveryInterval := cfg.Edge.Cameras.Discovery.Interval
+		if discoveryInterval <= 0 {
+			log.Warn("Invalid discovery interval, using default", "interval", discoveryInterval)
+			discoveryInterval = 60 * time.Second
+		}
+
+		// Register USB camera discovery service
+		usbDiscovery = camera.NewUSBDiscoveryService(discoveryInterval, "/dev", log)
+		svcMgr.Register(usbDiscovery)
+		log.Info("USB camera discovery service registered", "interval", discoveryInterval)
+
+		// Register ONVIF camera discovery service (optional, for network cameras)
+		onvifDiscovery = camera.NewONVIFDiscoveryService(discoveryInterval, log)
+		svcMgr.Register(onvifDiscovery)
+		log.Info("ONVIF camera discovery service registered", "interval", discoveryInterval)
+	}
+
+	// Initialize camera manager
+	statusInterval := 30 * time.Second
+	if cfg.Edge.Cameras.RTSP.ReconnectInterval > 0 {
+		statusInterval = cfg.Edge.Cameras.RTSP.ReconnectInterval
+	}
+	cameraMgr := camera.NewManager(stateMgr, onvifDiscovery, usbDiscovery, statusInterval, log)
+	svcMgr.Register(cameraMgr)
+	log.Info("Camera manager registered")
+
+	// Create storage state manager adapter
+	storageStateMgr := storage.NewStorageStateManager(stateMgr.GetDB(), log)
+
+	// Initialize storage service
+	storageSvc, err := storage.NewStorageService(storage.StorageConfig{
+		ClipsDir:            cfg.Edge.Storage.ClipsDir,
+		SnapshotsDir:        cfg.Edge.Storage.SnapshotsDir,
+		RetentionDays:       cfg.Edge.Storage.RetentionDays,
+		MaxDiskUsagePercent: cfg.Edge.Storage.MaxDiskUsagePercent,
+		StateManager:        storageStateMgr,
+	}, log)
+	if err != nil {
+		log.Error("Failed to create storage service", "error", err)
+		os.Exit(1)
+	}
+	log.Info("Storage service initialized")
+
+	// Initialize event queue and storage
+	eventQueue := events.NewQueue(events.QueueConfig{
+		StateManager: stateMgr,
+		MaxSize:      cfg.Edge.Events.QueueSize,
+	}, log)
+	eventStorage := events.NewStorage(stateMgr, log)
+	log.Info("Event queue and storage initialized")
+
+	// Initialize WireGuard client
+	wgClient := wireguard.NewClient(&cfg.Edge.WireGuard, log)
+	if cfg.Edge.WireGuard.Enabled {
+		svcMgr.Register(wgClient)
+		log.Info("WireGuard client registered")
+	}
+
+	// Initialize telemetry collector
+	telemetryCollector := telemetry.NewCollector(
+		&cfg.Edge.Telemetry,
+		log,
+		cameraMgr,
+		eventQueue,
+		eventStorage,
+		storageSvc,
+		wgClient,
+	)
+	if cfg.Edge.Telemetry.Enabled {
+		svcMgr.Register(telemetryCollector)
+		log.Info("Telemetry collector registered")
+	}
+
+	// Initialize FFmpeg wrapper (for streaming)
+	var ffmpegWrapper *video.FFmpegWrapper
+	ffmpegWrapper, err = video.NewFFmpegWrapper(log)
+	if err != nil {
+		log.Warn("FFmpeg not available, streaming will be limited", "error", err)
+	} else {
+		log.Info("FFmpeg wrapper initialized")
+	}
+
+	// Initialize config service
+	configSvc, err := config.NewService(configPath, log)
+	if err != nil {
+		log.Warn("Failed to create config service, config API will be unavailable", "error", err)
+		configSvc = nil
+	} else {
+		log.Info("Config service initialized")
+	}
+
+	// Initialize screenshot service (for labeled training data)
+	screenshotSvc, err := screenshots.NewService(stateMgr, cfg, log)
+	if err != nil {
+		log.Warn("Failed to create screenshot service, screenshot API will be unavailable", "error", err)
+		screenshotSvc = nil
+	} else {
+		log.Info("Screenshot service initialized")
+	}
+
+	var localDetector *ai.LocalDetector
+	if cfg.Edge.AI.LocalInferenceEnabled {
+		localCfg := ai.LocalDetectorConfig{
+			Enabled:          cfg.Edge.AI.LocalInferenceEnabled,
+			Interval:         cfg.Edge.AI.InferenceInterval,
+			Threshold:        cfg.Edge.AI.AnomalyThreshold,
+			BaselineLabel:    cfg.Edge.AI.BaselineLabel,
+			ClipDuration:     cfg.Edge.AI.ClipDuration,
+			PreEventDuration: cfg.Edge.AI.PreEventDuration,
+		}
+		detector, err := ai.NewLocalDetector(
+			localCfg,
+			cameraMgr,
+			screenshotSvc,
+			storageSvc,
+			eventQueue,
+			eventStorage,
+			ffmpegWrapper,
+			log,
+		)
+		if err != nil {
+			log.Warn("Failed to initialize local anomaly detector", "error", err)
+		} else {
+			localDetector = detector
+			svcMgr.Register(localDetector)
+			log.Info("Local anomaly detector registered", "interval", localCfg.Interval, "threshold", localCfg.Threshold)
+		}
+	}
+
+	// Register web server if enabled
+	if cfg.Edge.Web.Enabled {
+		webServer := web.NewServer(&cfg.Edge.Web, log)
+		webServer.SetVersion(version)
+
+		// Inject dependencies
+		webServer.SetDependencies(cameraMgr, ffmpegWrapper)
+		webServer.SetEventDependencies(stateMgr, storageSvc)
+		webServer.SetEventQueueAndStorage(eventQueue, eventStorage)
+		if configSvc != nil {
+			webServer.SetConfigDependency(configSvc)
+		}
+		if telemetryCollector != nil {
+			// Create adapter for telemetry collector to match TelemetryCollector interface
+			telemetryAdapter := &telemetryCollectorAdapter{collector: telemetryCollector}
+			webServer.SetTelemetryDependency(telemetryAdapter)
+		}
+		if screenshotSvc != nil {
+			webServer.SetScreenshotService(screenshotSvc)
+		}
+
+		svcMgr.Register(webServer)
+		log.Info("Web server registered", "host", cfg.Edge.Web.Host, "port", cfg.Edge.Web.Port)
+	}
 
 	// Create health check manager
 	healthMgr := health.NewManager(log, svcMgr)
@@ -111,4 +300,3 @@ func main() {
 
 	log.Info("Shutdown complete")
 }
-

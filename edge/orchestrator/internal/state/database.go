@@ -132,6 +132,21 @@ func (d *Database) initSchema() error {
 		FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE SET NULL
 	);
 
+	-- Labeled screenshots table (for training data)
+	CREATE TABLE IF NOT EXISTS labeled_screenshots (
+		id TEXT PRIMARY KEY,
+		camera_id TEXT NOT NULL,
+		file_path TEXT NOT NULL,
+		label TEXT NOT NULL, -- 'normal', 'threat', 'abnormal', 'custom'
+		custom_label TEXT, -- For custom user-defined labels
+		description TEXT, -- User description/notes
+		metadata TEXT, -- JSON metadata (e.g., bounding boxes, confidence scores)
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		created_by TEXT, -- User/system identifier
+		FOREIGN KEY (camera_id) REFERENCES cameras(id) ON DELETE CASCADE
+	);
+
 	-- Indexes for performance
 	CREATE INDEX IF NOT EXISTS idx_events_camera_timestamp ON events(camera_id, timestamp);
 	CREATE INDEX IF NOT EXISTS idx_events_transmitted ON events(transmitted, timestamp);
@@ -139,6 +154,9 @@ func (d *Database) initSchema() error {
 	CREATE INDEX IF NOT EXISTS idx_telemetry_transmitted ON telemetry(transmitted, timestamp);
 	CREATE INDEX IF NOT EXISTS idx_storage_expires ON storage_state(expires_at);
 	CREATE INDEX IF NOT EXISTS idx_storage_camera ON storage_state(camera_id);
+	CREATE INDEX IF NOT EXISTS idx_labeled_screenshots_camera ON labeled_screenshots(camera_id);
+	CREATE INDEX IF NOT EXISTS idx_labeled_screenshots_label ON labeled_screenshots(label);
+	CREATE INDEX IF NOT EXISTS idx_labeled_screenshots_created ON labeled_screenshots(created_at);
 	`
 
 	if _, err := d.db.Exec(schema); err != nil {

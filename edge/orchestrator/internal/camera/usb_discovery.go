@@ -100,21 +100,48 @@ func (s *USBDiscoveryService) discoverCameras() {
 		return
 	}
 
+	// Group devices by USB device path to avoid duplicates
+	// Multiple /dev/video* nodes can belong to the same physical camera
+	usbDeviceMap := make(map[string][]string) // USB device path -> list of video device paths
+	
+	for _, device := range videoDevices {
+		usbDevicePath := s.getUSBDevicePath(device)
+		if usbDevicePath != "" {
+			usbDeviceMap[usbDevicePath] = append(usbDeviceMap[usbDevicePath], device)
+		} else {
+			// Fallback: if we can't determine USB device, use device path as key
+			usbDeviceMap[device] = []string{device}
+		}
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Process discovered devices
-	for _, device := range videoDevices {
-		camera, err := s.probeUSBDevice(device)
+	// Process each unique USB device (not each video device)
+	for usbDevicePath, videoDevices := range usbDeviceMap {
+		// Use the first (lowest numbered) video device as primary
+		primaryDevice := videoDevices[0]
+		for _, dev := range videoDevices {
+			if dev < primaryDevice {
+				primaryDevice = dev
+			}
+		}
+
+		camera, err := s.probeUSBDevice(primaryDevice, videoDevices)
 		if err != nil {
-			s.LogDebug("Failed to probe USB device", "device", device, "error", err)
+			s.LogDebug("Failed to probe USB device", "device", primaryDevice, "error", err)
 			continue
 		}
+
+		// Use USB device path as ID to ensure uniqueness
+		camera.ID = fmt.Sprintf("usb-%s", s.sanitizeID(usbDevicePath))
 
 		// Update or add camera
 		if existing, ok := s.discoveredCameras[camera.ID]; ok {
 			existing.LastSeen = time.Now()
 			existing.Capabilities = camera.Capabilities
+			existing.IPAddress = primaryDevice // Update to primary device
+			existing.RTSPURLs = videoDevices   // Update all device paths
 		} else {
 			camera.DiscoveredAt = time.Now()
 			s.discoveredCameras[camera.ID] = camera
@@ -123,7 +150,7 @@ func (s *USBDiscoveryService) discoverCameras() {
 			if s.GetEventBus() != nil {
 				s.PublishEvent(service.EventTypeCameraDiscovered, map[string]interface{}{
 					"camera_id":    camera.ID,
-					"device_path":  device,
+					"device_path":  primaryDevice,
 					"manufacturer": camera.Manufacturer,
 					"model":        camera.Model,
 				})
@@ -131,7 +158,8 @@ func (s *USBDiscoveryService) discoverCameras() {
 
 			s.LogInfo("Discovered new USB camera",
 				"id", camera.ID,
-				"device", device,
+				"device", primaryDevice,
+				"devices", videoDevices,
 				"manufacturer", camera.Manufacturer,
 				"model", camera.Model,
 			)
@@ -140,9 +168,17 @@ func (s *USBDiscoveryService) discoverCameras() {
 
 	// Remove cameras that are no longer present
 	for id, cam := range s.discoveredCameras {
-		if !s.isDevicePresent(cam.IPAddress) { // Reusing IPAddress field for device path
+		// Check if any of the device paths still exist
+		devicePresent := false
+		for _, devicePath := range cam.RTSPURLs {
+			if s.isDevicePresent(devicePath) {
+				devicePresent = true
+				break
+			}
+		}
+		if !devicePresent {
 			delete(s.discoveredCameras, id)
-			s.LogInfo("USB camera disconnected", "id", id, "device", cam.IPAddress)
+			s.LogInfo("USB camera disconnected", "id", id)
 		}
 	}
 
@@ -177,10 +213,10 @@ func (s *USBDiscoveryService) findVideoDevices() ([]string, error) {
 }
 
 // probeUSBDevice probes a USB device for camera information
-func (s *USBDiscoveryService) probeUSBDevice(devicePath string) (*DiscoveredCamera, error) {
+// devicePath is the primary device path, allDevicePaths includes all related device nodes
+func (s *USBDiscoveryService) probeUSBDevice(devicePath string, allDevicePaths []string) (*DiscoveredCamera, error) {
 	// Get device information using v4l2-ctl if available, or basic detection
 	camera := &DiscoveredCamera{
-		ID:            fmt.Sprintf("usb-%s", filepath.Base(devicePath)),
 		Manufacturer:  "Unknown",
 		Model:         "USB Camera",
 		IPAddress:     devicePath, // Reusing IPAddress field for device path
@@ -190,6 +226,7 @@ func (s *USBDiscoveryService) probeUSBDevice(devicePath string) (*DiscoveredCame
 			HasVideoStreams: true,
 			HasSnapshot:      true,
 		},
+		RTSPURLs: allDevicePaths, // Store all device paths for this camera
 	}
 
 	// Try to get device info using v4l2-ctl
@@ -204,10 +241,6 @@ func (s *USBDiscoveryService) probeUSBDevice(devicePath string) (*DiscoveredCame
 			camera.Model = sysfsInfo.Model
 		}
 	}
-
-	// USB cameras don't have RTSP URLs, but we can note the device path
-	// For FFmpeg, USB cameras are accessed via device path
-	camera.RTSPURLs = []string{devicePath}
 
 	return camera, nil
 }
@@ -322,6 +355,122 @@ func (s *USBDiscoveryService) getSysfsInfo(devicePath string) *sysfsDeviceInfo {
 func (s *USBDiscoveryService) isDevicePresent(devicePath string) bool {
 	_, err := os.Stat(devicePath)
 	return err == nil
+}
+
+// getUSBDevicePath gets the underlying USB device path for a video device
+// This helps identify when multiple /dev/video* nodes belong to the same physical camera
+// Returns the USB port path (e.g., /sys/devices/.../usb3/3-5) which uniquely identifies a physical USB device
+func (s *USBDiscoveryService) getUSBDevicePath(devicePath string) string {
+	deviceName := filepath.Base(devicePath)
+	sysfsDevicePath := fmt.Sprintf("/sys/class/video4linux/%s/device", deviceName)
+
+	// Read the symlink to get the actual device path
+	deviceLink, err := os.Readlink(sysfsDevicePath)
+	if err != nil {
+		return ""
+	}
+
+	// Resolve to absolute path using EvalSymlinks for proper resolution
+	absPath, err := filepath.EvalSymlinks(sysfsDevicePath)
+	if err != nil {
+		// Fallback to manual resolution
+		absPath, err = filepath.Abs(filepath.Join("/sys/class/video4linux", deviceName, deviceLink))
+		if err != nil {
+			return ""
+		}
+	}
+
+	// The path structure is: /sys/devices/pci.../usbX/Y-Z/Y-Z:1.0
+	// We want to get to the USB port: /sys/devices/pci.../usbX/Y-Z
+	// This uniquely identifies a physical USB device (all interfaces share the same port)
+	
+	// Split the path and look for USB port pattern
+	parts := strings.Split(absPath, "/")
+	for i, part := range parts {
+		// Look for USB bus (e.g., "usb3")
+		if strings.HasPrefix(part, "usb") && i+1 < len(parts) {
+			// Next part should be the USB port (e.g., "3-5")
+			port := parts[i+1]
+			// Check if it looks like a USB port (format: X-Y)
+			if strings.Contains(port, "-") && len(port) <= 10 {
+				// Reconstruct path up to and including the USB port
+				portPath := strings.Join(parts[:i+2], "/")
+				return portPath
+			}
+		}
+		// Also check if current part is a USB interface (e.g., "3-5:1.0")
+		// If so, go up one level to get the port
+		if strings.Contains(part, ":") && strings.Contains(part, "-") {
+			portPart := strings.Split(part, ":")[0]
+			if len(portPart) <= 10 {
+				// Reconstruct path up to the port (one level up from interface)
+				portPath := strings.Join(parts[:i], "/")
+				return portPath
+			}
+		}
+	}
+
+	// Fallback: use the resolved device path (without video4linux part)
+	// Remove /video4linux/videoN from the path to get the USB interface, then go up one level
+	if strings.Contains(absPath, "/video4linux/") {
+		parts := strings.Split(absPath, "/video4linux/")
+		if len(parts) > 0 {
+			// Go up one level from the interface to get the USB port
+			interfacePath := parts[0]
+			portPath := filepath.Dir(interfacePath)
+			return portPath
+		}
+	}
+
+	// Last fallback: use the device path itself if we can't find USB device
+	return devicePath
+}
+
+// normalizeUSBDevicePath normalizes a USB device path to ensure consistent grouping
+// Extracts the USB port identifier (e.g., "3-5" from "/sys/devices/.../usb3/3-5")
+func (s *USBDiscoveryService) normalizeUSBDevicePath(path string) string {
+	// Extract USB port identifier (e.g., "3-5" or "3-8")
+	// Pattern: .../usbX/Y-Z/... where Y-Z is the USB port
+	parts := strings.Split(path, "/")
+	for i, part := range parts {
+		if strings.HasPrefix(part, "usb") && i+1 < len(parts) {
+			// Found USB bus, next part should be the port
+			port := parts[i+1]
+			// Port format is usually "X-Y" (e.g., "3-5")
+			if strings.Contains(port, "-") {
+				return fmt.Sprintf("usb-%s", port)
+			}
+		}
+		// Also check if part itself is a USB port (X-Y format)
+		if strings.Contains(part, "-") && len(part) <= 10 {
+			// Could be a USB port identifier
+			return fmt.Sprintf("usb-%s", part)
+		}
+	}
+	
+	// Fallback: use a hash of the path
+	return fmt.Sprintf("usb-%x", len(path))
+}
+
+// sanitizeID sanitizes a path to create a valid camera ID
+func (s *USBDiscoveryService) sanitizeID(path string) string {
+	// First try to normalize as USB device path
+	if normalized := s.normalizeUSBDevicePath(path); normalized != "" && normalized != fmt.Sprintf("usb-%x", len(path)) {
+		return normalized
+	}
+	
+	// Replace slashes and special characters with hyphens
+	id := strings.ReplaceAll(path, "/", "-")
+	id = strings.ReplaceAll(id, "\\", "-")
+	id = strings.ReplaceAll(id, ":", "-")
+	id = strings.ReplaceAll(id, ".", "-")
+	// Remove leading/trailing hyphens
+	id = strings.Trim(id, "-")
+	// If empty, use a hash
+	if id == "" {
+		id = fmt.Sprintf("device-%x", len(path))
+	}
+	return id
 }
 
 // GetDiscoveredCameras returns all discovered USB cameras

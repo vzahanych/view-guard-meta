@@ -11,8 +11,8 @@ import (
 
 // Config represents the application configuration
 type Config struct {
-	Edge      EdgeConfig      `yaml:"edge"`
-	Log       LogConfig       `yaml:"log,omitempty"`
+	Edge EdgeConfig `yaml:"edge"`
+	Log  LogConfig  `yaml:"log,omitempty"`
 }
 
 // EdgeConfig contains Edge Appliance specific configuration
@@ -24,6 +24,8 @@ type EdgeConfig struct {
 	AI           AIConfig           `yaml:"ai"`
 	Events       EventsConfig       `yaml:"events"`
 	Telemetry    TelemetryConfig    `yaml:"telemetry"`
+	Encryption   EncryptionConfig   `yaml:"encryption"`
+	Web          WebConfig          `yaml:"web"`
 }
 
 // OrchestratorConfig contains orchestrator service configuration
@@ -55,7 +57,7 @@ type DiscoveryConfig struct {
 
 // RTSPConfig contains RTSP client configuration
 type RTSPConfig struct {
-	Timeout          time.Duration `yaml:"timeout"`
+	Timeout           time.Duration `yaml:"timeout"`
 	ReconnectInterval time.Duration `yaml:"reconnect_interval"`
 }
 
@@ -69,16 +71,23 @@ type StorageConfig struct {
 
 // AIConfig contains AI service configuration
 type AIConfig struct {
-	ServiceURL          string        `yaml:"service_url"`
-	InferenceInterval  time.Duration `yaml:"inference_interval"`
-	ConfidenceThreshold float64      `yaml:"confidence_threshold"`
-	EnabledClasses     []string      `yaml:"enabled_classes"` // Optional: filter by class names
+	ServiceURL            string        `yaml:"service_url"`
+	InferenceInterval     time.Duration `yaml:"inference_interval"`
+	ConfidenceThreshold   float64       `yaml:"confidence_threshold"`
+	EnabledClasses        []string      `yaml:"enabled_classes"` // Optional: filter by class names
+	LocalInferenceEnabled bool          `yaml:"local_inference_enabled"`
+	BaselineLabel         string        `yaml:"baseline_label"`
+	AnomalyThreshold      float64       `yaml:"anomaly_threshold"`
+	LocalModelPath        string        `yaml:"local_model_path"`
+	ClipDuration          time.Duration `yaml:"clip_duration"`
+	PreEventDuration      time.Duration `yaml:"pre_event_duration"`
+	DatasetExportDir      string        `yaml:"dataset_export_dir"`
 }
 
 // EventsConfig contains event management configuration
 type EventsConfig struct {
-	QueueSize           int           `yaml:"queue_size"`
-	BatchSize           int           `yaml:"batch_size"`
+	QueueSize            int           `yaml:"queue_size"`
+	BatchSize            int           `yaml:"batch_size"`
 	TransmissionInterval time.Duration `yaml:"transmission_interval"`
 }
 
@@ -86,6 +95,23 @@ type EventsConfig struct {
 type TelemetryConfig struct {
 	Interval time.Duration `yaml:"interval"`
 	Enabled  bool          `yaml:"enabled"`
+}
+
+// EncryptionConfig contains encryption service configuration
+type EncryptionConfig struct {
+	Enabled    bool   `yaml:"enabled"`
+	UserSecret string `yaml:"user_secret"` // User secret for key derivation (never logged)
+	Salt       string `yaml:"salt"`        // Salt for key derivation (hex encoded, optional - will be generated if not provided)
+	SaltPath   string `yaml:"salt_path"`   // Path to file where salt is stored
+}
+
+// WebConfig contains web server configuration
+type WebConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	Host    string `yaml:"host"`
+	Port    int    `yaml:"port"`
+	// TODO: Add authentication configuration (Step 1.9.1)
+	// AuthToken string `yaml:"auth_token"` // Simple token-based auth for PoC
 }
 
 // LogConfig contains logging configuration
@@ -190,6 +216,21 @@ func (c *Config) setDefaults() {
 	if c.Edge.AI.ConfidenceThreshold == 0 {
 		c.Edge.AI.ConfidenceThreshold = 0.5
 	}
+	if c.Edge.AI.BaselineLabel == "" {
+		c.Edge.AI.BaselineLabel = "normal"
+	}
+	if c.Edge.AI.AnomalyThreshold == 0 {
+		c.Edge.AI.AnomalyThreshold = 12.0
+	}
+	if c.Edge.AI.ClipDuration == 0 {
+		c.Edge.AI.ClipDuration = 10 * time.Second
+	}
+	if c.Edge.AI.PreEventDuration == 0 {
+		c.Edge.AI.PreEventDuration = 2 * time.Second
+	}
+	if c.Edge.AI.DatasetExportDir == "" {
+		c.Edge.AI.DatasetExportDir = filepath.Join(c.Edge.Orchestrator.DataDir, "exports")
+	}
 
 	if c.Edge.Events.QueueSize == 0 {
 		c.Edge.Events.QueueSize = 1000
@@ -217,5 +258,3 @@ func (c *Config) setDefaults() {
 		c.Edge.Cameras.RTSP.ReconnectInterval = 10 * time.Second
 	}
 }
-
-

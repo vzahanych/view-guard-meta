@@ -1,0 +1,28 @@
+# Git
+.git
+.gitignore
+
+# Build artifacts
+*.o
+*.a
+*.so
+orchestrator
+
+# Test files
+*_test.go
+*.test
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# Data directories
+data/
+*.db
+*.sqlite
+
+# Logs
+*.log
+

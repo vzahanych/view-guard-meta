@@ -87,8 +87,8 @@ def decode_image(image_data: str) -> np.ndarray:
         # Decode base64
         image_bytes = base64.b64decode(image_data)
         
-        # Convert bytes to numpy array
-        nparr = np.frombuffer(image_bytes, np.uint8)
+        # Convert bytes to numpy array (compatible with numpy 2.x)
+        nparr = np.asarray(bytearray(image_bytes), dtype=np.uint8)
         
         # Decode image
         image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
@@ -294,7 +294,8 @@ def setup_inference_endpoints(
             file_content = await file.read()
             
             # Decode image
-            nparr = np.frombuffer(file_content, np.uint8)
+            # Convert bytes to numpy array (compatible with numpy 2.x)
+            nparr = np.asarray(bytearray(file_content), dtype=np.uint8)
             frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
             
             if frame is None:

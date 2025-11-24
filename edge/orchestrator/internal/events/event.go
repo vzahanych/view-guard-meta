@@ -28,29 +28,31 @@ const (
 	EventTypeObjectDetected   = "object_detected"
 	EventTypeMotionDetected   = "motion_detected"
 	EventTypeCustomDetected   = "custom_detected"
+	EventTypeCameraObstructed = "camera_obstructed" // Critical: Camera view is blocked
+	EventTypeAnomalyDetected  = "anomaly_detected"  // Adaptive AI anomaly
 )
 
 // COCO class IDs for common objects
 const (
-	COCOClassPerson = 0
-	COCOClassBicycle = 1
-	COCOClassCar = 2
+	COCOClassPerson     = 0
+	COCOClassBicycle    = 1
+	COCOClassCar        = 2
 	COCOClassMotorcycle = 3
-	COCOClassAirplane = 4
-	COCOClassBus = 5
-	COCOClassTrain = 6
-	COCOClassTruck = 7
+	COCOClassAirplane   = 4
+	COCOClassBus        = 5
+	COCOClassTrain      = 6
+	COCOClassTruck      = 7
 )
 
 // ClassIDToEventType maps COCO class IDs to event types
 var ClassIDToEventType = map[int]string{
-	COCOClassPerson:    EventTypePersonDetected,
-	COCOClassBicycle:   EventTypeVehicleDetected,
-	COCOClassCar:       EventTypeVehicleDetected,
+	COCOClassPerson:     EventTypePersonDetected,
+	COCOClassBicycle:    EventTypeVehicleDetected,
+	COCOClassCar:        EventTypeVehicleDetected,
 	COCOClassMotorcycle: EventTypeVehicleDetected,
-	COCOClassBus:       EventTypeVehicleDetected,
-	COCOClassTrain:     EventTypeVehicleDetected,
-	COCOClassTruck:     EventTypeVehicleDetected,
+	COCOClassBus:        EventTypeVehicleDetected,
+	COCOClassTrain:      EventTypeVehicleDetected,
+	COCOClassTruck:      EventTypeVehicleDetected,
 }
 
 // NewEvent creates a new event with a generated UUID
@@ -66,21 +68,21 @@ func NewEvent() *Event {
 func (e *Event) ToEventState() state.EventState {
 	// Build metadata JSON
 	metadata := make(map[string]interface{})
-	
+
 	// Copy existing metadata
 	for k, v := range e.Metadata {
 		metadata[k] = v
 	}
-	
+
 	// Add detection-specific metadata
 	metadata["confidence"] = e.Confidence
 	if e.BoundingBox != nil {
 		metadata["bounding_box"] = map[string]interface{}{
-			"x1": e.BoundingBox.X1,
-			"y1": e.BoundingBox.Y1,
-			"x2": e.BoundingBox.X2,
-			"y2": e.BoundingBox.Y2,
-			"class_id": e.BoundingBox.ClassID,
+			"x1":         e.BoundingBox.X1,
+			"y1":         e.BoundingBox.Y1,
+			"x2":         e.BoundingBox.X2,
+			"y2":         e.BoundingBox.Y2,
+			"class_id":   e.BoundingBox.ClassID,
 			"class_name": e.BoundingBox.ClassName,
 		}
 	}
@@ -166,4 +168,3 @@ func GetEventTypeFromClassID(classID int) string {
 	}
 	return EventTypeObjectDetected
 }
-

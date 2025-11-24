@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -150,5 +151,151 @@ func (m *Manager) CleanupOldEvents(ctx context.Context, olderThan time.Duration)
 	m.logger.Debug("Cleaned up old events", "count", rowsAffected)
 
 	return nil
+}
+
+// GetEventByID retrieves a single event by ID
+func (m *Manager) GetEventByID(ctx context.Context, eventID string) (*EventState, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	query := `
+		SELECT id, camera_id, event_type, timestamp, metadata, clip_path, snapshot_path, transmitted
+		FROM events
+		WHERE id = ?
+	`
+
+	var event EventState
+	var metadataJSON sql.NullString
+	err := m.db.GetDB().QueryRowContext(ctx, query, eventID).Scan(
+		&event.ID, &event.CameraID, &event.EventType, &event.Timestamp,
+		&metadataJSON, &event.ClipPath, &event.SnapshotPath, &event.Transmitted,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to get event: %w", err)
+	}
+
+	// Parse metadata JSON
+	if metadataJSON.Valid && metadataJSON.String != "" {
+		if err := json.Unmarshal([]byte(metadataJSON.String), &event.Metadata); err != nil {
+			event.Metadata = make(map[string]interface{})
+		}
+	} else {
+		event.Metadata = make(map[string]interface{})
+	}
+
+	return &event, nil
+}
+
+// ListEventsOptions contains options for listing events
+type ListEventsOptions struct {
+	CameraID  string    // Filter by camera ID
+	EventType string    // Filter by event type
+	StartTime time.Time // Filter events after this time
+	EndTime   time.Time // Filter events before this time
+	Limit     int       // Maximum number of events to return
+	Offset    int       // Number of events to skip
+	OrderBy   string    // Order by field (default: "timestamp DESC")
+}
+
+// ListEvents retrieves events with filtering and pagination
+func (m *Manager) ListEvents(ctx context.Context, opts ListEventsOptions) ([]EventState, int, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	// Build WHERE clause
+	whereClauses := []string{}
+	args := []interface{}{}
+
+	if opts.CameraID != "" {
+		whereClauses = append(whereClauses, "camera_id = ?")
+		args = append(args, opts.CameraID)
+	}
+
+	if opts.EventType != "" {
+		whereClauses = append(whereClauses, "event_type = ?")
+		args = append(args, opts.EventType)
+	}
+
+	if !opts.StartTime.IsZero() {
+		whereClauses = append(whereClauses, "timestamp >= ?")
+		args = append(args, opts.StartTime)
+	}
+
+	if !opts.EndTime.IsZero() {
+		whereClauses = append(whereClauses, "timestamp <= ?")
+		args = append(args, opts.EndTime)
+	}
+
+	whereClause := ""
+	if len(whereClauses) > 0 {
+		whereClause = "WHERE " + strings.Join(whereClauses, " AND ")
+	}
+
+	// Default order by
+	orderBy := opts.OrderBy
+	if orderBy == "" {
+		orderBy = "timestamp DESC"
+	}
+
+	// Default limit
+	limit := opts.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 1000 {
+		limit = 1000 // Cap at 1000
+	}
+
+	// Get total count
+	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM events %s", whereClause)
+	var totalCount int
+	err := m.db.GetDB().QueryRowContext(ctx, countQuery, args...).Scan(&totalCount)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to count events: %w", err)
+	}
+
+	// Get events
+	query := fmt.Sprintf(`
+		SELECT id, camera_id, event_type, timestamp, metadata, clip_path, snapshot_path, transmitted
+		FROM events
+		%s
+		ORDER BY %s
+		LIMIT ? OFFSET ?
+	`, whereClause, orderBy)
+
+	args = append(args, limit, opts.Offset)
+	rows, err := m.db.GetDB().QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to list events: %w", err)
+	}
+	defer rows.Close()
+
+	var events []EventState
+	for rows.Next() {
+		var event EventState
+		var metadataJSON sql.NullString
+		if err := rows.Scan(
+			&event.ID, &event.CameraID, &event.EventType, &event.Timestamp,
+			&metadataJSON, &event.ClipPath, &event.SnapshotPath, &event.Transmitted,
+		); err != nil {
+			return nil, 0, err
+		}
+
+		// Parse metadata JSON
+		if metadataJSON.Valid && metadataJSON.String != "" {
+			if err := json.Unmarshal([]byte(metadataJSON.String), &event.Metadata); err != nil {
+				event.Metadata = make(map[string]interface{})
+			}
+		} else {
+			event.Metadata = make(map[string]interface{})
+		}
+
+		events = append(events, event)
+	}
+
+	return events, totalCount, rows.Err()
 }
 

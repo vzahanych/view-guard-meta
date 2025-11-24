@@ -255,6 +255,45 @@ func (m *Manager) RegisterCamera(ctx context.Context, discovered *DiscoveredCame
 		cameraType = CameraTypeUSB
 		devicePath = discovered.RTSPURLs[0]
 		rtspURLs = []string{}
+		
+		// For USB cameras, check if we already have a camera with the same device path(s)
+		// This handles the case where the camera ID changed but it's the same physical device
+		devicePaths := discovered.RTSPURLs
+		if len(devicePaths) == 0 {
+			devicePaths = []string{devicePath}
+		}
+		
+		// Look for existing cameras with any of these device paths
+		for existingID, existingCam := range m.cameras {
+			if existingCam.Type == CameraTypeUSB && existingID != discovered.ID {
+				// Check if device paths overlap
+				existingPaths := existingCam.RTSPURLs
+				if existingCam.DevicePath != "" {
+					existingPaths = append(existingPaths, existingCam.DevicePath)
+				}
+				
+				for _, newPath := range devicePaths {
+					for _, existingPath := range existingPaths {
+						if newPath == existingPath {
+							// Found existing camera with same device path - delete old one
+							m.LogInfo("Removing duplicate USB camera",
+								"old_id", existingID,
+								"new_id", discovered.ID,
+								"device_path", newPath,
+							)
+							
+							// Delete old camera from state
+							if err := m.stateMgr.DeleteCamera(ctx, existingID); err != nil {
+								m.LogError("Failed to delete old camera", err, "camera_id", existingID)
+							}
+							// Remove from memory
+							delete(m.cameras, existingID)
+							break
+						}
+					}
+				}
+			}
+		}
 	}
 
 	// Create camera
@@ -450,6 +489,113 @@ func (m *Manager) DeleteCamera(ctx context.Context, cameraID string) error {
 	return nil
 }
 
+// AddCamera manually adds a camera (for API use)
+func (m *Manager) AddCamera(ctx context.Context, camera *Camera) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Check if camera already exists
+	if _, ok := m.cameras[camera.ID]; ok {
+		return fmt.Errorf("camera already exists: %s", camera.ID)
+	}
+
+	// Set defaults
+	if camera.DiscoveredAt.IsZero() {
+		camera.DiscoveredAt = time.Now()
+	}
+	if camera.Config.FrameRate == 0 {
+		camera.Config.FrameRate = 15
+	}
+	if camera.Config.Quality == "" {
+		camera.Config.Quality = "medium"
+	}
+
+	// Save to state
+	camState := state.CameraState{
+		ID:      camera.ID,
+		Name:    camera.Name,
+		RTSPURL: m.getPrimaryURL(camera),
+		Enabled: camera.Enabled,
+		LastSeen: camera.LastSeen,
+	}
+
+	if err := m.stateMgr.SaveCamera(ctx, camState); err != nil {
+		return fmt.Errorf("failed to save camera to state: %w", err)
+	}
+
+	// Store in memory
+	m.cameras[camera.ID] = camera
+
+	m.LogInfo("Added camera",
+		"id", camera.ID,
+		"name", camera.Name,
+		"type", camera.Type,
+	)
+
+	// Publish event
+	if m.GetEventBus() != nil {
+		m.PublishEvent(service.EventTypeCameraRegistered, map[string]interface{}{
+			"camera_id": camera.ID,
+			"name":      camera.Name,
+			"type":      string(camera.Type),
+		})
+	}
+
+	return nil
+}
+
+// UpdateCamera updates an existing camera
+func (m *Manager) UpdateCamera(ctx context.Context, cameraID string, updates *Camera) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	camera, ok := m.cameras[cameraID]
+	if !ok {
+		return fmt.Errorf("camera not found: %s", cameraID)
+	}
+
+	// Update fields
+	if updates.Name != "" {
+		camera.Name = updates.Name
+	}
+	if updates.Enabled != camera.Enabled {
+		camera.Enabled = updates.Enabled
+	}
+	if len(updates.RTSPURLs) > 0 {
+		camera.RTSPURLs = updates.RTSPURLs
+	}
+	if updates.DevicePath != "" {
+		camera.DevicePath = updates.DevicePath
+	}
+	if updates.Config.FrameRate > 0 {
+		camera.Config.FrameRate = updates.Config.FrameRate
+	}
+	if updates.Config.Quality != "" {
+		camera.Config.Quality = updates.Config.Quality
+	}
+	if updates.Config.Resolution != "" {
+		camera.Config.Resolution = updates.Config.Resolution
+	}
+	camera.Config.RecordingEnabled = updates.Config.RecordingEnabled
+	camera.Config.MotionDetection = updates.Config.MotionDetection
+
+	// Save to state
+	camState := state.CameraState{
+		ID:      camera.ID,
+		Name:    camera.Name,
+		RTSPURL: m.getPrimaryURL(camera),
+		Enabled: camera.Enabled,
+		LastSeen: camera.LastSeen,
+	}
+
+	if err := m.stateMgr.SaveCamera(ctx, camState); err != nil {
+		return fmt.Errorf("failed to save camera to state: %w", err)
+	}
+
+	m.LogInfo("Updated camera", "camera_id", cameraID)
+	return nil
+}
+
 // monitorCameras monitors camera status
 func (m *Manager) monitorCameras() {
 	ticker := time.NewTicker(m.statusInterval)
@@ -553,5 +699,29 @@ func (m *Manager) GetCameraStatus(cameraID string) (CameraStatus, error) {
 	}
 
 	return camera.Status, nil
+}
+
+// GetDiscoveredCameras returns all discovered cameras from both discovery services
+func (m *Manager) GetDiscoveredCameras() []*DiscoveredCamera {
+	var discovered []*DiscoveredCamera
+
+	if m.onvifDiscovery != nil {
+		discovered = append(discovered, m.onvifDiscovery.GetDiscoveredCameras()...)
+	}
+	if m.usbDiscovery != nil {
+		discovered = append(discovered, m.usbDiscovery.GetDiscoveredCameras()...)
+	}
+
+	return discovered
+}
+
+// TriggerDiscovery triggers discovery on both discovery services
+func (m *Manager) TriggerDiscovery() {
+	if m.onvifDiscovery != nil {
+		m.onvifDiscovery.TriggerDiscovery()
+	}
+	if m.usbDiscovery != nil {
+		m.usbDiscovery.TriggerDiscovery()
+	}
 }
 

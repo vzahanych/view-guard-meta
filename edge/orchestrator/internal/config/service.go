@@ -4,11 +4,13 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/logger"
+	"gopkg.in/yaml.v3"
 )
 
 // Service provides configuration management with environment variable support
@@ -95,6 +97,55 @@ func (s *Service) Watch(watcher ConfigWatcher) {
 	s.watchers = append(s.watchers, watcher)
 }
 
+// Update updates the configuration and saves it to file
+func (s *Service) Update(ctx context.Context, newConfig *Config) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Validate new configuration
+	if err := newConfig.Validate(); err != nil {
+		return fmt.Errorf("invalid configuration: %w", err)
+	}
+
+	oldConfig := s.config
+
+	// Update configuration
+	s.config = newConfig
+
+	// Save to file
+	if err := s.saveToFile(); err != nil {
+		// Rollback on save failure
+		s.config = oldConfig
+		return fmt.Errorf("failed to save configuration: %w", err)
+	}
+
+	// Notify watchers
+	for _, watcher := range s.watchers {
+		if err := watcher(ctx, oldConfig, newConfig); err != nil {
+			s.logger.Error("Config watcher error", "error", err)
+		}
+	}
+
+	s.logger.Info("Configuration updated", "path", s.configPath)
+	return nil
+}
+
+// saveToFile saves the current configuration to file
+func (s *Service) saveToFile() error {
+	// Marshal to YAML
+	data, err := yaml.Marshal(s.config)
+	if err != nil {
+		return fmt.Errorf("failed to marshal configuration: %w", err)
+	}
+
+	// Write to file
+	if err := os.WriteFile(s.configPath, data, 0644); err != nil {
+		return fmt.Errorf("failed to write configuration file: %w", err)
+	}
+
+	return nil
+}
+
 // applyEnvOverrides applies environment variable overrides to configuration
 func applyEnvOverrides(cfg *Config) {
 	// Edge Orchestrator settings
@@ -141,6 +192,33 @@ func applyEnvOverrides(cfg *Config) {
 		}
 		cfg.Edge.AI.EnabledClasses = classes
 	}
+	if val := os.Getenv("EDGE_AI_LOCAL_INFERENCE_ENABLED"); val != "" {
+		cfg.Edge.AI.LocalInferenceEnabled = (val == "true" || val == "1")
+	}
+	if val := os.Getenv("EDGE_AI_BASELINE_LABEL"); val != "" {
+		cfg.Edge.AI.BaselineLabel = val
+	}
+	if val := os.Getenv("EDGE_AI_ANOMALY_THRESHOLD"); val != "" {
+		if threshold, err := parseFloat64(val); err == nil {
+			cfg.Edge.AI.AnomalyThreshold = threshold
+		}
+	}
+	if val := os.Getenv("EDGE_AI_LOCAL_MODEL_PATH"); val != "" {
+		cfg.Edge.AI.LocalModelPath = val
+	}
+	if val := os.Getenv("EDGE_AI_CLIP_DURATION"); val != "" {
+		if duration, err := time.ParseDuration(val); err == nil {
+			cfg.Edge.AI.ClipDuration = duration
+		}
+	}
+	if val := os.Getenv("EDGE_AI_PRE_EVENT_DURATION"); val != "" {
+		if duration, err := time.ParseDuration(val); err == nil {
+			cfg.Edge.AI.PreEventDuration = duration
+		}
+	}
+	if val := os.Getenv("EDGE_AI_DATASET_EXPORT_DIR"); val != "" {
+		cfg.Edge.AI.DatasetExportDir = val
+	}
 
 	// Storage settings
 	if val := os.Getenv("EDGE_STORAGE_CLIPS_DIR"); val != "" {
@@ -179,6 +257,19 @@ func applyEnvOverrides(cfg *Config) {
 	if val := os.Getenv("EDGE_TELEMETRY_INTERVAL"); val != "" {
 		if interval, err := time.ParseDuration(val); err == nil {
 			cfg.Edge.Telemetry.Interval = interval
+		}
+	}
+
+	// Web server settings
+	if val := os.Getenv("EDGE_WEB_ENABLED"); val != "" {
+		cfg.Edge.Web.Enabled = (val == "true" || val == "1")
+	}
+	if val := os.Getenv("EDGE_WEB_HOST"); val != "" {
+		cfg.Edge.Web.Host = val
+	}
+	if val := os.Getenv("EDGE_WEB_PORT"); val != "" {
+		if port, err := strconv.Atoi(val); err == nil {
+			cfg.Edge.Web.Port = port
 		}
 	}
 
@@ -262,4 +353,3 @@ func GetEnvFloat64(key string, defaultValue float64) float64 {
 	}
 	return result
 }
-

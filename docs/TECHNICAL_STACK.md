@@ -259,6 +259,67 @@ This section defines the minimal, production-ready stack for initial implementat
 
 ## 4. Edge Appliance Stack
 
+### 4.1 Core Runtime
+
+**Baseline:**
+
+- **Go** (Golang 1.23+)
+  - Primary orchestrator service
+  - Camera management, video processing coordination
+  - Event queue and transmission
+  - WireGuard client
+  - gRPC client for KVM VM communication
+  - Local storage management
+  - **Web UI server** (embedded HTTP server)
+
+- **Python 3.12+**
+  - AI inference service only (FastAPI)
+  - OpenVINO/ONNX Runtime integration
+  - Minimal dependencies (OpenCV, NumPy, OpenVINO/ONNX)
+
+### 4.2 Web UI (Local Network Accessible)
+
+**Baseline:**
+
+- **React 18+** + **TypeScript**
+  - Matches SaaS Control Plane stack for consistency
+  - Component-based architecture
+  - Type safety for maintainability
+- **Vite** (build tool)
+  - Fast development and production builds
+  - Small bundle size (important for resource-constrained Edge)
+  - Excellent developer experience
+- **Tailwind CSS**
+  - Utility-first CSS framework
+  - Matches SaaS Control Plane stack
+  - Small runtime footprint
+  - Responsive design out of the box
+- **State Management**: React Context API + hooks
+  - Simple state management (no external library needed for PoC)
+  - Sufficient for local admin UI complexity
+- **HTTP Client**: Fetch API (native, no dependencies)
+- **Charts**: Chart.js or Recharts (for metrics visualization)
+- **Icons**: Heroicons or Lucide React (lightweight SVG icons)
+- **Embedding**: Go `embed` package (built-in, no external tools)
+  - Static files embedded in Go binary at build time
+  - Single binary deployment
+
+**Alternatives:**
+
+- **Alpine.js** + **Tailwind CSS** (lighter option)
+  - No build step required
+  - Very lightweight (~15KB)
+  - Good for simple admin UIs
+  - Consider if React feels like overkill
+- **Vanilla JS** + **Tailwind CSS** (simplest option)
+  - No framework overhead
+  - Fastest to implement for PoC
+  - Less maintainable for complex UIs
+
+**Note**: The Edge Web UI is a **local admin interface** accessible on the home network (similar to router admin UI). It does not require the same scale or complexity as the SaaS Control Plane UI, but using React + TypeScript provides consistency and maintainability.
+
+### 4.3 Video Processing
+
 ### 4.1 Operating System
 
 **Baseline:**

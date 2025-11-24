@@ -1,0 +1,57 @@
+edge:
+  orchestrator:
+    log_level: info
+    log_format: text
+    data_dir: /app/data
+    config_file: /app/config/config.yaml
+
+  wireguard:
+    enabled: false
+    config_path: ""
+    kvm_endpoint: ""
+
+  cameras:
+    discovery:
+      enabled: true
+      interval: 60s
+    rtsp:
+      timeout: 30s
+      reconnect_interval: 5s
+
+  storage:
+    clips_dir: /app/data/clips
+    snapshots_dir: /app/data/snapshots
+    retention_days: 7
+    max_disk_usage_percent: 80
+
+  ai:
+    service_url: "http://edge-ai-service:8080"
+    inference_interval: 1s
+    confidence_threshold: 0.5
+    enabled_classes: ["person", "vehicle"]
+
+  events:
+    queue_size: 100
+    batch_size: 5
+    transmission_interval: 2s
+
+  telemetry:
+    interval: 30s
+    enabled: true
+
+  encryption:
+    enabled: false
+    user_secret: ""
+    salt: ""
+    salt_path: ""
+
+  web:
+    enabled: true
+    host: "0.0.0.0"
+    port: 8081
+
+log:
+  level: info
+  format: text
+  output: stdout
+
