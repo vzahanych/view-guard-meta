@@ -1,4 +1,4 @@
-package ai
+package anomaly
 
 import (
 	"bytes"
@@ -20,7 +20,6 @@ import (
 	webscreenshots "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/web/screenshots"
 )
 
-// LocalDetectorConfig contains configuration for the local anomaly detector.
 type LocalDetectorConfig struct {
 	Enabled          bool
 	Interval         time.Duration
@@ -37,8 +36,6 @@ type baselineStats struct {
 	UpdatedAt      time.Time
 }
 
-// LocalDetector performs lightweight anomaly detection on-device using
-// customer-provided "normal" screenshots as the baseline.
 type LocalDetector struct {
 	*service.ServiceBase
 
@@ -59,7 +56,6 @@ type LocalDetector struct {
 	baselines map[string]*baselineStats
 }
 
-// NewLocalDetector creates a new local anomaly detector service.
 func NewLocalDetector(
 	cfg LocalDetectorConfig,
 	cameraMgr *camera.Manager,
@@ -108,7 +104,6 @@ func NewLocalDetector(
 	return detector, nil
 }
 
-// Start begins anomaly detection.
 func (d *LocalDetector) Start(ctx context.Context) error {
 	if !d.cfg.Enabled {
 		d.LogInfo("Local anomaly detector disabled")
@@ -116,7 +111,7 @@ func (d *LocalDetector) Start(ctx context.Context) error {
 		return nil
 	}
 	if d.cameraMgr == nil || d.screenshotSvc == nil || d.ffmpeg == nil {
-		d.LogWarn("Local anomaly detector missing dependencies, disabling component")
+		d.LogError("Local anomaly detector missing dependencies, disabling component", fmt.Errorf("missing dependencies"))
 		d.GetStatus().SetStatus(service.StatusStopped)
 		return nil
 	}
@@ -126,7 +121,6 @@ func (d *LocalDetector) Start(ctx context.Context) error {
 	return nil
 }
 
-// Stop stops the detector.
 func (d *LocalDetector) Stop(ctx context.Context) error {
 	d.cancel()
 	d.GetStatus().SetStatus(service.StatusStopped)
@@ -198,7 +192,6 @@ func (d *LocalDetector) computeAnomalyScore(cameraID string, frame []byte) (floa
 	}
 
 	if baseline == nil || baseline.SampleCount == 0 {
-		// Initialize baseline using current frame
 		d.setBaseline(cameraID, brightness, 1)
 		return 0, brightness, nil
 	}
@@ -296,12 +289,12 @@ func (d *LocalDetector) handleAnomaly(cam *camera.Camera, frame []byte, score, b
 
 	if d.eventStorage != nil {
 		if err := d.eventStorage.SaveEvent(d.ctx, event); err != nil {
-			d.LogWarn("Failed to persist anomaly event", "camera_id", cam.ID, "error", err)
+			d.LogError("Failed to persist anomaly event", err, "camera_id", cam.ID)
 		}
 	}
 	if d.eventQueue != nil {
 		if err := d.eventQueue.Enqueue(d.ctx, event, 1); err != nil {
-			d.LogWarn("Failed to enqueue anomaly event", "camera_id", cam.ID, "error", err)
+			d.LogError("Failed to enqueue anomaly event", err, "camera_id", cam.ID)
 		}
 	}
 
@@ -345,7 +338,6 @@ func (d *LocalDetector) getCameraInput(cam *camera.Camera) string {
 	return ""
 }
 
-// measureBrightness computes the average brightness of a JPEG frame.
 func measureBrightness(frame []byte) (float64, error) {
 	img, _, err := image.Decode(bytes.NewReader(frame))
 	if err != nil {
@@ -369,7 +361,6 @@ func measureBrightness(frame []byte) (float64, error) {
 	return total / count, nil
 }
 
-// osReadFile is a helper for mocking in tests.
 var osReadFile = func(path string) ([]byte, error) {
 	return os.ReadFile(path)
 }

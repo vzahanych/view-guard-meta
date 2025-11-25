@@ -239,6 +239,20 @@ Check logs to verify:
 docker-compose -f docker-compose.edge.yml logs edge-orchestrator | grep -E "(camera|event|clip)"
 ```
 
+## Integration with User VM API
+
+For PoC, you can run both Edge Appliance and User VM API together:
+
+```bash
+# Start Edge services
+docker-compose -f docker-compose.edge.yml up -d
+
+# Start User VM API services (in separate terminal or same)
+docker-compose -f docker-compose.user-vm.yml up -d
+```
+
+See `README.USER_VM.md` for User VM API setup details.
+
 ## Notes
 
 - **Privileged mode**: Required for USB camera access. In production, use specific capabilities instead.
@@ -247,6 +261,7 @@ docker-compose -f docker-compose.edge.yml logs edge-orchestrator | grep -E "(cam
 - **OpenVINO**: AI service uses OpenVINO for inference (CPU mode in Docker).
 - **Model Download**: Models are automatically downloaded on first start for testing. In production, models are downloaded from a remote VM, not locally.
 - **Model Persistence**: Models are stored in the `ai-models` Docker volume and persist across container restarts.
+- **PoC Architecture**: For PoC, no SaaS components are needed. Edge Appliance communicates directly with User VM API (Docker Compose service) and uses MinIO for remote storage.
 
 ## Troubleshooting
 

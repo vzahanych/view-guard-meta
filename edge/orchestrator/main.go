@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/ai"
+	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/anomaly"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/camera"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/config"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/events"
@@ -195,9 +195,9 @@ func main() {
 		log.Info("Screenshot service initialized")
 	}
 
-	var localDetector *ai.LocalDetector
+	var localDetector *anomaly.LocalDetector
 	if cfg.Edge.AI.LocalInferenceEnabled {
-		localCfg := ai.LocalDetectorConfig{
+		localCfg := anomaly.LocalDetectorConfig{
 			Enabled:          cfg.Edge.AI.LocalInferenceEnabled,
 			Interval:         cfg.Edge.AI.InferenceInterval,
 			Threshold:        cfg.Edge.AI.AnomalyThreshold,
@@ -205,7 +205,7 @@ func main() {
 			ClipDuration:     cfg.Edge.AI.ClipDuration,
 			PreEventDuration: cfg.Edge.AI.PreEventDuration,
 		}
-		detector, err := ai.NewLocalDetector(
+		detector, err := anomaly.NewLocalDetector(
 			localCfg,
 			cameraMgr,
 			screenshotSvc,

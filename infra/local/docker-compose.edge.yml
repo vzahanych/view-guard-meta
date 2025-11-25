@@ -86,4 +86,5 @@ volumes:
 networks:
   view-guard-edge:
     driver: bridge
+    name: view-guard-edge  # Named network for cross-compose communication
 

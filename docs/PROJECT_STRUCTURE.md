@@ -112,6 +112,16 @@ view-guard-meta/                    (PUBLIC - Developer landing page)
 │   │   ├── shared/                (Shared Go libraries)
 │   │   └── go.mod                 (Go module)
 │   │
+│   ├── user-vm-api/                (User Server - user's private cloud node)
+│   │   ├── wireguard-server/     (WireGuard server, client management)
+│   │   ├── event-cache/           (Event cache with SQLite)
+│   │   ├── stream-relay/          (HTTP/WebRTC stream relay)
+│   │   ├── filecoin-sync/         (Filecoin/IPFS integration)
+│   │   ├── ai-orchestrator/       (AI model catalog, retraining, distribution)
+│   │   ├── event-analyzer/        (Secondary event analysis)
+│   │   ├── agent-orchestrator/    (Main agent service)
+│   │   └── go.mod                 (Go module)
+│   │
 │   ├── crypto/                     (Encryption libraries)
 │   │   ├── go/                    (Go encryption library)
 │   │   ├── typescript/             (Browser/Node.js library)
@@ -124,7 +134,6 @@ view-guard-meta/                    (PUBLIC - Developer landing page)
 │       └── python/                 (Generated Python stubs)
 │
 └── Private Submodules (optional, require access):
-    ├── kvm-agent/                  (git submodule → view-guard-kvm-agent)
     ├── saas-backend/               (git submodule → view-guard-saas-backend)
     ├── saas-frontend/              (git submodule → view-guard-saas-frontend)
     └── infra/                      (git submodule → view-guard-infra)
@@ -326,7 +335,7 @@ proto/
 
 **Usage:**
 - `edge/` imports this as Go module dependency from the same meta repo
-- `kvm-agent` (private submodule) imports this as Go module dependency
+- `user-vm-api` (public component) imports this as Go module dependency
 - **No copying, no symlinks** - all components depend on this single source
 
 **Why Public:**
@@ -337,48 +346,49 @@ proto/
 
 ---
 
-## Private Repository Details
+## Public Component Details (continued)
 
-### 4. `view-guard-kvm-agent` (Private)
+### 4. `user-vm-api/` (Public - Apache 2.0)
 
-**GitHub Description**: "Production KVM VM agent for The Private AI Guardian - WireGuard server, event cache, stream relay, and Filecoin integration"
+**Location**: `view-guard-meta/user-vm-api/`
+
+**Description**: User VM API for The Private AI Guardian - WireGuard server, event cache, stream relay, Filecoin integration, AI model orchestration, and secondary event analysis
+
+**Why Open Source:**
+- Runs on user's dedicated VM (their private cloud node)
+- Handles user data and AI models
+- Secrets (WireGuard keys, encryption key identifiers) are kept in memory only at runtime
+- Supports the "trust us / verify us" privacy story
+- Enables full auditability of user data processing
 
 **Contents:**
 
 ```
-view-guard-kvm-agent/
-├── README.md                       (Internal documentation)
+user-vm-api/
+├── README.md                       (User VM API overview, privacy guarantees)
 ├── wireguard-server/               (WireGuard server, client management)
 ├── event-cache/                    (Event cache with SQLite)
 ├── stream-relay/                   (HTTP/WebRTC stream relay)
-├── filecoin-sync/                  (Full Filecoin/IPFS integration)
+├── filecoin-sync/                  (Filecoin/IPFS integration)
 │   ├── uploader/                   (Filecoin upload logic)
 │   ├── quota/                      (Quota enforcement)
 │   └── cid-storage/                (CID management)
+├── ai-orchestrator/                (AI model catalog, retraining, distribution)
+├── event-analyzer/                 (Secondary event analysis for alerting)
 ├── telemetry-aggregator/           (Telemetry aggregation logic)
 ├── agent-orchestrator/             (Main agent service)
 └── go.mod                          (Go module dependencies)
     └── view-guard-proto/go         (Proto stubs dependency)
 ```
 
-**What's Private:**
-- Full Filecoin/IPFS integration (beyond basic stub)
-- Quota enforcement logic (business rules)
-- WebRTC relay mechanics (if fully implemented)
-- Multi-tenant orchestration
-- Production-specific optimizations
-
-**Future: Community KVM Agent (Optional)**
-
-If you later want a self-hosting story, you could introduce a public `view-guard-kvm-community` repository:
-
-- **Minimal implementation**: WireGuard server, event cache, simple HTTP clip relay, dummy storage
-- **Uses same dependencies**: `view-guard-proto` + `view-guard-crypto`
-- **Production agent remains private**: Full Filecoin, quotas, WebRTC, multi-tenant features stay in `view-guard-kvm-agent/`
-
-This structure allows for this split later without major reorganization.
+**Note on Secrets:**
+- WireGuard keys, encryption key identifiers, and other secrets are loaded into memory at runtime
+- Secrets are not stored in the codebase or committed to version control
+- Secrets are provided via environment variables, configuration files (excluded from git), or secure key management systems
 
 ---
+
+## Private Repository Details
 
 ### 5. `view-guard-saas-backend` (Private)
 
@@ -502,10 +512,10 @@ git submodule update --init --recursive
 **Access Requirements:**
 - **Public components**: Available immediately - they're part of the meta repo
   - `edge/` - Edge Appliance software
+  - `user-vm-api/` - User Server (runs on user's VM)
   - `crypto/` - Encryption libraries
   - `proto/` - Protocol definitions
 - **Private submodules**: Require access to private repositories
-  - `kvm-agent/` → `view-guard-kvm-agent`
   - `saas-backend/` → `view-guard-saas-backend`
   - `saas-frontend/` → `view-guard-saas-frontend`
   - `infra/` → `view-guard-infra`
@@ -523,7 +533,7 @@ echo "Public components (edge/, crypto/, proto/) are already available."
 
 # Try to init private submodules, but don't fail if they are inaccessible
 echo "Attempting to initialize private submodules (if you have access)..."
-if ! git submodule update --init kvm-agent saas-backend saas-frontend infra 2>/dev/null; then
+if ! git submodule update --init management-server saas-backend saas-frontend infra 2>/dev/null; then
   echo "Warning: Some private submodules could not be initialized. This is expected if you are an external contributor."
 fi
 
@@ -545,11 +555,8 @@ This gives new developers a single command to get started. Public contributors c
 git submodule update --remote
 
 # Update to specific tagged version (recommended)
-cd kvm-agent
-git checkout v0.1.0
-cd ..
-git add kvm-agent
-git commit -m "Pin kvm-agent to v0.1.0"
+# user-vm-api is now public, developed directly in meta repo
+# No submodule management needed
 
 # Update all private submodules to latest
 git submodule update --remote --merge
@@ -702,7 +709,7 @@ If you later open a "community KVM agent" reference implementation:
 **No copying, no symlinks**: `view-guard-proto` is the only source of `.proto` files.
 
 - `view-guard-edge` imports `view-guard-proto/go` as a Go module dependency
-- `kvm-agent` imports `view-guard-proto/go` as a Go module dependency
+- `user-vm-api` imports `view-guard-proto/go` as a Go module dependency
 - All repos depend on this single source - no manual sync needed
 
 ### SaaS APIs: Proto vs HTTP
@@ -734,7 +741,7 @@ If you later open a "community KVM agent" reference implementation:
 - **Submodule reference**: Use `edge-oss/` when referring to the directory in the meta repo
 
 **Examples:**
-- Repository: `view-guard-kvm-agent` → Directory: `kvm-agent/`
+- Repository: Public component in `view-guard-meta` → Directory: `user-vm-api/`
 - Repository: `view-guard-saas-backend` → Directory: `saas-backend/`
 - Repository: `view-guard-edge` → Directory: `edge-oss/`
 
@@ -751,11 +758,13 @@ If you later open a "community KVM agent" reference implementation:
 | `edge/shared/` | `edge/shared/` | Public | |
 | `edge/proto/` | `proto/proto/edge/` | Public | Imported as Go module, not copied |
 | `edge/encryption/` | `crypto/go/` | Public | Imported as Go module, not duplicated |
-| `kvm-agent/wireguard-server/` | `view-guard-kvm-agent/wireguard-server/` | Private | Separate private repo |
-| `kvm-agent/event-cache/` | `view-guard-kvm-agent/event-cache/` | Private | Separate private repo |
-| `kvm-agent/stream-relay/` | `view-guard-kvm-agent/stream-relay/` | Private | Separate private repo |
-| `kvm-agent/filecoin-sync/` | `view-guard-kvm-agent/filecoin-sync/` | Private | Separate private repo |
-| `kvm-agent/proto/` | `proto/proto/kvm/` | Public | Imported as Go module |
+| `user-vm-api/wireguard-server/` | `view-guard-meta/user-vm-api/wireguard-server/` | Public | Direct in meta repo |
+| `user-vm-api/event-cache/` | `view-guard-meta/user-vm-api/event-cache/` | Public | Direct in meta repo |
+| `user-vm-api/stream-relay/` | `view-guard-meta/user-vm-api/stream-relay/` | Public | Direct in meta repo |
+| `user-vm-api/filecoin-sync/` | `view-guard-meta/user-vm-api/filecoin-sync/` | Public | Direct in meta repo |
+| `user-vm-api/ai-orchestrator/` | `view-guard-meta/user-vm-api/ai-orchestrator/` | Public | Direct in meta repo |
+| `user-vm-api/event-analyzer/` | `view-guard-meta/user-vm-api/event-analyzer/` | Public | Direct in meta repo |
+| `user-vm-api/proto/` | `proto/proto/kvm/` | Public | Imported as Go module |
 | `saas/api/` | `view-guard-saas-backend/api/` | Private | HTTP REST API (OpenAPI), separate private repo |
 | `saas/auth/` | `view-guard-saas-backend/auth/` | Private | Separate private repo |
 | `saas/events/` | `view-guard-saas-backend/events/` | Private | Separate private repo |
@@ -778,7 +787,7 @@ If you later open a "community KVM agent" reference implementation:
    - Create `proto/` directory with proto definitions
 
 2. **Create private repositories**:
-   - `view-guard-kvm-agent` (production KVM VM agent)
+   - `user-vm-api/` (public, in meta repo)
    - `view-guard-saas-backend` (SaaS Control Plane backend)
    - `view-guard-saas-frontend` (SaaS Control Plane frontend)
    - `view-guard-infra` (Infrastructure as Code)
@@ -869,9 +878,9 @@ The public meta repository is **not** where the commercial moat lives - it's whe
 
 ### 4. Clear Boundaries
 - **Public**: Privacy-critical code (edge, crypto, protocols) that runs on customer hardware
-- **Private**: Commercial moat (SaaS, billing, infrastructure, production KVM agent)
+- **Private**: Commercial moat (SaaS, billing, infrastructure, Management Server)
 - **Public Meta**: Coordination, documentation, trust story - NOT internal roadmaps or ops
-- **Future flexibility**: Structure allows for community KVM agent without reorganization
+- **Future flexibility**: Structure allows for community User VM API without reorganization
 
 ### 5. Versioning & Maintenance
 - Semantic versioning for public components

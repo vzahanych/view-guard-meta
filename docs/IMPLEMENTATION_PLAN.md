@@ -6,15 +6,15 @@ This document provides a detailed, phase-by-phase implementation plan for The Pr
 
 The PoC implementation follows a **bottom-up approach**, building from the edge inward:
 1. **Edge Appliance (Mini PC)** - Go orchestrator and Python AI services
-2. **KVM VM Agent (Private Cloud Node)** - Services running on per-tenant VMs
-3. **SaaS Control Plane** - Backend services and VM management
-4. **SaaS UI** - Frontend web application
-5. **ISO Building & Deployment** - Image generation and deployment automation
-6. **Integration, Testing & Polish** - End-to-end integration and refinement
+2. **User VM API (Docker Compose)** - Go services running in local Docker Compose environment
+3. **MinIO (Docker Compose)** - S3-compatible storage for remote clip archiving
+4. **Integration, Testing & Polish** - End-to-end integration and refinement
+
+**Note**: For PoC, SaaS components (Management Server, SaaS Control Plane, SaaS UI) are **not included**. The PoC focuses on Edge Appliance ↔ User VM API communication, with User VM API running as a Docker Compose service in the local development environment.
 
 Each phase builds upon the previous one, allowing for incremental validation and testing.
 
-**Target Timeline**: 12-16 weeks for complete PoC
+**Target Timeline**: 8-12 weeks for complete PoC (revised based on actual development velocity)
 
 ## Testing Strategy
 
@@ -33,7 +33,7 @@ Each phase builds upon the previous one, allowing for incremental validation and
 - ⏸️ **BLOCKED** - Waiting on dependencies or blocked by issues
 
 **Current Progress Summary:**
-- **Phase 1 (Edge Appliance)**: ~78% complete
+- **Phase 1 (Edge Appliance)**: ~88% complete
   - ✅ Development environment setup
   - ✅ Core framework (service manager, config, state, health checks)
   - ✅ Camera discovery (RTSP, ONVIF, USB/V4L2)
@@ -63,21 +63,23 @@ Each phase builds upon the previous one, allowing for incremental validation and
       - ✅ Dashboard UI (Step 1.9.12)
     - **Integration** (Step 1.9.13):
       - ✅ Integration & Testing (Step 1.9.13)
-- **Phase 2 (KVM VM Agent)**: 0% complete
-- **Phase 3 (SaaS Backend)**: 0% complete
-- **Phase 4 (SaaS UI)**: 0% complete
-- **Phase 5 (ISO & Deployment)**: 0% complete
+- **Phase 2 (User VM API)**: 0% complete
+  - **Note**: User VM API runs in Docker Compose for PoC (no SaaS needed)
+- **Phase 3 (SaaS Backend)**: ⏸️ DEFERRED (not needed for PoC)
+- **Phase 4 (SaaS UI)**: ⏸️ DEFERRED (not needed for PoC - Edge Web UI is sufficient)
+- **Phase 5 (ISO & Deployment)**: ⏸️ DEFERRED (not needed for PoC - Docker Compose is sufficient)
 - **Phase 6 (Integration & Testing)**: 0% complete
 
 *Last Updated: 2025-11-23*
 
 **Repository Structure Note:**
-- **Public components** (Edge Appliance, Crypto libraries, Protocol definitions) are developed directly in the meta repository:
+- **Public components** (Edge Appliance, User Server, Crypto libraries, Protocol definitions) are developed directly in the meta repository:
   - `edge/` - Edge Appliance software (including Edge Web UI)
+  - `user-vm-api/` - User Server (runs on user's VM, handles WireGuard, models, storage)
   - `crypto/` - Encryption libraries
   - `proto/` - Protocol buffer definitions
-- **Private components** (KVM VM agent, SaaS backend, SaaS frontend, Infrastructure) are in separate private repositories (git submodules):
-  - `kvm-agent/` - KVM VM agent (private submodule)
+- **Private components** (Management Server, SaaS backend, SaaS frontend, Infrastructure) are in separate private repositories (git submodules):
+  - `management-server/` - Management Server (controls User Servers, talks to SaaS)
   - `saas-backend/` - SaaS backend (private submodule)
   - `saas-frontend/` - SaaS frontend (private submodule)
   - `infra/` - Infrastructure (private submodule)
@@ -95,23 +97,29 @@ Epics are tagged with priority levels:
 
 To avoid discovering integration issues late, we include early vertical slices:
 
-- **Milestone 1 (End of Phase 3)**: First full event flow
-  - Camera → Edge Appliance → KVM VM → SaaS → Basic event list in UI
+- **Milestone 1 (End of Phase 2)**: First full event flow
+  - Camera → Edge Appliance → User VM API → Event cache
   - Validates core data flow without streaming
-  - **Target**: Week 8-9
+  - **Target**: Week 2-3
 
-- **Milestone 2 (End of Phase 4)**: First clip viewing
-  - UI "View Clip" → SaaS → KVM VM → Edge Appliance → Stream to UI (HTTP-based)
+- **Milestone 2 (End of Phase 2)**: First clip viewing
+  - Edge Web UI "View Clip" → User VM API → Edge Appliance → Stream to UI (HTTP-based)
   - Validates streaming path using simple HTTP progressive download
-  - **Target**: Week 10-11
+  - **Target**: Week 3-4
 
-**Note**: Milestone 1 requires Phase 3 (SaaS backend + basic UI) to be complete, as it needs the full stack to demonstrate event flow.
+**Note**: For PoC, milestones are simplified - no SaaS components needed. Edge Web UI provides the user interface, and User VM API handles event caching and stream relay.
 
 ## PoC Scope Summary
 
-This implementation plan is scoped for a **realistic 12-16 week PoC**, not a full v1 product.
+This implementation plan is scoped for a **realistic PoC**, not a full v1 product.
 
-**PoC Deployment Topology**: 1 Edge Appliance → 1 KVM VM → 1 SaaS cluster, with 1-2 demo tenants. This is a single-instance PoC, not a scaled multi-tenant deployment.
+**PoC Deployment Topology**: 1 Edge Appliance → 1 User VM API (in Docker Compose) → MinIO (S3-compatible storage), running locally for development and testing. This is a **simplified PoC without SaaS components**.
+
+**Key PoC Simplifications**:
+- **No SaaS components** - Edge Appliance and User VM API communicate directly
+- **User VM API runs in Docker Compose** - Part of local development environment as a dedicated service
+- **MinIO instead of Filecoin** - Use MinIO (S3-compatible) for remote storage in PoC
+- **Direct communication** - Edge → User VM API (no Management Server or SaaS in PoC)
 
 Key simplifications:
 
@@ -119,53 +127,72 @@ Key simplifications:
 - Single Edge Appliance with 1-2 cameras
 - Basic AI inference (person/vehicle detection)
 - Local clip recording and storage
-- Event flow: Edge → KVM VM → SaaS → UI
+- Event flow: Edge → User VM API (Docker Compose service)
 - Basic clip viewing (HTTP relay acceptable)
 - **Edge Web UI** (local network accessible for configuration and monitoring)
-- Manual VM provisioning (1-2 pre-provisioned VMs)
-- Generic ISO or simple build script
-- Basic authentication (Auth0)
-- Simple event timeline UI (SaaS UI)
+- **User VM API** (Go service in Docker Compose):
+  - WireGuard server for Edge connections
+  - Event cache and storage
+  - Stream relay for clip viewing
+  - MinIO integration (S3-compatible storage)
+  - AI model catalog (basic)
+  - Secondary event analysis (basic)
+- **MinIO** (S3-compatible storage in Docker Compose) for remote clip storage
 - Essential testing (critical paths only)
 
 ### What's Deferred (P2 - Post-PoC)
+- **SaaS Control Plane** (not needed for PoC)
+- **Management Server** (not needed for PoC)
+- **SaaS UI** (not needed for PoC - Edge Web UI is sufficient)
 - Full Stripe billing integration
-- Automated Terraform VM provisioning
+- Automated VM provisioning
 - Tenant-specific ISO generation
 - **WebRTC implementation** (HTTP progressive download is P0 for PoC)
-- **Full Filecoin integration** (S3 stub with fake CIDs is P0 for PoC)
+- **Full Filecoin integration** (MinIO/S3 is P0 for PoC, Filecoin bridge to be developed later)
+- **S3-Filecoin bridge** (to be developed post-PoC to migrate from MinIO to Filecoin)
 - Advanced camera configuration (zones, schedules)
 - Comprehensive test coverage (>70%)
 - Full security audit
 - Advanced monitoring and observability
 - Update automation
 
-### Architecture Compliance
+### Architecture Compliance (PoC)
 - **Edge Appliance**: All video processing, AI inference, and local storage (Phase 1)
-- **KVM VM**: Only relay, event cache, and orchestration - NO video processing or AI (Phase 2)
-- **SaaS**: Control plane, event inventory, basic VM management - NO raw video (Phase 3)
+- **User VM API** (Docker Compose): WireGuard server, event cache, stream relay, MinIO integration - NO video processing or AI (Phase 2)
+- **MinIO**: S3-compatible storage for remote clip archiving (replaces Filecoin in PoC)
+- **SaaS**: Deferred to post-PoC
 
 ---
 
 ## Table of Contents
 
-1. [Phase 1: Edge Appliance (Mini PC) - Go & Python Apps](#phase-1-edge-appliance-mini-pc---go--python-apps)
-2. [Phase 2: KVM VM Agent Services](#phase-2-kvm-vm-agent-services)
-3. [Phase 3: SaaS Control Plane Backend](#phase-3-saas-control-plane-backend)
-4. [Phase 4: SaaS UI Frontend](#phase-4-saas-ui-frontend)
-5. [Phase 5: ISO Building & Deployment Automation](#phase-5-iso-building--deployment-automation)
-6. [Phase 6: Integration, Testing & Polish](#phase-6-integration-testing--polish)
+This implementation plan has been split into phase-specific files for better maintainability:
+
+1. **[Phase 1: Edge Appliance (Mini PC) - Go & Python Apps](IMPLEMENTATION_PLAN_PHASE1.md)** - Detailed implementation plan for Edge Appliance
+2. **[Phase 2: User VM API Services (Docker Compose)](IMPLEMENTATION_PLAN_PHASE2.md)** - Detailed implementation plan for User VM API
+3. **[Phase 3: SaaS Control Plane Backend](IMPLEMENTATION_PLAN_PHASE3.md)** - Detailed implementation plan for SaaS Backend (deferred for PoC)
+4. **[Phase 4: SaaS UI Frontend](IMPLEMENTATION_PLAN_PHASE4.md)** - Detailed implementation plan for SaaS UI (deferred for PoC)
+5. **[Phase 5: ISO Building & Deployment Automation](IMPLEMENTATION_PLAN_PHASE5.md)** - Detailed implementation plan for ISO & Deployment (deferred for PoC)
+6. **[Phase 6: Integration, Testing & Polish](IMPLEMENTATION_PLAN_PHASE6.md)** - Detailed implementation plan for Integration & Testing
+
+**Note**: Phases 3-5 (SaaS Backend, SaaS UI, ISO & Deployment) are **deferred for PoC**. The PoC focuses on Edge Appliance ↔ User VM API communication, with User VM API running in Docker Compose.
 
 ---
 
-## Phase 1: Edge Appliance (Mini PC) - Go & Python Apps
+## Phase Overview
+
+This section provides a high-level overview of each phase. For detailed implementation plans, see the phase-specific files linked in the [Table of Contents](#table-of-contents).
+
+### Phase 1: Edge Appliance (Mini PC) - Go & Python Apps
+
+**See**: [IMPLEMENTATION_PLAN_PHASE1.md](IMPLEMENTATION_PLAN_PHASE1.md) for detailed implementation plan.
 
 **Duration**: 3-4 weeks  
 **Goal**: Build core Edge Appliance software - Go orchestrator, Python AI service, video processing, local storage, WireGuard client
 
 **Scope**: Single Mini PC, 1-2 cameras, basic functionality sufficient for PoC demonstration
 
-**Status**: ~88% Complete
+**Status**: ~88% Complete (Epic 1.9 complete, remaining: encryption & archive client)
 - ✅ Epic 1.1: Development Environment (mostly complete, CI/CD deferred)
 - ✅ Epic 1.2: Go Orchestrator Core Framework (complete)
 - ✅ Epic 1.3: Video Ingest & Processing (complete)
@@ -178,11 +205,66 @@ Key simplifications:
 
 **Test Coverage**: 230 tests (220 unit + 10 integration), all passing ✅
 
-### Epic 1.1: Development Environment & Project Setup
+### Phase 2: User VM API Services (Docker Compose)
 
-**Priority: P0**
+**See**: [IMPLEMENTATION_PLAN_PHASE2.md](IMPLEMENTATION_PLAN_PHASE2.md) for detailed implementation plan.
 
-#### Step 1.1.1: Repository & Project Structure
+**Duration**: 1-2 weeks  
+**Goal**: Build User VM API services in Go - WireGuard server, event cache, stream relay, MinIO integration (S3-compatible), AI model catalog, and secondary event analysis
+
+**PoC Scope**: User VM API runs as a **Docker Compose service** in the local development environment. For PoC:
+- **No SaaS components** - Edge Appliance and User VM API communicate directly
+- **No Management Server** - Direct Edge ↔ User VM API communication
+- **MinIO instead of Filecoin** - Use MinIO (S3-compatible) for remote storage
+- **Docker Compose integration** - User VM API and MinIO run as services alongside Edge Appliance
+
+**Status**: 0% complete
+
+### Phase 3: SaaS Control Plane Backend
+
+**See**: [IMPLEMENTATION_PLAN_PHASE3.md](IMPLEMENTATION_PLAN_PHASE3.md) for detailed implementation plan.
+
+**Duration**: 2-3 weeks  
+**Goal**: Build core SaaS backend services - authentication, event inventory, basic VM management
+
+**Scope**: Simplified for PoC - manual VM provisioning, basic auth, essential event storage
+
+**Status**: ⏸️ DEFERRED (not needed for PoC)
+
+### Phase 4: SaaS UI Frontend
+
+**See**: [IMPLEMENTATION_PLAN_PHASE4.md](IMPLEMENTATION_PLAN_PHASE4.md) for detailed implementation plan.
+
+**Duration**: 2 weeks  
+**Goal**: Build core React frontend - authentication, event timeline, basic clip viewing
+
+**Scope**: Simplified UI for PoC - essential features only, no advanced configuration
+
+**Status**: ⏸️ DEFERRED (not needed for PoC - Edge Web UI is sufficient)
+
+### Phase 5: ISO Building & Deployment Automation
+
+**See**: [IMPLEMENTATION_PLAN_PHASE5.md](IMPLEMENTATION_PLAN_PHASE5.md) for detailed implementation plan.
+
+**Duration**: 1-2 weeks  
+**Goal**: Basic ISO generation and simple deployment automation
+
+**Scope**: Simplified for PoC - generic ISO or simple build script, manual deployment acceptable
+
+**Status**: ⏸️ DEFERRED (not needed for PoC - Docker Compose is sufficient)
+
+### Phase 6: Integration, Testing & Polish
+
+**See**: [IMPLEMENTATION_PLAN_PHASE6.md](IMPLEMENTATION_PLAN_PHASE6.md) for detailed implementation plan.
+
+**Duration**: 2 weeks  
+**Goal**: End-to-end integration, essential testing, basic security, PoC demo preparation
+
+**Scope**: Focus on integration and demo readiness, not full production hardening
+
+**Status**: 0% complete
+
+---
 - **Substep 1.1.1.1**: Verify meta repository structure
   - **Status**: ✅ DONE
   - Public components are developed directly in the meta repository
@@ -538,26 +620,88 @@ Key simplifications:
   - **P0**: Test retry logic for failed transmissions ✅
   - **P1**: Test event deduplication logic ✅
 
-### Epic 1.6: WireGuard Client & Communication
+### Epic 1.6: WireGuard Communication (PoC: Direct, MVP/Production: libp2p + WireGuard)
 
 **Priority: P0**
 
-#### Step 1.6.1: WireGuard Client Service
-- **Substep 1.6.1.1**: WireGuard client implementation
-  - **Status**: ✅ DONE
+**Note**: 
+- **PoC**: libp2p is **NOT implemented for PoC**. Edge connects to User VM's WireGuard endpoint directly (port-forward or local network). This simplifies PoC and focuses on core functionality.
+- **MVP/Production**: This epic combines **libp2p** (for peer discovery and NAT traversal) with **WireGuard** (for efficient data transfer). libp2p handles NAT traversal automatically, allowing Edge Appliances behind WiFi router NAT to connect to User VMs.
+
+**Architecture (MVP/Production)**:
+1. **Mesh Abstraction Layer**: Abstract libp2p behind a `Mesh` interface to keep domain logic decoupled
+2. Edge uses libp2p (via Mesh) to discover available User VMs
+3. libp2p establishes connection (handles NAT traversal automatically)
+4. Edge and User VM exchange WireGuard keys over libp2p secure channel
+5. WireGuard tunnel is established for efficient data transfer
+6. libp2p connection maintained for health checks and re-establishment
+
+**Implementation Progression**:
+- **PoC (Minimal)**: Direct WireGuard connection (no libp2p). Edge connects to User VM's WireGuard server endpoint directly (port-forward or local network). Mesh interface may be stubbed for future use, but no implementation.
+- **MVP (Basic)**: Static bootstrap (User VM address hard-coded), simple protocol `/guardian/control/1.0.0`, no DHT/relays/pubsub. Mesh interface implemented with libp2p.
+- **Production (Full)**: Static peer list (multiple VMs), one pubsub topic `/guardian/events`, DHT-based discovery, multiple protocols, relays, multi-version support
+
+**High Availability**: 
+- **Production**: Edge discovers multiple User VMs via DHT, supports load balancing/failover
+- **MVP**: Static list of multiple User VMs (HA support)
+- **PoC**: Single User VM, direct WireGuard connection (no libp2p)
+
+#### Step 1.6.1: WireGuard Client (PoC - Direct Connection)
+- **Substep 1.6.1.1**: Direct WireGuard connection (PoC)
+  - **Status**: ✅ DONE (needs update for PoC simplification)
+  - **P0**: **PoC**: Connect directly to User VM's WireGuard server endpoint (hard-coded in config)
+  - **P0**: **PoC**: No libp2p, no Mesh interface - just direct WireGuard connection
+  - **P0**: WireGuard client configuration from config file
+  - **P0**: Connection to User VM WireGuard server (port-forward or local network)
+  - **P0**: Tunnel health monitoring ✅
+  - **P0**: Automatic reconnection logic ✅
+  - **P1**: **MVP**: Mesh interface stub (for future libp2p integration)
+  - Location: `internal/wireguard/client.go` (existing, needs PoC simplification note)
+- **Substep 1.6.1.2**: User VM connection (PoC - Direct WireGuard)
+  - **Status**: ✅ DONE (needs update for PoC simplification)
+  - **P0**: **PoC**: Connect directly to User VM's WireGuard server (hard-coded endpoint in config)
+  - **P0**: **PoC**: No discovery needed - just direct connection
+  - **P0**: Connection health monitoring ✅
+  - **P0**: Automatic reconnection logic ✅
+  - **P1**: **MVP**: Use Mesh interface for discovery (deferred)
+  - **P1**: **MVP**: Connect to static list of multiple User VMs (HA support)
+  - **P1**: **MVP**: Load balancing between multiple discovered VMs
+  - **P1**: **MVP**: Failover to backup VM if primary fails
+  - **P2**: **Production**: Discover User VMs via libp2p DHT
+  - Location: `internal/wireguard/client.go` (existing, PoC uses direct connection)
+- **Substep 1.6.1.3**: WireGuard key exchange (PoC - Direct)
+  - **Status**: ✅ DONE (needs update for PoC simplification)
+  - **P0**: **PoC**: WireGuard keys configured in config file (no key exchange needed)
+  - **P0**: **PoC**: Direct WireGuard connection - keys pre-configured
+  - **P0**: Validate connection (tunnel health monitoring) ✅
+  - **P1**: **MVP**: Use Mesh `OpenStream` to establish secure channel to User VM
+  - **P1**: **MVP**: libp2p implementation uses built-in encryption (TLS or Noise)
+  - **P1**: **MVP**: Exchange WireGuard keys over secure stream (via Mesh interface)
+  - **P1**: **MVP**: Simple protocol `/guardian/control/1.0.0` for key exchange
+  - **P1**: Certificate pinning for additional security
+  - Location: `internal/wireguard/client.go` (PoC uses pre-configured keys)
+
+#### Step 1.6.4: WireGuard Client Service (PoC - Direct, MVP/Production - After Mesh Connection)
+- **Substep 1.6.2.1**: WireGuard client implementation
+  - **Status**: ✅ DONE (needs update for libp2p integration)
   - Go WireGuard client using `wg-quick` command (PoC approach) ✅
-  - Connection to KVM VM ✅
+  - **P0**: **PoC**: WireGuard keys pre-configured in config file (no key exchange)
+  - **P1**: **MVP**: Receive WireGuard keys from User VM over Mesh secure channel
+  - **P0**: Configure WireGuard client with exchanged keys
+  - **P0**: **PoC**: Connection to User VM WireGuard server (direct connection) ✅
+  - **P1**: **MVP**: Connection to User VM (after Mesh connection established) ⬜ TODO
   - Configuration management ✅
-  - Key management (config file template generation) ✅
-  - Location: `internal/wireguard/client.go` ✅
-- **Substep 1.6.1.2**: Tunnel management
+  - **P0**: **PoC**: Key management (pre-configured in config file) ✅
+  - **P1**: **MVP**: Key management (received via Mesh, not from config file) ⬜ TODO
+  - Location: `internal/wireguard/client.go` (needs update)
+- **Substep 1.6.4.2**: Tunnel management
   - **Status**: ✅ DONE
   - Tunnel health monitoring ✅
   - Automatic reconnection logic ✅
   - Connection state management ✅
   - Latency tracking ✅
 
-#### Step 1.6.2: gRPC Communication
+#### Step 1.6.5: gRPC Communication (Over WireGuard Tunnel)
 - **Substep 1.6.2.1**: Proto definitions
   - **Status**: ✅ DONE
   - Proto definitions created in `proto/proto/edge/` directory ✅
@@ -575,7 +719,16 @@ Key simplifications:
   - Fully functional with generated proto stubs ✅
   - Location: `internal/grpc/client.go`, `internal/grpc/event_sender.go` ✅
 
-#### Step 1.6.3: Event Transmission
+#### Step 1.6.6: Event Transmission (Optional: Via Mesh Pubsub for MVP)
+- **Substep 1.6.5.0**: Event pubsub via Mesh (MVP enhancement)
+  - **Status**: ⬜ TODO
+  - **P1**: **MVP**: Use Mesh `Publish` for async event notifications
+  - **P1**: **MVP**: Subscribe to `/guardian/events` topic on User VM
+  - **P1**: **MVP**: Keep gRPC for synchronous commands (request/response)
+  - **P2**: **Production**: Full pubsub for event fanout, multi-version protocols
+  - Location: `internal/events/mesh_publisher.go` (uses Mesh interface)
+
+#### Step 1.6.7: Event Transmission (Current: gRPC)
 - **Substep 1.6.3.1**: Event sender service
   - **Status**: ✅ DONE
   - Event transmitter integrated with gRPC client ✅
@@ -888,7 +1041,7 @@ Key simplifications:
   - **P1**: Multi-camera grid layout ✅
   - **P1**: Fullscreen mode ✅
   - **P2**: WebRTC streaming (post-PoC) ⬜ TODO (deferred)
-  - Location: `edge/orchestrator/internal/web/frontend/src/components/CameraViewer.tsx`, `edge/orchestrator/internal/web/frontend/src/components/CameraGrid.tsx`, `edge/orchestrator/internal/web/frontend/src/pages/Cameras.tsx`#### Step 1.9.8: Camera Viewer UI
+  - Location: `edge/orchestrator/internal/web/frontend/src/components/CameraViewer.tsx`, `edge/orchestrator/internal/web/frontend/src/components/CameraGrid.tsx`, `edge/orchestrator/internal/web/frontend/src/pages/Cameras.tsx`
 
 #### Step 1.9.9: Event Timeline UI
 
@@ -1004,54 +1157,364 @@ Key simplifications:
 
 ---
 
-## Phase 2: KVM VM Agent Services (Private Cloud Node)
+## Phase 2: User VM API Services (Docker Compose)
 
-**Duration**: 2-3 weeks  
-**Goal**: Build KVM VM agent services - WireGuard server, event cache, stream relay, basic Filecoin sync
+**Duration**: 1-2 weeks  
+**Goal**: Build User VM API services in Go - WireGuard server, event cache, stream relay, MinIO integration (S3-compatible), AI model catalog, and secondary event analysis
 
-**Scope**: Single-tenant VM agent, no video processing, no AI - strictly relay and orchestration layer
+**Note**: Duration estimate based on actual development velocity (Edge Phase 1 took ~2 days for ~88% completion). Phase 2 may be faster due to similar Go patterns and established architecture.
 
-**Note**: This phase contains **only** KVM VM responsibilities. Video ingest, AI inference, and clip recording are Edge Appliance responsibilities (Phase 1). The KVM VM handles **encrypted clip blobs in transit**, **event metadata**, and **telemetry** - never raw video.
+**PoC Scope**: User VM API runs as a **Docker Compose service** in the local development environment. For PoC:
+- **No SaaS components** - Edge Appliance and User VM API communicate directly
+- **No Management Server** - Direct Edge ↔ User VM API communication
+- **MinIO instead of Filecoin** - Use MinIO (S3-compatible) for remote storage
+- **Docker Compose integration** - User VM API and MinIO run as services alongside Edge Appliance
 
-**Note**: Milestone 1 (first full event flow) will be achieved at the end of Phase 3, after SaaS backend and basic UI are complete.
+**Scope**: User VM API (open source) that runs in Docker Compose. The User VM API:
+- Manages WireGuard tunnel termination for Edge Appliances
+- Maintains AI model catalog (base models, customer-trained variants - basic for PoC)
+- Receives event snapshots/clips, runs secondary analysis (basic for PoC)
+- Persists long-term events/clips in MinIO (S3-compatible storage)
+- Stream relay for on-demand clip viewing from Edge
+- Event cache and telemetry aggregation
 
-### Epic 2.1: KVM VM Agent Project Setup
+---
+
+## Phase 2 Design: Anomaly Detection Model Training Pipeline
+
+**Critical Design Decision**: Before implementing Phase 2, we must design the anomaly detection model training pipeline. This affects:
+- Model architecture selection (what type of models to train)
+- Python training service design (how to train models on user snapshots)
+- Model packaging and distribution (how models are sent to Edge)
+- Edge inference integration (how Edge uses trained models)
+
+### 2.0.1: Model Architecture Design
+
+**Problem**: We need models that can distinguish "normal" vs "unusual" situations from camera snapshots, not just object detection. This requires **anomaly detection** models, not classification models.
+
+**Model Architecture Options**:
+
+1. **Autoencoder-based Anomaly Detection** (Recommended for PoC):
+   - **Architecture**: Convolutional Autoencoder (CAE)
+   - **Training**: Train on "normal" labeled snapshots only
+   - **Inference**: Reconstruct input frame → Calculate reconstruction error → High error = anomaly
+   - **Advantages**: 
+     - Only needs "normal" examples (no need for "threat" examples during training)
+     - Works well for scene-level anomalies (blocked camera, unusual objects, etc.)
+     - Can be trained per-camera for camera-specific normal scenes
+   - **Output Format**: ONNX or OpenVINO IR (for Edge inference)
+   - **Model Size**: ~5-20 MB (suitable for Edge deployment)
+
+2. **Variational Autoencoder (VAE)** (Alternative):
+   - Similar to autoencoder but with probabilistic encoding
+   - Better uncertainty estimation
+   - Slightly more complex
+
+3. **One-Class SVM / Isolation Forest** (Not recommended):
+   - Traditional ML, not deep learning
+   - Requires feature extraction (less flexible)
+   - Harder to deploy on Edge
+
+**Selected Architecture for PoC**: **Convolutional Autoencoder (CAE)**
+
+**Model Specifications**:
+- **Input**: RGB image (e.g., 224x224 or 320x240, configurable per camera)
+- **Encoder**: 3-4 convolutional layers + pooling (reduces to latent space)
+- **Decoder**: 3-4 transposed convolutional layers (reconstructs image)
+- **Latent Space**: 128-256 dimensions (compressed representation)
+- **Loss Function**: Mean Squared Error (MSE) or Perceptual Loss
+- **Output**: Reconstruction error (scalar) + reconstructed image (for visualization)
+- **Threshold**: Configurable per-camera (default: 0.05 reconstruction error)
+
+**Training Data Requirements**:
+- **Minimum**: 50-100 "normal" labeled snapshots per camera
+- **Recommended**: 200-500 "normal" snapshots per camera
+- **Format**: JPEG images, organized by label (`normal/`, `threat/`, `abnormal/`)
+- **Preprocessing**: Resize to model input size, normalize pixel values
+
+### 2.0.2: Python Training Service Design
+
+**Component**: `user-vm-api/training-service/` (Python service, separate from Go services)
+
+**Architecture**:
+```
+user-vm-api/
+├── training-service/          # Python training service
+│   ├── Dockerfile            # Python 3.10+ with PyTorch/ONNX
+│   ├── requirements.txt      # PyTorch, torchvision, onnx, opencv-python, etc.
+│   ├── main.py              # Training service entry point (HTTP/gRPC server)
+│   ├── models/
+│   │   ├── autoencoder.py   # CAE model definition
+│   │   └── base_models.py   # Pre-trained base models
+│   ├── training/
+│   │   ├── trainer.py       # Training loop
+│   │   ├── dataset.py       # Dataset loader (from dataset storage)
+│   │   └── metrics.py       # Training metrics (loss, validation error)
+│   ├── export/
+│   │   ├── onnx_exporter.py # Export to ONNX format
+│   │   └── openvino_exporter.py # Export to OpenVINO IR (optional)
+│   └── config/
+│       └── training_config.yaml # Training hyperparameters
+```
+
+**Training Service API** (HTTP REST or gRPC):
+- `POST /train` - Start training job
+  - Input: `{dataset_id, camera_id, model_config, hyperparameters}`
+  - Output: `{job_id, status}`
+- `GET /train/{job_id}` - Get training job status
+  - Output: `{status, progress, metrics, model_path}`
+- `GET /train/{job_id}/metrics` - Get training metrics
+  - Output: `{epoch, loss, validation_error, learning_rate}`
+
+**Training Workflow**:
+1. User VM API (Go) receives dataset export from Edge
+2. User VM API stores dataset in `datasets/{dataset_id}/{label}/`
+3. User VM API creates training job, calls Python training service
+4. Python service:
+   - Loads "normal" images from `datasets/{dataset_id}/normal/`
+   - Trains CAE model on normal images
+   - Validates on held-out normal images
+   - Exports trained model to ONNX format
+   - Saves model to `models/{model_id}/model.onnx`
+5. User VM API updates model catalog, distributes to Edge
+
+**Training Hyperparameters** (Configurable):
+- Learning rate: 0.001 (Adam optimizer)
+- Batch size: 16-32 (depending on GPU memory)
+- Epochs: 50-100 (early stopping if validation loss plateaus)
+- Image size: 224x224 or 320x240 (per camera)
+- Latent dimension: 128-256
+- Loss function: MSE or Perceptual Loss
+
+### 2.0.3: Model Packaging & Distribution
+
+**Model Format**: ONNX (Open Neural Network Exchange)
+- **Why ONNX**: 
+  - Standard format, works with OpenVINO (Edge inference)
+  - Can be converted to OpenVINO IR on Edge if needed
+  - Smaller file size than PyTorch checkpoints
+- **Model Metadata**:
+  - Model version, training date, dataset ID
+  - Input/output shapes, normalization parameters
+  - Anomaly threshold (reconstruction error threshold)
+  - Camera ID (if per-camera model)
+
+**Distribution Flow**:
+1. Python training service exports model to `models/{model_id}/model.onnx`
+2. User VM API (Go) packages model + metadata:
+   - Model file: `model.onnx`
+   - Metadata: `metadata.json` (version, threshold, camera_id, etc.)
+3. User VM API pushes to Edge via WireGuard (gRPC):
+   - Stream model file over gRPC
+   - Edge stores in `{data_dir}/models/{model_id}/model.onnx`
+   - Edge updates model registry
+4. Edge AI service loads model for inference
+
+### 2.0.4: Edge Inference Integration
+
+**Edge AI Service** (Python, existing):
+- **Current**: Basic brightness-based anomaly detection
+- **New**: Load trained CAE models from User VM
+- **Inference Flow**:
+  1. Receive frame from camera
+  2. Preprocess: Resize to model input size, normalize
+  3. Run CAE inference: `reconstructed = model.encode_decode(frame)`
+  4. Calculate reconstruction error: `error = mse(frame, reconstructed)`
+  5. Compare to threshold: `if error > threshold: trigger_event()`
+  6. If anomaly: Capture snapshot, record clip, enqueue event
+
+**Model Loading**:
+- Edge AI service monitors `{data_dir}/models/` directory
+- On new model file: Load ONNX model (using ONNX Runtime or OpenVINO)
+- Per-camera model assignment: Each camera can have its own trained model
+- Model versioning: Edge keeps previous model until new one is validated
+
+**Inference Performance**:
+- Target: <100ms per frame (10 FPS minimum)
+- Hardware: CPU (Intel N100) or iGPU (Intel QSV) if available
+- Optimization: OpenVINO IR format (faster than ONNX Runtime on Intel)
+
+### 2.0.5: Training Pipeline Integration Points
+
+**User VM API (Go) ↔ Python Training Service**:
+- **Communication**: HTTP REST API (simple) or gRPC (more efficient)
+- **Job Management**: User VM API tracks training jobs in SQLite
+- **File Access**: Python service reads from `datasets/{dataset_id}/` (shared filesystem)
+- **Model Storage**: Python service writes to `models/{model_id}/` (shared filesystem)
+
+**Docker Compose Setup**:
+```yaml
+services:
+  user-vm-api:
+    # Go services
+    ...
+  
+  training-service:
+    build: ./training-service
+    volumes:
+      - ./data/datasets:/app/datasets  # Shared dataset storage
+      - ./data/models:/app/models      # Shared model storage
+    environment:
+      - TRAINING_DATA_DIR=/app/datasets
+      - MODEL_OUTPUT_DIR=/app/models
+    ports:
+      - "8082:8080"  # Training service API
+```
+
+**Training Service Dependencies**:
+- Python 3.10+
+- PyTorch 2.0+ (or TensorFlow if preferred)
+- ONNX / onnxruntime
+- OpenCV (image preprocessing)
+- NumPy, PIL/Pillow
+
+---
+
+**Next Steps**: This design should be implemented in Epic 2.8 (AI Model Orchestrator & Training Pipeline) with the following structure:
+- Step 2.8.1: Model Catalog Management (Go)
+- Step 2.8.2: Dataset Ingestion & Training Pipeline (Go + Python service)
+- Step 2.8.3: Model Distribution to Edge (Go)
+- Step 2.8.4: Python Training Service Implementation (NEW)
+- Step 2.8.5: Edge Inference Integration (Python AI service update)
+
+**Note**: Edge still performs first-level capture/recording, but User VM API handles event caching, stream relay, and remote archival to MinIO over the secure WireGuard channel.
+
+**Note**: Milestone 1 (first full event flow) will be achieved at the end of Phase 2, after User VM API is integrated with Edge Appliance.
+
+### Epic 2.1: User VM API Project Setup
+
+**Priority: P0**
 
 **Priority: P0**
 
 #### Step 2.1.1: Project Structure
-- **Substep 2.1.1.1**: Create KVM VM agent directory structure
+- **Substep 2.1.1.1**: Create User VM API directory structure
   - **Status**: ⬜ TODO
-  - Note: KVM VM agent is a private repository (git submodule in meta repo)
-  - `kvm-agent/` - Main agent services
-  - `kvm-agent/wireguard-server/` - WireGuard server service
-  - `kvm-agent/event-cache/` - Event cache service
-  - `kvm-agent/stream-relay/` - Stream relay service
-  - `kvm-agent/filecoin-sync/` - Filecoin sync service
-  - Note: gRPC proto definitions are in meta repo `proto/proto/kvm/` (imported as Go module)
+  - Note: User VM API is public/open source (developed directly in meta repo, secrets in memory only)
+  - `user-vm-api/` - Main API services
+  - `user-vm-api/cmd/server/` - Main server entry point
+  - `user-vm-api/internal/wireguard-server/` - WireGuard server service
+  - `user-vm-api/internal/event-cache/` - Event cache service
+  - `user-vm-api/internal/stream-relay/` - Stream relay service
+  - `user-vm-api/internal/storage-sync/` - Storage sync service (MinIO/S3 for PoC, Filecoin bridge post-PoC)
+  - `user-vm-api/internal/ai-orchestrator/` - AI model catalog and training
+  - `user-vm-api/internal/event-analyzer/` - Secondary event analysis
+  - `user-vm-api/internal/telemetry-aggregator/` - Telemetry aggregation
+  - `user-vm-api/internal/orchestrator/` - Main orchestrator service
+  - `user-vm-api/internal/shared/` - Shared libraries (config, logging, service base)
+  - `user-vm-api/config/` - Configuration files
+  - `user-vm-api/scripts/` - Build and deployment scripts
+  - Note: gRPC proto definitions are in meta repo `proto/proto/edge/` (Edge ↔ User Server) and `proto/proto/kvm/` (User Server ↔ Management Server), imported as Go modules
 - **Substep 2.1.1.2**: Go modules setup
-  - **Status**: ⬜ TODO
-  - Initialize Go modules
-  - Dependency management (imports `proto/go` from meta repo)
-  - Shared libraries
+  - **Status**: ✅ DONE
+  - Initialize Go modules (`go.mod`, `go.sum`)
+  - Import `proto/go` from meta repo as Go module dependency
+  - Import `crypto/go` from meta repo (if needed for encryption verification)
+  - Dependency management (WireGuard, gRPC, SQLite, etc.)
+  - Shared libraries structure
+  - Location: `user-vm-api/go.mod`
+- **Substep 2.1.1.3**: Set up CI/CD basics
+  - **Status**: ✅ DONE
+  - GitHub Actions for User VM API (in meta repo)
+  - Docker image builds for Go service
+  - Linting and basic tests
+  - Location: `.github/workflows/user-vm-api.yml`
 
-#### Step 2.1.2: Database & Storage Setup
-- **Substep 2.1.2.1**: SQLite schema design
+#### Step 2.1.2: Local Development Environment
+- **Substep 2.1.2.1**: Development tooling setup
   - **Status**: ⬜ TODO
-  - Event cache table
-  - CID storage table
-  - Telemetry buffer table
-  - Edge Appliance registry
-- **Substep 2.1.2.2**: Database migration system
+  - Install Go 1.25+ (as per TECHNICAL_STACK.md)
+  - Set up code formatters (gofmt, goimports)
+  - Configure linters (golangci-lint)
+  - Set up pre-commit hooks
+- **Substep 2.1.2.2**: Local testing environment
   - **Status**: ⬜ TODO
-  - Migration tool setup
-  - Initial migrations
-  - Migration rollback
-- **Substep 2.1.2.3**: Unit tests for KVM VM agent project setup
+  - Docker Compose for local services (if needed)
+  - Mock Edge Appliance setup (for testing WireGuard connections)
+  - Local SQLite database setup
+  - Test WireGuard tunnel setup
+- **Substep 2.1.2.3**: IDE configuration
+  - **Status**: ⬜ TODO
+  - VS Code / Cursor workspace settings
+  - Debugging configurations for Go
+  - Code snippets
+
+#### Step 2.1.3: Database & Storage Setup
+- **Substep 2.1.3.1**: SQLite schema design
+  - **Status**: ⬜ TODO
+  - Event cache table (event_id, edge_id, camera_id, timestamp, event_type, metadata, snapshot_path, clip_path, analyzed, severity, created_at, updated_at)
+  - Edge Appliance registry (edge_id, name, wireguard_public_key, last_seen, status, created_at, updated_at)
+  - AI model catalog (model_id, name, version, type, base_model, training_dataset_id, model_file_path, status, created_at, updated_at)
+  - Training datasets (dataset_id, name, edge_id, dataset_dir_path, label_counts, total_images, status, created_at, updated_at)
+  - CID storage table (cid_id, event_id, clip_path, cid, storage_provider, size_bytes, uploaded_at, retention_until)
+  - Telemetry buffer table (telemetry_id, edge_id, timestamp, metrics_json, forwarded, created_at)
+  - Location: `internal/shared/database/schema.go`
+- **Substep 2.1.3.2**: Database migration system
+  - **Status**: ⬜ TODO
+  - Migration tool setup (golang-migrate or custom)
+  - Initial migrations (create all tables)
+  - Migration rollback support
+  - Migration versioning
+  - Location: `internal/shared/database/migrations/`
+- **Substep 2.1.3.3**: Database connection management
+  - **Status**: ⬜ TODO
+  - SQLite connection pool setup
+  - Connection health checks
+  - Database initialization
+  - Location: `internal/shared/database/db.go`
+- **Substep 2.1.3.4**: File storage system for training datasets
+  - **Status**: ⬜ TODO
+  - **P0**: Create dataset storage directory structure:
+    - Base directory: `{data_dir}/datasets/`
+    - Per-dataset structure: `datasets/{dataset_id}/`
+    - Label-based subdirectories: `datasets/{dataset_id}/{label}/` (e.g., `normal/`, `threat/`, `abnormal/`, `custom/`)
+    - Image files stored in label subdirectories: `datasets/{dataset_id}/{label}/image_{id}.jpg`
+  - **P0**: Dataset storage service:
+    - Create dataset directory structure
+    - Store received snapshot images from Edge exports
+    - Organize images by label
+    - Track dataset size and file counts
+    - Dataset cleanup and deletion
+  - **P0**: Storage quota management:
+    - Per-dataset size limits
+    - Total storage quota for all datasets
+    - Automatic cleanup of old datasets
+  - **P0**: Dataset export/import:
+    - Export dataset as ZIP archive (for training service)
+    - Import dataset from Edge export (ZIP or directory)
+    - Validate dataset structure and images
+  - **P1**: Dataset versioning:
+    - Track dataset versions
+    - Support dataset snapshots
+  - Location: `internal/shared/storage/dataset_storage.go`
+- **Substep 2.1.3.5**: Model file storage
+  - **Status**: ⬜ TODO
+  - **P0**: Create model storage directory structure:
+    - Base directory: `{data_dir}/models/`
+    - Per-model structure: `models/{model_id}/`
+    - Model files: `models/{model_id}/model.onnx` (or `.pt`, `.tflite`, etc.)
+    - Model metadata: `models/{model_id}/metadata.json`
+  - **P0**: Model storage service:
+    - Store trained model files
+    - Track model versions
+    - Model file retrieval for distribution to Edge
+    - Model cleanup and deletion
+  - **P0**: Storage quota management:
+    - Per-model size limits
+    - Total storage quota for all models
+  - Location: `internal/shared/storage/model_storage.go`
+- **Substep 2.1.3.6**: Unit tests for User VM API project setup
   - **Status**: ⬜ TODO
   - **P0**: Test database schema initialization
   - **P0**: Test database migration system
-  - **P1**: Test Go module dependencies
+  - **P0**: Test database connection management
+  - **P0**: Test dataset storage service (directory creation, image storage, organization by label)
+  - **P0**: Test dataset export/import
+  - **P0**: Test model storage service (model file storage, versioning)
+  - **P0**: Test storage quota management
+  - **P0**: Test Go module dependencies
+  - **P1**: Test CI/CD pipeline
+  - Location: `internal/shared/database/db_test.go`, `internal/shared/database/migrations/migrations_test.go`, `internal/shared/storage/dataset_storage_test.go`, `internal/shared/storage/model_storage_test.go`
 
 ### Epic 2.2: WireGuard Server Service
 
@@ -1118,19 +1581,21 @@ Key simplifications:
   - Privacy-minimized metadata extraction
   - Remove sensitive details (bounding boxes, raw scores)
   - Create summarized event record
-- **Substep 2.3.2.2**: SaaS communication
+- **Substep 2.3.2.2**: Event storage (PoC - no SaaS)
   - **Status**: ⬜ TODO
-  - gRPC client to SaaS
-  - Forward summarized events
-  - Handle forwarding failures and retries
-  - Acknowledgment handling
+  - **P0**: Store events in SQLite event cache (no SaaS forwarding in PoC)
+  - **P0**: Event querying and retrieval for Edge Web UI
+  - **P2**: SaaS communication (gRPC client, event forwarding - post-PoC)
+  - **P2**: Handle forwarding failures and retries (post-PoC)
+  - **P2**: Acknowledgment handling (post-PoC)
 - **Substep 2.3.2.3**: Unit tests for event cache service
   - **Status**: ⬜ TODO
   - **P0**: Test event reception from Edge (gRPC server)
   - **P0**: Test event validation and storage
   - **P0**: Test event cache management (querying, expiration, cleanup)
   - **P0**: Test event summarization (privacy-minimized metadata)
-  - **P0**: Test event forwarding to SaaS (gRPC client, retries, acknowledgments)
+  - **P0**: Test event storage and retrieval (no SaaS in PoC)
+  - **P2**: Test event forwarding to SaaS (gRPC client, retries, acknowledgments - post-PoC)
 
 ### Epic 2.4: Telemetry Aggregation Service
 
@@ -1153,17 +1618,19 @@ Key simplifications:
   - **Status**: ⬜ TODO
   - **P0**: Forward simple health status to SaaS
   - **P1**: Summarize telemetry (remove detailed metrics, create summaries)
-- **Substep 2.4.2.2**: Forward to SaaS
+- **Substep 2.4.2.2**: Telemetry storage (PoC - no SaaS)
   - **Status**: ⬜ TODO
-  - **P0**: Send basic health status to SaaS
-  - **P0**: Periodic reporting
-  - **P1**: Advanced alert forwarding
+  - **P0**: Store telemetry in SQLite buffer (no SaaS forwarding in PoC)
+  - **P0**: Telemetry querying for Edge Web UI
+  - **P2**: Forward to SaaS (gRPC client, periodic reporting - post-PoC)
+  - **P2**: Advanced alert forwarding (post-PoC)
 - **Substep 2.4.2.3**: Unit tests for telemetry aggregation service
   - **Status**: ⬜ TODO
   - **P0**: Test telemetry reception and validation
   - **P0**: Test telemetry aggregation (healthy/unhealthy status)
   - **P0**: Test telemetry summarization
-  - **P0**: Test telemetry forwarding to SaaS
+  - **P0**: Test telemetry storage and retrieval (no SaaS in PoC)
+  - **P2**: Test telemetry forwarding to SaaS (post-PoC)
   - **P1**: Test advanced metrics aggregation
 
 ### Epic 2.5: Stream Relay Service
@@ -1171,11 +1638,13 @@ Key simplifications:
 **Priority: P0**
 
 #### Step 2.5.1: Stream Request Handling
-- **Substep 2.5.1.1**: Token validation
+- **Substep 2.5.1.1**: Stream request handling (PoC - no SaaS tokens)
   - **Status**: ⬜ TODO
-  - Receive time-bound tokens from SaaS
-  - Validate token signature and expiration
-  - Extract event ID and user info from token
+  - **P0**: Receive stream requests directly from Edge Web UI (no SaaS tokens in PoC)
+  - **P0**: Validate event ID and basic authorization
+  - **P2**: Token validation (receive time-bound tokens from SaaS - post-PoC)
+  - **P2**: Validate token signature and expiration (post-PoC)
+  - **P2**: Extract event ID and user info from token (post-PoC)
 - **Substep 2.5.1.2**: Stream orchestration
   - **Status**: ⬜ TODO
   - Request clip from Edge Appliance via gRPC
@@ -1193,91 +1662,415 @@ Key simplifications:
   - **P2**: Advanced WebRTC features (transcoding, reconnection logic)
 - **Substep 2.5.2.2**: Unit tests for stream relay service
   - **Status**: ⬜ TODO
-  - **P0**: Test token validation
+  - **P0**: Test stream request handling (no SaaS tokens in PoC)
+  - **P2**: Test token validation (post-PoC)
   - **P0**: Test stream orchestration (request clip from Edge)
   - **P0**: Test HTTP-based relay (progressive download)
   - **P1**: Test WebRTC relay (if implemented)
 
-### Epic 2.6: Filecoin Sync Service (Basic/Stub)
+### Epic 2.6: Storage Sync Service (MinIO/S3 for PoC)
 
-**Priority: P1** (Can be stubbed for PoC)
+**Priority: P0** (MinIO integration for PoC, Filecoin bridge post-PoC)
 
-#### Step 2.6.1: Basic Archive Upload (PoC)
-- **Substep 2.6.1.1**: Encrypted clip reception
+**Note**: For PoC, we use **MinIO** (S3-compatible storage) running in Docker Compose. The User VM API uses the **AWS Go SDK** to communicate with MinIO. Post-PoC, we'll develop an S3-Filecoin bridge to migrate from MinIO to Filecoin.
+
+**Storage Organization**: Each camera has its own MinIO bucket for organizing event frames and clips:
+- Bucket naming: `camera-{camera_id}` (e.g., `camera-rtsp-192.168.1.100`, `camera-usb-usb-3-9`)
+- Event frames stored as: `events/{event_id}/snapshot.jpg`
+- Clips stored as: `events/{event_id}/clip.mp4`
+- Metadata stored as: `events/{event_id}/metadata.json`
+
+#### Step 2.6.1: MinIO Integration (PoC)
+- **Substep 2.6.1.1**: AWS Go SDK setup
+  - **Status**: ⬜ TODO
+  - **P0**: Import AWS SDK for Go v2 (`github.com/aws/aws-sdk-go-v2`)
+  - **P0**: Configure S3 client with MinIO endpoint
+  - **P0**: Credential configuration (access key, secret key)
+  - **P0**: Endpoint configuration (MinIO URL, disable SSL for PoC)
+  - **P0**: Region configuration
+  - Location: `internal/storage-sync/s3_client.go`
+- **Substep 2.6.1.2**: Bucket management (per-camera buckets)
+  - **Status**: ⬜ TODO
+  - **P0**: Create bucket for each camera on first event/clip upload
+  - **P0**: Bucket naming: `camera-{camera_id}` (sanitized)
+  - **P0**: Check bucket existence before operations
+  - **P0**: Handle bucket creation errors gracefully
+  - **P1**: Bucket lifecycle policies (retention, cleanup)
+  - Location: `internal/storage-sync/bucket_manager.go`
+- **Substep 2.6.1.3**: Encrypted clip reception and upload
   - **Status**: ⬜ TODO
   - **P0**: Receive encrypted clips from Edge (already encrypted)
   - **P0**: Store temporarily during upload
-  - **P0**: Automatic cleanup after upload
-- **Substep 2.6.1.2**: Upload implementation (basic)
+  - **P0**: Upload encrypted clips to camera-specific MinIO bucket
+  - **P0**: Object key format: `events/{event_id}/clip.mp4`
+  - **P0**: Automatic cleanup of temporary files after upload
+  - Location: `internal/storage-sync/clip_uploader.go`
+- **Substep 2.6.1.4**: Event frame/snapshot upload
   - **Status**: ⬜ TODO
-  - **P0 Option**: Stub with S3 + fake CIDs for PoC demo
-  - **P1 Option**: Basic IPFS gateway upload
-  - **P2**: Full Filecoin integration
-  - CID retrieval and storage
+  - **P0**: Receive event frames/snapshots from Edge
+  - **P0**: Upload to camera-specific MinIO bucket
+  - **P0**: Object key format: `events/{event_id}/snapshot.jpg`
+  - **P0**: Support multiple snapshots per event
+  - Location: `internal/storage-sync/snapshot_uploader.go`
+- **Substep 2.6.1.5**: Metadata storage
+  - **Status**: ⬜ TODO
+  - **P0**: Store event metadata as JSON in MinIO bucket
+  - **P0**: Object key format: `events/{event_id}/metadata.json`
+  - **P0**: Include event type, timestamp, camera ID, detection details
+  - **P0**: Associate metadata with clips and snapshots
+  - Location: `internal/storage-sync/metadata_uploader.go`
+- **Substep 2.6.1.6**: Object key storage (replacing CID storage)
+  - **Status**: ⬜ TODO
+  - **P0**: Store MinIO object keys in SQLite (replacing CID storage for PoC)
+  - **P0**: Associate object keys with events
+  - **P0**: Query events by camera, date range, event type
+  - **P2**: CID storage (for Filecoin post-PoC)
+  - Location: `internal/storage-sync/metadata.go`
 
 #### Step 2.6.2: Quota Management (Basic)
-- **Substep 2.6.2.1**: Simple quota tracking
+- **Substep 2.6.2.1**: Simple quota tracking (per-camera)
   - **Status**: ⬜ TODO
-  - **P0**: Hard-coded quota limit for PoC
-  - **P0**: Track archive size per tenant
-  - **P2**: Complex quota policies from SaaS
+  - **P0**: Hard-coded quota limit per camera for PoC
+  - **P0**: Track archive size per camera bucket
+  - **P0**: Calculate bucket size using AWS SDK (ListObjectsV2, sum sizes)
+  - **P0**: Store quota usage in SQLite
+  - **P2**: Complex quota policies from SaaS (post-PoC)
 - **Substep 2.6.2.2**: Basic quota enforcement
   - **Status**: ⬜ TODO
-  - **P0**: Check quota before upload
-  - **P0**: Reject uploads if over quota
-  - **P2**: Advanced quota management
+  - **P0**: Check quota before upload (per camera bucket)
+  - **P0**: Reject uploads if camera bucket over quota
+  - **P0**: Quota calculation includes clips, snapshots, and metadata
+  - **P1**: Quota warnings (e.g., 80% threshold)
+  - **P2**: Advanced quota management (post-PoC)
 
 #### Step 2.6.3: Archive Metadata Management
-- **Substep 2.6.3.1**: CID storage
+- **Substep 2.6.3.1**: Object key storage (MinIO per-camera buckets)
   - **Status**: ⬜ TODO
-  - **P0**: Store CIDs in SQLite
-  - **P0**: Associate CIDs with events
+  - **P0**: Store MinIO object keys in SQLite (replacing CID storage for PoC)
+  - **P0**: Associate object keys with events and camera buckets
+  - **P0**: Store bucket name, object key, size, upload timestamp
+  - **P0**: Query objects by camera, event ID, date range
   - **P1**: Basic metadata storage
-- **Substep 2.6.3.2**: Archive status updates
+  - **P2**: CID storage (for Filecoin post-PoC)
+  - Location: `internal/storage-sync/metadata.go`
+- **Substep 2.6.3.2**: Archive status tracking
   - **Status**: ⬜ TODO
-  - **P0**: Update SaaS with archive status
-  - **P0**: CID transmission to SaaS
-  - **P2**: Advanced notification system
-- **Substep 2.6.3.3**: Unit tests for Filecoin sync service
+  - **P0**: Track archive status locally (no SaaS in PoC)
+  - **P0**: Store archive metadata in SQLite (per camera)
+  - **P0**: Track upload status (pending, uploading, completed, failed)
+  - **P0**: Retry failed uploads
+  - **P2**: Archive status updates to SaaS (post-PoC)
+  - **P2**: CID transmission to SaaS (post-PoC)
+  - Location: `internal/storage-sync/status_tracker.go`
+- **Substep 2.6.3.3**: Clip and snapshot retrieval
   - **Status**: ⬜ TODO
-  - **P0**: Test encrypted clip reception
-  - **P0**: Test upload implementation (S3 stub or IPFS gateway)
-  - **P0**: Test quota tracking and enforcement
-  - **P0**: Test CID storage and retrieval
-  - **P0**: Test archive status updates
+  - **P0**: Retrieve clips from MinIO using AWS SDK (GetObject)
+  - **P0**: Retrieve snapshots from MinIO using AWS SDK
+  - **P0**: Stream clips/snapshots to Edge Web UI or stream relay
+  - **P0**: Handle missing objects gracefully
+  - **P0**: Support range requests for partial downloads
+  - Location: `internal/storage-sync/retriever.go`
+- **Substep 2.6.3.4**: Unit tests for storage sync service
+  - **Status**: ⬜ TODO
+  - **P0**: Test AWS SDK client setup and MinIO connection
+  - **P0**: Test bucket creation and management (per-camera buckets)
+  - **P0**: Test encrypted clip upload to camera bucket
+  - **P0**: Test snapshot upload to camera bucket
+  - **P0**: Test metadata upload and retrieval
+  - **P0**: Test quota tracking and enforcement (per camera)
+  - **P0**: Test object key storage and retrieval
+  - **P0**: Test clip/snapshot retrieval from MinIO
+  - **P0**: Test archive status tracking
+  - Location: `internal/storage-sync/*_test.go`
 
-### Epic 2.7: KVM VM Agent Orchestration
+### Epic 2.7: User VM API Orchestration
 
 **Priority: P0**
 
-#### Step 2.7.1: Agent Service Manager
-- **Substep 2.7.1.1**: Main agent service
+#### Step 2.7.1: Orchestrator Service Framework
+- **Substep 2.7.1.1**: Main orchestrator service
   - **Status**: ⬜ TODO
-  - Service initialization
+  - Service initialization and startup
+  - Configuration management (YAML/JSON config)
+  - Logging setup (structured JSON logging)
+  - Graceful shutdown handling
+  - Location: `internal/orchestrator/server.go`
+- **Substep 2.7.1.2**: Service manager pattern
+  - **Status**: ⬜ TODO
   - Service lifecycle management
-  - Configuration management
-- **Substep 2.7.1.2**: Service coordination
+  - Service registration and discovery
+  - Inter-service communication (channels/events)
+  - Service dependency injection
+  - Location: `internal/orchestrator/manager.go`
+- **Substep 2.7.1.3**: Health check system
   - **Status**: ⬜ TODO
-  - Inter-service communication
-  - Service health monitoring
-  - Graceful shutdown
+  - Health check endpoints (HTTP/gRPC)
+  - Service status reporting
+  - Dependency health checks (database, WireGuard, MinIO connection)
+  - Location: `internal/orchestrator/health.go`
+- **Substep 2.7.1.4**: Unit tests for orchestrator service framework
+  - **Status**: ⬜ TODO
+  - **P0**: Test service initialization and shutdown
+  - **P0**: Test service manager lifecycle
+  - **P0**: Test health check system
+  - **P0**: Test configuration management
+  - **P1**: Test inter-service communication
+  - Location: `internal/orchestrator/server_test.go`, `internal/orchestrator/manager_test.go`
 
-#### Step 2.7.2: SaaS Communication
-- **Substep 2.7.2.1**: gRPC client to SaaS
+#### Step 2.7.2: Management Server Communication
+- **Substep 2.7.2.1**: gRPC client to Management Server
   - **Status**: ⬜ TODO
-  - **P0**: Connection setup
+  - **P0**: Connection setup to Management Server
   - **P0**: mTLS configuration
-  - **P0**: Connection health monitoring
-- **Substep 2.7.2.2**: Command handling (basic)
+  - **P0**: Connection health monitoring and reconnection
+  - **P0**: Connection retry logic
+  - Location: `internal/orchestrator/management_client.go`
+- **Substep 2.7.2.2**: Command handling from Management Server
   - **Status**: ⬜ TODO
-  - **P1**: Basic command handling from SaaS
-  - **P2**: Advanced command orchestration
-- **Substep 2.7.2.3**: Unit tests for KVM VM agent orchestration
+  - **P0**: Receive commands from Management Server (update, restart, config changes)
+  - **P0**: Command validation and execution
+  - **P0**: Command acknowledgment
+  - **P1**: Advanced command orchestration (rollback, staged updates)
+  - Location: `internal/orchestrator/command_handler.go`
+- **Substep 2.7.2.3**: Status reporting to Management Server
   - **Status**: ⬜ TODO
-  - **P0**: Test agent service manager initialization
-  - **P0**: Test service coordination and lifecycle
-  - **P0**: Test gRPC client to SaaS (connection, mTLS)
-  - **P1**: Test command handling from SaaS
+  - **P0**: Periodic status reports (health, metrics summary)
+  - **P0**: Event forwarding coordination
+  - **P0**: Telemetry aggregation forwarding
+  - Location: `internal/orchestrator/status_reporter.go`
+- **Substep 2.7.2.4**: Unit tests for Docker Compose integration
+  - **Status**: ⬜ TODO
+  - **P0**: Test Docker Compose service startup and health checks
+  - **P0**: Test networking between Edge and User VM API
+  - **P0**: Test MinIO integration
+  - **P0**: Test WireGuard tunnel setup in Docker Compose
+  - **P2**: Test Management Server communication (post-PoC)
+  - Location: `infra/local/` (integration tests)
+
+### Epic 2.8: AI Model Orchestrator & Training Pipeline
+
+**Priority: P0**
+
+**Note**: This epic implements the anomaly detection model training pipeline designed in Section 2.0. It includes:
+- **Model Architecture**: Convolutional Autoencoder (CAE) for anomaly detection (normal vs unusual)
+- **Python Training Service**: Separate Python service for model training (PyTorch/ONNX)
+- **Model Distribution**: ONNX model format, distributed to Edge via WireGuard
+- **Edge Inference**: Edge AI service loads and runs trained CAE models for real-time anomaly detection
+
+**Architecture Overview**:
+1. Edge exports labeled snapshots (normal/threat/abnormal) → User VM API
+2. User VM API stores dataset in `datasets/{dataset_id}/{label}/`
+3. User VM API triggers Python training service to train CAE model on "normal" images
+4. Python service trains model, exports to ONNX, saves to `models/{model_id}/model.onnx`
+5. User VM API distributes trained model to Edge via WireGuard
+6. Edge AI service loads model, runs inference on incoming frames
+7. High reconstruction error → anomaly detected → event triggered
+
+#### Step 2.8.1: AI Model Catalog Management
+- **Substep 2.8.1.1**: Model registry service
+  - **Status**: ⬜ TODO
+  - **P0**: Maintain registry of base models (YOLOv8, custom models)
+  - **P0**: Store customer-specific fine-tuned models
+  - **P0**: Model versioning and metadata storage
+  - **P0**: Model status tracking (active, training, archived)
+  - Location: `internal/ai-orchestrator/catalog.go`
+- **Substep 2.8.1.2**: Model storage management
+  - **Status**: ⬜ TODO
+  - **P0**: Model file storage (local filesystem or object storage)
+  - **P0**: Model metadata database storage
+  - **P0**: Model file integrity verification
+  - **P1**: Model compression and optimization
+  - Location: `internal/ai-orchestrator/storage.go`
+- **Substep 2.8.1.3**: Unit tests for model catalog
+  - **Status**: ⬜ TODO
+  - **P0**: Test model registry operations (add, update, query, delete)
+  - **P0**: Test model versioning
+  - **P0**: Test model storage management
+  - **P1**: Test model integrity verification
+  - Location: `internal/ai-orchestrator/catalog_test.go`
+
+#### Step 2.8.2: Dataset Ingestion & Training Pipeline
+- **Substep 2.8.2.1**: Dataset reception from Edge
+  - **Status**: ⬜ TODO
+  - **P0**: Receive labeled screenshot datasets exported from Edge (ZIP archives or directory structure)
+  - **P0**: Extract and store dataset images using dataset storage service (`datasets/{dataset_id}/{label}/`)
+  - **P0**: Dataset validation (format, labels, structure, image integrity)
+  - **P0**: Index dataset in SQLite (metadata: dataset_id, label_counts, total_images, dataset_dir_path)
+  - **P0**: Dataset metadata tracking (label counts, size, export date)
+  - Location: `internal/ai-orchestrator/dataset.go` (uses `internal/shared/storage/dataset_storage.go`)
+- **Substep 2.8.2.2**: Training job queue
+  - **Status**: ⬜ TODO
+  - **P0**: Training job creation and queuing
+  - **P0**: Training job status tracking
+  - **P0**: Support incremental training (baseline + customer-labeled data)
+  - **P1**: Training job prioritization
+  - **P1**: Training job scheduling and resource management
+  - Location: `internal/ai-orchestrator/training_queue.go`
+- **Substep 2.8.2.3**: Model training execution (Go orchestrator)
+  - **Status**: ⬜ TODO
+  - **P0**: Integration with Python training service (HTTP REST or gRPC)
+  - **P0**: Training job creation: Call Python service `/train` endpoint with `{dataset_id, camera_id, config}`
+  - **P0**: Training job execution and monitoring (poll Python service for status)
+  - **P0**: Training metrics collection (loss, validation error, epoch progress)
+  - **P0**: Model artifact retrieval: Python service saves to `models/{model_id}/model.onnx`
+  - **P0**: Update model catalog with trained model metadata
+  - **P1**: Training history and metrics tracking per tenant
+  - Location: `internal/ai-orchestrator/trainer.go` (Go orchestrator, calls Python service)
+
+#### Step 2.8.4: Python Training Service Implementation (NEW)
+- **Substep 2.8.4.1**: Python training service setup
+  - **Status**: ⬜ TODO
+  - **P0**: Create `user-vm-api/training-service/` directory structure
+  - **P0**: Python 3.10+ Dockerfile with PyTorch, ONNX, OpenCV dependencies
+  - **P0**: HTTP REST API server (Flask/FastAPI) or gRPC server
+  - **P0**: Training service configuration (data dirs, model output dir, hyperparameters)
+  - Location: `user-vm-api/training-service/`
+- **Substep 2.8.4.2**: CAE model implementation
+  - **Status**: ⬜ TODO
+  - **P0**: Implement Convolutional Autoencoder (CAE) model in PyTorch
+  - **P0**: Encoder: 3-4 conv layers + pooling (224x224 → 128-256 dim latent)
+  - **P0**: Decoder: 3-4 transposed conv layers (latent → 224x224 reconstruction)
+  - **P0**: Configurable input size (224x224 or 320x240)
+  - **P0**: Configurable latent dimension (128-256)
+  - Location: `user-vm-api/training-service/models/autoencoder.py`
+- **Substep 2.8.4.3**: Training pipeline implementation
+  - **Status**: ⬜ TODO
+  - **P0**: Dataset loader: Load "normal" images from `datasets/{dataset_id}/normal/`
+  - **P0**: Data preprocessing: Resize, normalize, augment (optional)
+  - **P0**: Training loop: Train CAE on normal images (MSE loss)
+  - **P0**: Validation: Calculate reconstruction error on held-out normal images
+  - **P0**: Early stopping: Stop if validation loss plateaus
+  - **P0**: Hyperparameters: Learning rate, batch size, epochs (configurable)
+  - Location: `user-vm-api/training-service/training/trainer.py`
+- **Substep 2.8.4.4**: Model export to ONNX
+  - **Status**: ⬜ TODO
+  - **P0**: Export trained PyTorch model to ONNX format
+  - **P0**: Save model to `models/{model_id}/model.onnx`
+  - **P0**: Generate model metadata JSON (version, threshold, camera_id, input_shape)
+  - **P0**: Validate exported ONNX model (test inference)
+  - Location: `user-vm-api/training-service/export/onnx_exporter.py`
+- **Substep 2.8.4.5**: Training service API
+  - **Status**: ⬜ TODO
+  - **P0**: `POST /train` endpoint: Start training job
+    - Input: `{dataset_id, camera_id, model_config, hyperparameters}`
+    - Output: `{job_id, status}`
+  - **P0**: `GET /train/{job_id}` endpoint: Get training status
+    - Output: `{status, progress, metrics, model_path}`
+  - **P0**: `GET /train/{job_id}/metrics` endpoint: Get training metrics
+    - Output: `{epoch, loss, validation_error, learning_rate}`
+  - **P0**: Background training job execution (async)
+  - Location: `user-vm-api/training-service/main.py`
+- **Substep 2.8.4.6**: Unit tests for Python training service
+  - **Status**: ⬜ TODO
+  - **P0**: Test CAE model forward pass
+  - **P0**: Test training loop (mock dataset)
+  - **P0**: Test ONNX export
+  - **P0**: Test training API endpoints
+  - Location: `user-vm-api/training-service/tests/`
+- **Substep 2.8.2.4**: Unit tests for training pipeline
+  - **Status**: ⬜ TODO
+  - **P0**: Test dataset reception and validation
+  - **P0**: Test training job queue operations
+  - **P0**: Test training job execution (mock training service)
+  - **P1**: Test training metrics collection
+  - Location: `internal/ai-orchestrator/dataset_test.go`, `internal/ai-orchestrator/training_queue_test.go`
+
+#### Step 2.8.3: Model Distribution to Edge
+- **Substep 2.8.3.1**: Model packaging and versioning
+  - **Status**: ⬜ TODO
+  - **P0**: Package trained models (ONNX, OpenVINO IR format)
+  - **P0**: Model versioning and tagging
+  - **P0**: Model metadata generation (version, training date, dataset info)
+  - **P0**: Store trained model files using model storage service (`models/{model_id}/model.onnx`)
+  - **P0**: Update model catalog in SQLite with model file path
+  - **P1**: Model compression for efficient transfer
+  - Location: `internal/ai-orchestrator/packager.go` (uses `internal/shared/storage/model_storage.go`)
+- **Substep 2.8.3.2**: Model push to Edge via WireGuard
+  - **Status**: ⬜ TODO
+  - **P0**: Retrieve model file from model storage service (`models/{model_id}/model.onnx`)
+  - **P0**: Push model files to Edge AI service via WireGuard tunnel (gRPC)
+  - **P0**: Model transfer progress tracking
+  - **P0**: Transfer verification and integrity checks
+  - **P0**: Model activation on Edge (acknowledgment/rollback)
+  - Location: `internal/ai-orchestrator/deployer.go` (uses `internal/shared/storage/model_storage.go`)
+- **Substep 2.8.3.3**: Model deployment management
+  - **Status**: ⬜ TODO
+  - **P0**: Track model deployment status per Edge Appliance
+  - **P0**: Rollback support (revert to previous model version)
+  - **P1**: Staged/blue-green deployment of models
+  - **P1**: A/B testing support (deploy different models to different Edge Appliances)
+  - Location: `internal/ai-orchestrator/deployment.go`
+- **Substep 2.8.3.4**: Unit tests for model distribution
+  - **Status**: ⬜ TODO
+  - **P0**: Test model packaging and versioning
+  - **P0**: Test model push to Edge (mock Edge service)
+  - **P0**: Test model activation and rollback
+  - **P1**: Test staged deployment
+  - Location: `internal/ai-orchestrator/deployer_test.go`, `internal/ai-orchestrator/deployment_test.go`
+
+### Epic 2.9: Secondary Event Analysis & Alerting
+
+**Priority: P0**
+
+#### Step 2.9.1: Event Reception & Analysis Pipeline
+- **Substep 2.9.1.1**: Event snapshot/clip reception
+  - **Status**: ⬜ TODO
+  - **P0**: Receive event snapshots and clips from Edge via WireGuard/gRPC
+  - **P0**: Validate event data structure
+  - **P0**: Store event media temporarily for analysis
+  - **P0**: Enforce WireGuard-only data plane (reject non-WireGuard connections)
+  - Location: `internal/event-analyzer/receiver.go`
+- **Substep 2.9.1.2**: Secondary inference service
+  - **Status**: ⬜ TODO
+  - **P0**: Run higher-accuracy inference on event snapshots/clips
+  - **P0**: Use trained models from catalog for analysis
+  - **P0**: Generate detection results with confidence scores
+  - **P0**: Compare with Edge's initial detection results
+  - **P1**: Multi-model ensemble analysis
+  - Location: `internal/event-analyzer/inference.go`
+- **Substep 2.9.1.3**: Severity classification
+  - **Status**: ⬜ TODO
+  - **P0**: Classify event severity (critical, warning, normal, false_positive)
+  - **P0**: Decision logic based on inference results and thresholds
+  - **P0**: Persist VM-side event verdicts in database
+  - **P1**: Adaptive threshold adjustment based on feedback
+  - Location: `internal/event-analyzer/classifier.go`
+- **Substep 2.9.1.4**: Unit tests for event analysis
+  - **Status**: ⬜ TODO
+  - **P0**: Test event reception and validation
+  - **P0**: Test secondary inference (mock inference service)
+  - **P0**: Test severity classification logic
+  - **P0**: Test event verdict persistence
+  - Location: `internal/event-analyzer/receiver_test.go`, `internal/event-analyzer/classifier_test.go`
+
+#### Step 2.9.2: Alert Generation & Forwarding
+- **Substep 2.9.2.1**: Alert generation
+  - **Status**: ⬜ TODO
+  - **P0**: Generate alerts for critical events
+  - **P0**: Alert metadata (event_id, severity, timestamp, camera_id)
+  - **P0**: Alert deduplication (prevent duplicate alerts for same event)
+  - **P1**: Alert aggregation (group related events)
+  - Location: `internal/event-analyzer/alert.go`
+- **Substep 2.9.2.2**: Alert forwarding to Management Server
+  - **Status**: ⬜ TODO
+  - **P0**: Forward alerts to Management Server via gRPC
+  - **P0**: Alert acknowledgment handling
+  - **P0**: Retry logic for failed alert forwarding
+  - **P1**: Alert priority queuing
+  - Location: `internal/event-analyzer/forwarder.go`
+- **Substep 2.9.2.3**: Feedback loop to Edge
+  - **Status**: ⬜ TODO
+  - **P1**: Send feedback to Edge (e.g., update anomaly thresholds)
+  - **P1**: Model performance feedback
+  - **P2**: Adaptive threshold adjustment on Edge
+  - Location: `internal/event-analyzer/feedback.go`
+- **Substep 2.9.2.4**: Unit tests for alerting
+  - **Status**: ⬜ TODO
+  - **P0**: Test alert generation
+  - **P0**: Test alert forwarding to Management Server
+  - **P0**: Test alert acknowledgment and retry logic
+  - **P1**: Test feedback loop to Edge
+  - Location: `internal/event-analyzer/alert_test.go`, `internal/event-analyzer/forwarder_test.go`
 
 ---
 
@@ -2228,20 +3021,28 @@ Key simplifications:
 - Complex retention policies
 - Full archive client implementation
 
-### Phase 2 Success Criteria (KVM VM Agent)
+### Phase 2 Success Criteria (User VM API)
 
 **PoC Must-Have:**
 - ✅ WireGuard server running and accepting Edge connections
-- ✅ KVM VM receiving events from Edge Appliances
-- ✅ Events cached in SQLite and forwarded to SaaS
-- ✅ Basic stream relay working (Edge → KVM VM → Client via HTTP or WebRTC)
-- ✅ Basic telemetry aggregation and forwarding to SaaS
-- ✅ **Milestone 1**: First full event flow (Camera → Edge → KVM VM → SaaS → Simple UI)
+- ✅ User Server receiving events from Edge Appliances
+- ✅ Events cached in SQLite and forwarded to Management Server
+- ✅ Basic stream relay working (Edge → User Server → Client via HTTP)
+- ✅ Basic telemetry aggregation and forwarding to Management Server
+- ✅ AI model catalog management (base models + customer-trained variants)
+- ✅ Dataset ingestion from Edge and training job queuing
+- ✅ Model distribution to Edge via WireGuard tunnel
+- ✅ Secondary event analysis (inference on snapshots/clips, severity classification)
+- ✅ Alert generation and forwarding to Management Server
+- ✅ Basic remote storage (S3-compatible for PoC, with CID tracking)
+- ✅ **Milestone 1**: First full event flow (Camera → Edge → User Server → Management Server → SaaS → Simple UI)
 
 **Stretch Goals:**
 - Full WebRTC implementation (HTTP relay acceptable for PoC)
-- Full Filecoin integration (S3 stub acceptable for PoC)
-- Advanced telemetry aggregation
+- Full Filecoin/IPFS integration (S3 stub acceptable for PoC)
+- Advanced telemetry aggregation and analytics
+- Staged/blue-green model deployment
+- Multi-model ensemble analysis
 
 ### Phase 3 Success Criteria (SaaS Backend)
 

@@ -1,0 +1,73 @@
+# User VM API Configuration Example
+# Copy this file to config.yaml and customize for your environment
+
+user_vm_api:
+  orchestrator:
+    log_level: "info"
+    log_format: "text"
+    data_dir: "./data"
+    config_file: ""
+
+  wireguard_server:
+    enabled: true
+    interface: "wg0"
+    listen_port: 51820
+    # private_key: "/path/to/private/key"  # Set via environment or secure key management
+    # public_key: "/path/to/public/key"    # Set via environment or secure key management
+    config_path: "/etc/wireguard/wg0.conf"
+
+  event_cache:
+    enabled: true
+    database_path: "./data/events.db"
+    retention_days: 30
+    cleanup_interval: 24h
+
+  stream_relay:
+    enabled: true
+    listen_addr: ":8080"
+    # token_secret: "your-secret-key"  # Set via environment variable
+
+  storage_sync:
+    enabled: true
+    provider: "s3"  # s3 (MinIO for PoC), ipfs, filecoin (post-PoC)
+    provider_config:
+      endpoint: "http://minio:9000"  # MinIO for PoC
+      # Note: Each camera gets its own bucket (camera-{camera_id})
+      # Base bucket name is used as prefix, actual buckets are created per camera
+      bucket_prefix: "camera-"  # Buckets: camera-rtsp-192.168.1.100, camera-usb-usb-3-9, etc.
+      region: "us-east-1"
+      access_key_id: "minioadmin"  # MinIO default for PoC
+      secret_access_key: "minioadmin"  # MinIO default for PoC
+      use_ssl: false  # MinIO for PoC
+    quota_gb_per_camera: 10  # Quota per camera bucket
+    retention_days: 90
+
+  ai_orchestrator:
+    enabled: true
+    model_catalog_path: "./data/models"
+    training_enabled: true
+    training_service: "http://localhost:8081"  # Training service endpoint
+
+  event_analyzer:
+    enabled: true
+    inference_service: "http://localhost:8082"  # Inference service endpoint
+    severity_threshold: 0.7
+
+  telemetry_aggregator:
+    enabled: true
+    aggregation_interval: 1m
+    forward_interval: 5m
+
+  management_server:
+    enabled: true
+    endpoint: "management.example.com:443"
+    mtls: true
+    cert_path: "/path/to/cert.pem"
+    key_path: "/path/to/key.pem"
+    ca_path: "/path/to/ca.pem"
+
+log:
+  level: "info"
+  format: "text"
+  output: "stdout"
+

@@ -35,10 +35,10 @@ This section defines the minimal, production-ready stack for initial implementat
 
 ### SaaS Control Plane
 
-- **Language**: Go 1.23+, Gin framework
+- **Language**: Go 1.25+, Gin framework
 - **Internal Communication**: gRPC
 - **Frontend**: React + TypeScript, responsive web (PWA-first; native mobile later)
-- **Database**: PostgreSQL 16+, Redis for cache/sessions
+- **Database**: PostgreSQL 18+, Redis for cache/sessions
 - **Message Queue**: RabbitMQ
 - **Auth**: Auth0 (hosted OIDC)
 - **Object Storage**: AWS S3 (or S3-compatible) + CloudFront/Cloudflare CDN
@@ -46,20 +46,29 @@ This section defines the minimal, production-ready stack for initial implementat
 
 ### KVM VM (Private Cloud Node)
 
-- **OS**: Ubuntu Server 24.04 LTS (or 22.04 LTS)
+- **OS**: Ubuntu Server 24.04 LTS 
 - **Runtime**: Docker + systemd (no Kubernetes)
 - **Database**: SQLite per tenant
-- **Services**: Go daemons for WireGuard server, event cache, Filecoin client, Pion WebRTC relay
-- **Communication**: gRPC + mTLS (certificates bootstrapped during VM provisioning)
+- **Services**: Go daemons for WireGuard server, libp2p peer, event cache, MinIO client (PoC), Pion WebRTC relay
+- **Communication**: 
+  - **libp2p** for peer discovery and NAT traversal (Edge ↔ User VM)
+  - **WireGuard** for encrypted data tunnel (established after libp2p connection)
+  - **gRPC** over WireGuard tunnel for application data
+  - **mTLS** for SaaS ↔ User VM (certificates bootstrapped during VM provisioning)
+- **High Availability**: Multiple VMs per customer (production), single VM for PoC
 
 ### Edge Appliance
 
-- **OS**: Ubuntu 24.04 LTS (or 22.04 LTS)
+- **OS**: Ubuntu 24.04 LTS 
 - **Runtimes**: Go (orchestrator + crypto + storage) + Python 3.12+ (AI inference only)
 - **Video**: FFmpeg (hardware-accelerated where possible), minimal OpenCV for preprocessing
 - **AI**: OpenVINO (primary), ONNX Runtime (fallback)
 - **Encryption**: AES-256-GCM, Argon2id for key derivation
 - **Storage**: ext4 + SQLite for metadata, local filesystem for clips
+- **Networking**:
+  - **libp2p** for User VM discovery and NAT traversal (works behind WiFi router NAT)
+  - **WireGuard** for encrypted data tunnel (established after libp2p connection)
+  - **gRPC** over WireGuard for application communication
 
 ### Observability
 
@@ -75,7 +84,7 @@ This section defines the minimal, production-ready stack for initial implementat
 
 **Baseline:**
 
-- **Go** (Golang 1.23+)
+- **Go** (Golang 1.25+)
   - High performance, excellent concurrency
   - Strong standard library for networking
   - Good fit for API services and microservices
@@ -119,7 +128,7 @@ This section defines the minimal, production-ready stack for initial implementat
 
 **Baseline:**
 
-- **PostgreSQL 16+**
+- **PostgreSQL 18+**
   - ACID compliance for critical data
   - JSONB for flexible event metadata
   - Strong consistency for user accounts, billing
@@ -264,6 +273,7 @@ This section defines the minimal, production-ready stack for initial implementat
 **Baseline:**
 
 - **Go** (Golang 1.23+)
+
   - Primary orchestrator service
   - Camera management, video processing coordination
   - Event queue and transmission
@@ -271,8 +281,8 @@ This section defines the minimal, production-ready stack for initial implementat
   - gRPC client for KVM VM communication
   - Local storage management
   - **Web UI server** (embedded HTTP server)
-
 - **Python 3.12+**
+
   - AI inference service only (FastAPI)
   - OpenVINO/ONNX Runtime integration
   - Minimal dependencies (OpenCV, NumPy, OpenVINO/ONNX)
@@ -631,9 +641,49 @@ This section defines the minimal, production-ready stack for initial implementat
 ### 8.1 VPN & Tunneling
 
 - **WireGuard**
-  - Edge ↔ KVM VM encrypted tunnel
+  - Edge ↔ User VM encrypted tunnel for data transfer
   - Go libraries: `golang.zx2c4.com/wireguard`
   - Native `wg` command-line tool
+  - High-performance VPN tunnel for actual data transfer
+
+- **libp2p (IPFS)**
+  - Peer discovery and NAT traversal for Edge ↔ User VM connection
+  - Go library: `github.com/libp2p/go-libp2p`
+  - Handles NAT traversal (hole punching, relay, DHT discovery)
+  - Used for initial connection establishment and WireGuard key exchange
+  - Supports multiple VM discovery (HA support)
+  - **Combined with WireGuard**: libp2p for discovery/NAT traversal, WireGuard for data transfer
+
+**Architecture**:
+1. **Mesh Abstraction Layer**: libp2p is abstracted behind a `Mesh` interface to keep domain logic decoupled
+2. Edge uses Mesh interface to discover available User VMs (libp2p implementation handles DHT/bootstrap)
+3. libp2p establishes connection (handles NAT traversal automatically)
+4. Edge and User VM exchange WireGuard keys over Mesh secure channel
+5. WireGuard tunnel is established for efficient data transfer
+6. libp2p connection maintained for health checks and re-establishment
+
+**Implementation Progression**:
+- **PoC (Minimal)**: Static bootstrap (hard-coded User VM address), simple protocol `/guardian/control/1.0.0`, no DHT/relays/pubsub
+- **MVP (Basic)**: Static peer list (multiple User VMs), one pubsub topic `/guardian/events`, still no DHT
+- **Production (Full)**: DHT-based discovery, multiple protocols, relays, multi-version support
+
+**Mesh Interface Pattern**:
+```go
+type NodeID string // Logical node ID (not libp2p.PeerID)
+
+type Mesh interface {
+    SendCommand(ctx context.Context, to NodeID, payload []byte) error
+    OpenStream(ctx context.Context, to NodeID, protocol string) (io.ReadWriteCloser, error)
+    Publish(ctx context.Context, topic string, data []byte) error
+    Subscribe(topic string, handler func(NodeID, []byte)) (Subscription, error)
+    LocalNodeID() NodeID
+}
+```
+
+This abstraction allows:
+- **Future flexibility**: Swap libp2p for gRPC/HTTP without changing domain code
+- **Clean separation**: Domain logic never sees `libp2p.PeerID` or `*libp2p.Host`
+- **Gradual enhancement**: Add DHT, pubsub, relays without refactoring call sites
 
 ### 8.2 TLS/mTLS
 

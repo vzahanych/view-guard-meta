@@ -1,0 +1,86 @@
+version: '3.8'
+
+services:
+  # User VM API (Go)
+  user-vm-api:
+    build:
+      context: ../..  # Build from repo root to include proto/go
+      dockerfile: user-vm-api/Dockerfile
+    container_name: view-guard-user-vm-api
+    depends_on:
+      minio:
+        condition: service_healthy
+    ports:
+      - "8280:8080"  # Stream relay port
+      - "51820:51820/udp"  # WireGuard server port
+    environment:
+      - USER_VM_API_DATA_DIR=/app/data
+      - USER_VM_API_WIREGUARD_ENABLED=true
+      - USER_VM_API_WIREGUARD_INTERFACE=wg0
+      - USER_VM_API_WIREGUARD_LISTEN_PORT=51820
+      - USER_VM_API_EVENT_CACHE_ENABLED=true
+      - USER_VM_API_EVENT_CACHE_DATABASE_PATH=/app/data/events.db
+      - USER_VM_API_STREAM_RELAY_ENABLED=true
+      - USER_VM_API_STREAM_RELAY_LISTEN_ADDR=:8080
+      - USER_VM_API_STORAGE_SYNC_ENABLED=true
+      - USER_VM_API_STORAGE_SYNC_PROVIDER=s3
+      - USER_VM_API_STORAGE_SYNC_S3_ENDPOINT=http://minio:9000
+      - USER_VM_API_STORAGE_SYNC_S3_BUCKET=view-guard-archive
+      - USER_VM_API_STORAGE_SYNC_S3_ACCESS_KEY=minioadmin
+      - USER_VM_API_STORAGE_SYNC_S3_SECRET_KEY=minioadmin
+      - USER_VM_API_STORAGE_SYNC_S3_REGION=us-east-1
+      - USER_VM_API_STORAGE_SYNC_S3_USE_SSL=false
+      - LOG_LEVEL=info
+      - LOG_FORMAT=text
+    volumes:
+      - user-vm-data:/app/data
+      - ./user-vm-config.yaml:/app/config/config.yaml:ro
+    networks:
+      - view-guard-edge
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    sysctls:
+      - net.ipv4.ip_forward=1
+
+  # MinIO (S3-compatible storage)
+  minio:
+    image: minio/minio:latest
+    container_name: view-guard-minio
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"  # S3 API
+      - "9001:9001"  # Console UI
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
+    volumes:
+      - minio-data:/data
+    networks:
+      - view-guard-edge
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  user-vm-data:
+    driver: local
+  minio-data:
+    driver: local
+
+networks:
+  view-guard-edge:
+    external: true
+    name: view-guard-edge
+

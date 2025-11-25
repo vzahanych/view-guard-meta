@@ -4,7 +4,9 @@ This document provides detailed architecture diagrams for The Private AI Guardia
 
 ## How to Read This Document
 
-This document explains how the SaaS control plane, per-tenant KVM VMs (Private Cloud Nodes), and on-premise Edge Appliances work together to provide AI-powered video security without ever centralizing raw video or encryption keys. The architecture is organized into three distinct layers, each with clear responsibilities and privacy boundaries. All data flows preserve the core guarantee that raw video never leaves customer premises unencrypted.
+This document explains how the SaaS control plane, per-tenant User VMs (Private Cloud Nodes), and on-premise Edge Appliances work together to provide AI-powered video security without ever centralizing raw video or encryption keys. The architecture is organized into three distinct layers, each with clear responsibilities and privacy boundaries. All data flows preserve the core guarantee that raw video never leaves customer premises unencrypted.
+
+**PoC Note**: For the Proof of Concept, **no SaaS components are needed**. The PoC focuses on Edge Appliance ↔ User VM API communication, with User VM API running as a Docker Compose service and using MinIO (S3-compatible) for remote storage instead of Filecoin. Post-PoC, an S3-Filecoin bridge will be developed to migrate from MinIO to Filecoin.
 
 ## Table of Contents
 
@@ -22,17 +24,33 @@ This document explains how the SaaS control plane, per-tenant KVM VMs (Private C
 
 This section illustrates how the architecture supports real-world user experiences, connecting the technical diagrams to practical use cases.
 
+### Journey 0: Customer Onboarding and Edge Appliance Installation
+
+* **Step 1**: User signs up on SaaS UI → Creates account and selects subscription plan → SaaS creates tenant record.
+
+* **Step 2**: SaaS provisions User VM → Management Server creates dedicated User VM instance → User VM generates WireGuard server keys → User VM is assigned unique FQDN (e.g., `user-abc123.example.com`) → Client certificates and keys are generated for Edge Appliance.
+
+* **Step 3**: SaaS generates installation package → Tenant-specific package (ISO/EXE - format TBD) is created → Package contains: OS/Edge application, embedded certificates, keys, User VM libp2p peer IDs (for discovery), and bootstrap configuration → User downloads package from SaaS UI.
+
+* **Step 4**: User installs on Mini PC → For ISO: writes to USB, boots Mini PC, runs automated installation → For EXE: runs installer on Mini PC → Mini PC reboots/restarts as Edge Appliance.
+
+* **Step 5**: Automatic connection establishment → Edge Go application reads embedded certificates, keys, and User VM peer IDs → Uses **Mesh interface** (libp2p implementation) to discover User VMs (handles NAT traversal automatically, works behind WiFi router) → **PoC**: Connects to static User VM address → **MVP/Production**: Discovers via static list or DHT → Establishes Mesh connection to User VM → Exchanges WireGuard keys over Mesh secure channel → Establishes **WireGuard tunnel** for data transfer → User VM validates credentials → Edge Appliance is registered and promoted to active device.
+
+* **Step 6**: Camera discovery and configuration → Edge discovers cameras (RTSP/ONVIF/USB) → Reports to User VM → SaaS UI displays cameras → User configures cameras via SaaS UI → Configuration flows: SaaS → User VM → Edge Appliance.
+
+**Result**: User has a fully functional Edge Appliance connected to their private cloud node (User VM) via secure WireGuard tunnel, ready for AI-powered video security.
+
 ### Journey 1: Motion Detection and Alert
 
-* Home user's camera detects motion → Edge Appliance processes video locally with AI → Event metadata (no video) is sent to KVM VM → KVM VM forwards summary to SaaS → User receives push notification on mobile app → User opens app and sees event in timeline with thumbnail.
+* Home user's camera detects motion → Edge Appliance processes video locally with AI → Event metadata (no video) is sent to User VM → User VM forwards summary to SaaS → User receives push notification on mobile app → User opens app and sees event in timeline with thumbnail.
 
 ### Journey 2: Remote Clip Viewing
 
-* User receives motion alert → Opens app → Sees event metadata in timeline → Taps "View Clip" → SaaS issues time-bound token → KVM VM validates token and requests clip from Edge Appliance → Edge Appliance streams clip over WireGuard tunnel → KVM VM relays stream to user's browser over HTTPS/WebRTC → User views clip without SaaS ever storing the video.
+* User receives motion alert → Opens app → Sees event metadata in timeline → Taps "View Clip" → SaaS issues time-bound token → User VM validates token and requests clip from Edge Appliance → Edge Appliance streams clip over WireGuard tunnel → User VM relays stream to user's browser over HTTPS/WebRTC → User views clip without SaaS ever storing the video.
 
 ### Journey 3: Archive and Retrieve Evidence
 
-* Important event occurs (e.g., break-in) → Edge Appliance encrypts clip using user-derived key → Encrypted clip sent to KVM VM → KVM VM checks quota and uploads to Filecoin → CID stored in SaaS → Months later, user needs evidence → User requests archived clip → SaaS provides CID → User's browser fetches encrypted blob directly from Filecoin → Browser decrypts locally using user secret → Evidence retrieved without SaaS or KVM VM ever seeing plaintext.
+* Important event occurs (e.g., break-in) → Edge Appliance encrypts clip using user-derived key → Encrypted clip sent to User VM → User VM checks quota and uploads to Filecoin → CID stored in SaaS → Months later, user needs evidence → User requests archived clip → SaaS provides CID → User's browser fetches encrypted blob directly from Filecoin → Browser decrypts locally using user secret → Evidence retrieved without SaaS or User VM ever seeing plaintext.
 
 ---
 
@@ -59,16 +77,25 @@ This section provides a top-level view of the entire system, showing how the mul
                                     │ API / Control Channel
                                     │ (No raw video data)
                                     │
-        ┌───────────────────────────┼───────────────────────────┐
-        │                           │                           │
-        ▼                           ▼                           ▼
-┌───────────────┐          ┌───────────────┐          ┌───────────────┐
-│  Customer A   │          │  Customer B   │          │  Customer N   │
-│  KVM VM       │          │  KVM VM       │          │  KVM VM       │
-│               │          │               │          │               │
-│ (Private      │          │ (Private      │          │ (Private      │
-│  Cloud Node)  │          │  Cloud Node)  │          │  Cloud Node)  │
-└───────┬───────┘          └───────┬───────┘          └───────┬───────┘
+                                    │
+                                    ▼
+                    ┌───────────────────────────────┐
+                    │   Management Server (Private) │
+                    │   - Controls User Servers     │
+                    │   - Talks to SaaS             │
+                    └───────────────┬───────────────┘
+                                    │
+                    ┌───────────────┼───────────────┐
+                    │               │               │
+                    ▼               ▼               ▼
+        ┌───────────────┐  ┌───────────────┐  ┌───────────────┐
+        │  Customer A   │  │  Customer B   │  │  Customer N   │
+        │  User Server  │  │  User Server  │  │  User Server  │
+        │  (Open Source)│  │  (Open Source)│  │  (Open Source)│
+        │               │  │               │  │               │
+        │ (Private      │  │ (Private      │  │ (Private      │
+        │  Cloud Node)  │  │  Cloud Node)  │  │  Cloud Node)  │
+        └───────┬───────┘  └───────┬───────┘  └───────┬───────┘
         │                          │                          │
         │ WireGuard Tunnel         │ WireGuard Tunnel         │ WireGuard Tunnel
         │                          │                          │
@@ -102,16 +129,18 @@ This section breaks down each of the three architectural layers in detail, showi
 │  • Subscription management & billing                                        │
 │  • Global event inventory & search                                          │
 │  • Unified UI (web & mobile)                                                 │
-│  • KVM VM provisioning & lifecycle management                               │
+│  • User Server provisioning & lifecycle management (via Management Server)   │
 │  • ISO image generation (tenant-specific)                                   │
 │  • Health monitoring & alerting                                              │
 │  • Archive status & retention policy configuration                           │
+│  • AI model entitlements & access control                                    │
 │                                                                              │
 │  Data Stored:                                                                │
 │  • User accounts & credentials (hashed)                                     │
 │  • Event metadata (timestamps, labels, camera IDs, CIDs)                    │
 │  • Subscription & billing records                                           │
-│  • KVM VM assignments & status                                              │
+│  • User Server assignments & status                                         │
+│  • AI model entitlements & access control                                    │
 │  • NO raw video, NO decryption keys                                         │
 │                                                                              │
 └──────────────────────────────────────────────────────────────────────────────┘
@@ -120,7 +149,42 @@ This section breaks down each of the three architectural layers in detail, showi
                                     │ (Event metadata, control commands)
                                     │
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│ LAYER 2: Customer KVM VM (Single-Tenant, "Private Cloud Node")              │
+│ LAYER 2: Management Server (Private Infrastructure)                        │
+├──────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  ┌────────────────────────────────────────────────────────────────────┐    │
+│  │ User Server Controller                                             │    │
+│  │ • Controls User Server lifecycle (start, stop, update, scale)      │    │
+│  │ • Manages User Server instances and assignments                     │    │
+│  │ • Coordinates model distribution to User Servers                    │    │
+│  └────────────────────────────────────────────────────────────────────┘    │
+│                                                                              │
+│  ┌────────────────────────────────────────────────────────────────────┐    │
+│  │ VM Provisioner                                                     │    │
+│  │ • Creates and manages User Server VMs                             │    │
+│  │ • Assigns resources and configures networking                      │    │
+│  │ • Issues bootstrap tokens to User Servers                          │    │
+│  └────────────────────────────────────────────────────────────────────┘    │
+│                                                                              │
+│  ┌────────────────────────────────────────────────────────────────────┐    │
+│  │ SaaS Connector                                                    │    │
+│  │ • Communicates with SaaS Control Plane                            │    │
+│  │ • Routes requests between SaaS and User Servers                   │    │
+│  │ • Aggregates health and telemetry from User Servers                │    │
+│  └────────────────────────────────────────────────────────────────────┘    │
+│                                                                              │
+│  Data Stored:                                                                │
+│  • User Server assignments and status                                       │
+│  • Aggregated health and telemetry data                                     │
+│  • NO user data, NO raw video, NO decryption keys                           │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    │ Control Channel
+                                    │ (User Server management)
+                                    │
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ LAYER 3: User Server (Single-Tenant, Open Source, "Private Cloud Node")     │
 ├──────────────────────────────────────────────────────────────────────────────┤
 │                                                                              │
 │  ┌────────────────────────────────────────────────────────────────────┐    │
@@ -130,18 +194,34 @@ This section breaks down each of the three architectural layers in detail, showi
 │  └────────────────────────────────────────────────────────────────────┘    │
 │                                                                              │
 │  ┌────────────────────────────────────────────────────────────────────┐    │
-│  │ Event Cache & Telemetry Collector                                  │    │
-│  │ • Receives event metadata from Edge                                │    │
-│  │ • Caches rich metadata locally (bounding boxes, detection scores) │    │
-│  │ • Forwards summarized, privacy-minimized metadata to SaaS         │    │
+│  │ AI Model Orchestrator                                               │    │
+│  │ • Maintains catalog of AI models                                    │    │
+│  │ • Receives labeled screenshot datasets from Edge                    │    │
+│  │ • Retrains models on user-labeled data                              │    │
+│  │ • Distributes trained models to Edge via WireGuard                  │    │
+│  │ • Manages model versions and activation                             │    │
 │  └────────────────────────────────────────────────────────────────────┘    │
 │                                                                              │
 │  ┌────────────────────────────────────────────────────────────────────┐    │
-│  │ Filecoin Sync Orchestrator                                         │    │
-│  │ • Receives encrypted clips from Edge                               │    │
-│  │ • Enforces quota & retention policies                              │    │
-│  │ • Uploads to Filecoin/IPFS provider                                │    │
-│  │ • Stores CIDs & metadata                                           │    │
+│  │ Event Cache & Secondary Analysis                                   │    │
+│  │ • Receives event metadata and snapshots/clips from Edge             │    │
+│  │ • Performs secondary AI analysis for alerting decisions             │    │
+│  │ • Caches rich metadata locally (bounding boxes, detection scores)  │    │
+│  │ • Forwards summarized, privacy-minimized metadata to SaaS           │    │
+│  └────────────────────────────────────────────────────────────────────┘    │
+│                                                                              │
+│  ┌────────────────────────────────────────────────────────────────────┐    │
+│  │ Storage Sync Orchestrator (MinIO/S3 for PoC)                      │    │
+│  │ • Receives encrypted clips and snapshots from Edge                 │    │
+│  │ • Uses AWS Go SDK v2 to communicate with MinIO                     │    │
+│  │ • Creates per-camera buckets (`camera-{camera_id}`)                │    │
+│  │ • Uploads clips: `events/{event_id}/clip.mp4`                      │    │
+│  │ • Uploads snapshots: `events/{event_id}/snapshot.jpg`               │    │
+│  │ • Uploads metadata: `events/{event_id}/metadata.json`              │    │
+│  │ • Enforces quota & retention policies (per camera)                 │    │
+│  │ • Stores object keys & metadata in SQLite                           │    │
+│  │ • Manages long-term archive of reviewed events/clips               │    │
+│  │ • Post-PoC: S3-Filecoin bridge for migration                       │    │
 │  └────────────────────────────────────────────────────────────────────┘    │
 │                                                                              │
 │  ┌────────────────────────────────────────────────────────────────────┐    │
@@ -152,10 +232,13 @@ This section breaks down each of the three architectural layers in detail, showi
 │  └────────────────────────────────────────────────────────────────────┘    │
 │                                                                              │
 │  Data Stored:                                                                │
-│  • No persistent storage of raw or decrypted video                          │
-│  • Only short-lived encrypted clip buffers during Filecoin upload            │
+│  • AI model catalog & trained model artifacts                               │
+│  • Labeled screenshot datasets (for training)                                │
 │  • Event cache & telemetry                                                  │
+│  • Reviewed events & clips (after secondary analysis)                       │
 │  • CIDs & archive metadata                                                  │
+│  • Only short-lived encrypted clip buffers during Filecoin upload            │
+│  • NO persistent storage of raw or decrypted video                          │
 │  • NO decryption keys                                                       │
 │                                                                              │
 └──────────────────────────────────────────────────────────────────────────────┘
@@ -164,7 +247,7 @@ This section breaks down each of the three architectural layers in detail, showi
                                     │ (Encrypted, authenticated)
                                     │
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│ LAYER 3: Edge Appliance (Local/On-Premise, Mini PC)                          │
+│ LAYER 4: Edge Appliance (Local/On-Premise, Mini PC)                          │
 ├──────────────────────────────────────────────────────────────────────────────┤
 │                                                                              │
 │  ┌────────────────────────────────────────────────────────────────────┐    │
@@ -176,9 +259,11 @@ This section breaks down each of the three architectural layers in detail, showi
 │                                                                              │
 │  ┌────────────────────────────────────────────────────────────────────┐    │
 │  │ AI Processing Engine                                               │    │
-│  │ • Runs inference (Python/OpenVINO)                                 │    │
-│  │ • Detects: people, vehicles, custom models                         │    │
+│  │ • Runs real-time inference (Python/OpenVINO)                       │    │
+│  │ • Uses customer-trained models (distributed from VM)               │    │
+│  │ • Detects: people, vehicles, custom models, anomalies              │    │
 │  │ • Generates event metadata                                         │    │
+│  │ • Captures labeled screenshots for model training                  │    │
 │  └────────────────────────────────────────────────────────────────────┘    │
 │                                                                              │
 │  ┌────────────────────────────────────────────────────────────────────┐    │
@@ -255,9 +340,14 @@ This diagram shows the high-level interaction flow between components when a use
 ┌─────────────────────────────────────────────────────────────┐
 │              Customer KVM VM                                │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐     │
-│  │   Event      │  │   Filecoin   │  │   Stream     │     │
-│  │   Cache      │──│   Sync       │──│   Relay      │     │
-│  └──────────────┘  └──────────────┘  └──────────────┘     │
+│  │   AI Model   │  │   Event      │  │   Filecoin   │     │
+│  │   Orchestrator│──│   Cache &   │──│   Sync       │     │
+│  └──────────────┘  │   Analysis   │  └──────────────┘     │
+│                    └──────────────┘                       │
+│  ┌──────────────┐                                          │
+│  │   Stream     │                                          │
+│  │   Relay      │                                          │
+│  └──────────────┘                                          │
 └─────────────────────────────────────────────────────────────┘
        │
        │ 3. Request Clip Stream (on-demand)
@@ -338,11 +428,12 @@ This section shows how data flows through the system for detection, live streami
 ┌─────────────────────────────────────────────────────────────┐
 │ Customer KVM VM                                              │
 │                                                              │
-│  ┌──────────────┐      ┌──────────────┐                     │
-│  │   Event      │─────▶│   Event      │                     │
-│  │   Receiver   │      │   Cache      │                     │
-│  └──────────────┘      └──────┬───────┘                     │
-│                               │                             │
+│  ┌──────────────┐      ┌──────────────┐      ┌──────────┐ │
+│  │   Event      │─────▶│   Secondary  │─────▶│  Event   │ │
+│  │   Receiver   │      │   Analysis   │      │  Cache   │ │
+│  └──────────────┘      └──────────────┘      └─────┬────┘ │
+│                                                     │      │
+│                                                     │      │
 │                               │ Summarized Metadata         │
 │                               ▼                             │
 │  ┌──────────────┐                                          │
@@ -642,6 +733,9 @@ This section defines the privacy boundaries, threat model, key management, and s
 │  │  ✅ Encrypted tunnel termination                                   │    │
 │  │  ✅ Transient encrypted clip buffers (during upload)               │    │
 │  │  ✅ Event metadata cache                                           │    │
+│  │  ✅ AI model catalog & trained models                              │    │
+│  │  ✅ Labeled screenshot datasets                                    │    │
+│  │  ✅ Reviewed events & clips (after analysis)                       │    │
 │  │  ✅ CIDs & archive metadata                                        │    │
 │  │                                                                     │    │
 │  │  ❌ NO raw video (long-term)                                       │    │
@@ -699,6 +793,8 @@ This section defines the privacy boundaries, threat model, key management, and s
 | Raw Video Streams | Edge Appliance (local) | N/A (local only) | Local network isolation |
 | Video Clips | Edge Appliance (local) | N/A (local only) | Local filesystem |
 | Event Metadata | KVM VM, SaaS | In-transit (TLS/mTLS) | Tenant isolation |
+| AI Models | KVM VM, Edge | In-transit (WireGuard/TLS) | Tenant isolation |
+| Labeled Datasets | KVM VM, Edge | In-transit (WireGuard/TLS) | Tenant isolation |
 | Encrypted Archive Clips | Filecoin/IPFS | End-to-end (user key) | CID-based access |
 | Decryption Keys | User device only | N/A (never transmitted) | User custody |
 | WireGuard Traffic | Edge ↔ KVM VM | WireGuard encryption | Per-tenant tunnel |
@@ -717,10 +813,10 @@ This subsection explicitly defines the security assumptions and protections agai
 
 | Compromised Component | What Attacker Can Access | What Attacker Cannot Access | Protection Level |
 |----------------------|-------------------------|----------------------------|------------------|
-| **SaaS Control Plane** | Event metadata (timestamps, labels, camera IDs), CIDs, subscription info | Raw video, full clips, decryption keys, plaintext video | Metadata only; no video content |
+| **SaaS Control Plane** | Event metadata (timestamps, labels, camera IDs), CIDs, subscription info, model entitlements | Raw video, full clips, decryption keys, plaintext video, model artifacts | Metadata only; no video content |
 | **Filecoin/IPFS Provider** | Encrypted clip blobs, CIDs | Decryption keys, plaintext video | Encrypted blobs only; cannot decrypt |
 | **SaaS + Filecoin** | Event metadata, encrypted blobs, CIDs | Decryption keys, plaintext video | Still no keys; end-to-end encryption protects content |
-| **KVM VM** | Encrypted clips in transit/at rest (during upload), event metadata cache | Decryption keys, plaintext video, long-term raw video | Encrypted data only; keys never stored |
+| **KVM VM** | Encrypted clips in transit/at rest (during upload), event metadata cache, AI models, labeled datasets, reviewed events/clips | Decryption keys, plaintext video, long-term raw video | Encrypted data only; keys never stored; models may contain customer-specific training data |
 | **Edge Appliance** (physical compromise) | All local data including raw video and derived encryption keys | N/A | Physical security is customer responsibility; keys can be rotated |
 
 #### Key Protection Guarantees
@@ -803,8 +899,16 @@ This subsection details the security of all communication channels in the system
 #### Authentication & Authorization
 
 - **User Authentication**: Standard OAuth2/OIDC or similar for SaaS UI access.
-- **Edge Appliance Authentication**: WireGuard key-based authentication to KVM VM; initial bootstrap via secure tokens embedded in ISO.
-- **KVM VM Authentication**: mTLS certificates for SaaS communication; WireGuard server keys for Edge connections.
+- **Edge Appliance Authentication**: 
+  - libp2p peer ID and bootstrap configuration embedded in installation package
+  - WireGuard key exchange over libp2p secure channel
+  - WireGuard key-based authentication to User VM
+  - Initial bootstrap via secure tokens embedded in ISO
+- **User VM Authentication**: 
+  - libp2p peer ID and bootstrap configuration
+  - mTLS certificates for SaaS communication
+  - WireGuard server keys for Edge connections
+  - **High Availability**: Multiple VMs can authenticate Edge Appliances (production)
 
 ---
 
@@ -837,8 +941,9 @@ This section illustrates the network architecture, showing how components commun
 │  └────────────────────────────────────────────────────────────────────┘    │
 └──────────────────────────────────────────────────────────────────────────────┘
                                     │
-                                    │ WireGuard Tunnel
-                                    │ (UDP 51820)
+                                    │ libp2p Connection (discovery)
+                                    │ WireGuard Tunnel (data)
+                                    │ (UDP 51820, after libp2p)
                                     │
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │ Customer Premises (Private Network)                                          │

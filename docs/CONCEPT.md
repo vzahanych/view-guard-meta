@@ -1,7 +1,9 @@
 # The Private AI Guardian – SaaS Concept & Architecture (Comprehensive Detail)
 
 > **Short version:**  
-> This project is a SaaS platform that provisions a dedicated **KVM VM (Private Cloud Node)** per customer. The **Mini PC Edge Appliance** performs all **AI video processing and storage locally**, connects to the VM via a unique **WireGuard** tunnel, and **securely archives encrypted event clips to Filecoin**. The SaaS Control Plane manages global state, billing, and the unified UI, but **never handles plaintext raw video or customer decryption keys**.
+> This project is a SaaS platform that provisions a dedicated **User VM (Private Cloud Node)** per customer. Users download a **tenant-specific installation package** (ISO/EXE) containing embedded certificates, keys, and User VM FQDN. The **Mini PC Edge Appliance** automatically establishes a **WireGuard tunnel** to the User VM upon installation, performs all **AI video processing and storage locally**, and **securely archives encrypted event clips to remote storage** (MinIO/S3 for PoC, Filecoin post-PoC). The SaaS Control Plane manages global state, billing, and the unified UI, but **never handles plaintext raw video or customer decryption keys**.
+>
+> **PoC Note**: For the Proof of Concept, **no SaaS components are needed**. The PoC focuses on Edge Appliance ↔ User VM API communication, with User VM API running as a Docker Compose service and using MinIO (S3-compatible) for remote storage instead of Filecoin. Post-PoC, an S3-Filecoin bridge will be developed to migrate from MinIO to Filecoin.
 
 ---
 
@@ -74,10 +76,17 @@ Our platform aims to combine the **control of DIY** with the **experience of man
 ### Core Product
 
 - A **SaaS Control Plane** for onboarding, billing, event inventory, and the unified UI.
-- A **per-customer KVM VM** ("Private Cloud Node") that:
-  - **Isolates** tenant traffic.
+- A **Management Server** (private infrastructure) that:
+  - Controls and manages per-customer User Servers.
+  - Communicates with the SaaS Control Plane.
+  - Handles VM provisioning, lifecycle management, and orchestration.
+- A **per-customer User Server** (open source, runs on customer's dedicated VM) that:
+  - **Isolates** tenant traffic on the customer's VM.
   - Terminates the WireGuard tunnel from the Mini PC.
-  - Acts as the dedicated control / relay / archiving node.
+  - Hosts the **AI model catalog** for that tenant (base + custom variants).
+  - Retrains models using user-labeled screenshots and pushes approved builds down to the Edge.
+  - Performs **secondary event analysis** on incoming snapshots/clips before escalating alarms.
+  - Acts as the dedicated control / relay / archiving node with remote storage integrations.
 - A **Mini PC Edge Appliance** that:
   - Installs from a **customer-specific ISO image**.
   - Handles all **local AI processing and video storage**.
@@ -90,7 +99,7 @@ Our platform aims to combine the **control of DIY** with the **experience of man
 - **Local AI detection** (people, vehicles, custom models) on the Mini PC.
 - **Local clip + snapshot storage** on the Mini PC's SSD.
 - **Per-customer isolation** via the dedicated KVM VM ("Private Cloud Node").
-- **On-demand remote clip streaming** over WireGuard, coordinated by the KVM VM.
+- **On-demand remote clip streaming** over WireGuard, coordinated by the User Server.
 - **Filecoin-based archival** of selected event clips, encrypted end-to-end.
 
 ---
@@ -116,13 +125,24 @@ Conceptual diagram (not implementation-specific):
                         (SaaS provisions per-customer VM)
                                    |
                      +-------------v------------------+
-                     |      Customer KVM VM          |
-                     |      ("Private Cloud Node")   |
+                     |   Management Server (Private)  |
+                     |                                |
+                     | - Controls User Servers        |
+                     | - Talks to SaaS               |
+                     | - VM provisioning & lifecycle  |
+                     +-------------+------------------+
+                                   |
+                          (Control Channel)
+                                   |
+                     +-------------v------------------+
+                     |   User Server (Public/Open)    |
+                     |   (Customer's VM)              |
                      |                                |
                      | - WireGuard server endpoint    |
                      | - Per-tenant config & secrets  |
                      | - Event cache & telemetry      |
                      | - Filecoin sync / client role  |
+                     | - AI model catalog             |
                      +-------------+------------------+
                                    |
                            (WireGuard tunnel)
@@ -131,13 +151,15 @@ Conceptual diagram (not implementation-specific):
                      |     Mini PC Edge Appliance     |
                      |          (On-Prem)             |
                      |                                |
-                     | - Connects to KVM via WG       |
+                     | - Connects to VM via libp2p+WG │
+                     |   (handles NAT automatically)  │
                      | - Ingests camera streams       |
                      | - Runs AI (local)              |
                      | - Stores clips & snapshots     |
                      | - Encrypts clips               |
                      | - Sends encrypted clips        |
-                     |   to KVM for Filecoin archive  |
+                     |   to User Server for Filecoin  |
+                     |   archive                      |
                      +--------------------------------+
 ```
 
@@ -145,21 +167,21 @@ Conceptual diagram (not implementation-specific):
 
 ## 5. Division of Responsibilities (Detailed)
 
-This table formalizes the division of labor across the three conceptual layers, including security, quota enforcement, and hardware management. It is **conceptual only** and does not define concrete APIs or data formats.
+This table formalizes the division of labor across the four conceptual layers, including security, quota enforcement, and hardware management. It is **conceptual only** and does not define concrete APIs or data formats.
 
-| Responsibility Area | SaaS Control Plane (Multi-Tenant) | Customer KVM VM (Single-Tenant) | Mini PC Edge Appliance (Local/Edge) |
+| Responsibility Area | SaaS Control Plane (Multi-Tenant) | Management Server (Private) | User Server (Single-Tenant, Open Source) | Mini PC Edge Appliance (Local/Edge) |
 | :--- | :--- | :--- | :--- |
-| **System Identity** | Manages user accounts, subscriptions, and billing. Knows which Edge and KVM belong to which tenant. | Acts as **WireGuard server** for its Edge devices. Holds per-tenant config & secrets. | Acts as **WireGuard client**. Authenticates *only* to its assigned KVM VM. |
+| **System Identity** | Manages user accounts, subscriptions, and billing. Knows which Edge and KVM belong to which tenant. | N/A for connectivity; only coordinates User Server lifecycle. Does not handle WireGuard. | Acts as **WireGuard server endpoint** for its Edge Appliances. Authenticates Edge devices and manages WireGuard tunnel configuration. |
 | **Provisioning** | **Triggers KVM creation** & generates a unique **autoinstall ISO** image embedding KVM config and bootstrap tokens. | Hosts initial configuration/bootstrapping endpoint. Issues long-lived WireGuard config to the Mini PC at first connection. | Boots from ISO, runs **autoinstall**, configures OS + containers, connects to KVM VM automatically. |
-| **AI Processing** | Manages entitlements to **AI model packs**. Distributes encrypted model artifacts conceptually. | May cache and propagate model artifacts and configuration. **Does no video AI processing itself.** | **Primary AI processor.** Decodes streams (Go orchestrator using iGPU/Intel QSV), runs inference (Python/OpenVINO), and generates event metadata. |
-| **Video Data Storage** | **Does not store raw video** or full clips. Stores only metadata about events and high-level clip status. | May hold small, **transient encrypted clip buffers** during Filecoin uploads. Does not keep long-term raw video. | **Stores all raw video clips and snapshots** on local SSD, subject to local retention policies (e.g., 7–30 days). |
-| **Clip Archiving (Filecoin)** | Displays Filecoin archive status (CID) and retention info in UI. Manages **global retention policy configuration**. | **Filecoin sync orchestrator.** Enforces archive **quota/retention limits** based on subscription tier. Uploads encrypted clips to provider and stores CIDs. | **Encrypts clips locally** (using user-derived or device-specific key). Pushes encrypted blobs + metadata to KVM VM for archiving. |
+| **AI Processing** | Manages entitlements to **AI model packs**. Tracks which tenants can access premium detectors. | Coordinates model distribution to User Servers. Manages model versioning across User Servers. | **Owns the tenant's model catalog**: retrains models with user-labeled screenshots, versions them, performs secondary inference on incoming snapshots/clips, and pushes approved models down to Edge over WireGuard. | **Primary real-time AI processor.** Decodes streams (Go orchestrator using iGPU/Intel QSV), runs on-box inference (Python/OpenVINO), and generates initial event metadata. |
+| **Video Data Storage** | **Does not store raw video** or full clips. Stores only metadata about events and high-level clip status. | N/A (does not handle video data) | May hold small, **transient encrypted clip buffers** during Filecoin uploads. Does not keep long-term raw video. | **Stores all raw video clips and snapshots** on local SSD, subject to local retention policies (e.g., 7–30 days). |
+| **Clip Archiving (Filecoin)** | Displays Filecoin archive status (CID) and retention info in UI. Manages **global retention policy configuration**. | Monitors User Server archive operations. Aggregates archive status for SaaS. | **Filecoin/remote-storage orchestrator.** Enforces archive **quota/retention limits**, stores long-term copies of events/clips, and keeps metadata index for SaaS queries. | **Encrypts clips locally** (using user-derived or device-specific key). Pushes encrypted blobs + metadata to User Server for archiving. |
 | **Archival Policy Enforcement** | **Defines** maximum storage quota (GB / retention days) based on subscription tier. | **Enforces** quota by tracking size and count of archived clips (via CIDs and stored metadata). Manages retention expiration. | Executes archival policy (e.g., "archive only Person events"), but **defers quota enforcement** to the KVM VM. |
-| **Encryption / Keys** | Knows a hash/identifier of the user's secret/key. **Never stores the plaintext decryption key.** | Stores key hash/identifier as needed for mapping clips to keys. **Never stores the plaintext decryption key.** | **Derives the encryption key** from a customer-controlled secret and uses it for local clip encryption. |
-| **Event Indexing** | Maintains **global multi-tenant event inventory** (timeline/dashboard, search). | Maintains **per-tenant event cache** with richer/raw metadata from Edge. Forwards summarized metadata to SaaS. | **Generates event metadata** for each AI detection (camera, time, category, severity, clip references). |
-| **Remote Viewing** | Provides the **UI layer** and issues **time-bound request tokens** for stream authorization. | **Control and optional stream relay.** Validates token and orchestrates clip streaming from Edge; can relay encrypted stream back to client. | Reads clip from local SSD and streams it **on-demand** over the WireGuard tunnel to the KVM VM / client. |
-| **Health Monitoring** | **Global health dashboard.** Raises automated alerts if KVM VM or Edge goes offline or reports risk telemetry. | **Detailed telemetry collector.** Receives heartbeats and metrics (CPU/GPU load, unsynced queue length) from Edge. | Sends detailed **heartbeat and telemetry** (resource usage, camera status, storage capacity, archival backlog) to KVM VM regularly. |
-| **Updates & Maintenance** | Defines release channels and schedules for Edge and KVM software. | Applies per-tenant update policies and can instruct Edge to upgrade when safe. | Applies updates to local containers/OS based on instructions from KVM VM, ideally during low-usage windows. |
+| **Encryption / Keys** | Stores only key *identifiers/hashes* for mapping; never plaintext keys. | May see key identifiers for quota and mapping; never plaintext keys. | Receives *already encrypted* blobs plus key identifiers; does not hold plaintext keys or secrets. | **Derives and holds encryption keys** from a customer secret, performs all encryption locally, never transmits keys. |
+| **Event Indexing** | Maintains **global multi-tenant event inventory** (timeline/dashboard, search). | Aggregates event data from User Servers. Forwards to SaaS. | Maintains **per-tenant event cache**, runs secondary analysis (e.g., anomaly confirmation) on snapshots/clips, and forwards verdicts + summarized metadata to Management Server/SaaS. | **Generates raw event metadata** for each AI detection (camera, time, category, severity, clip references). |
+| **Remote Viewing** | Provides the **UI layer** and issues **time-bound request tokens** for stream authorization. | Routes stream requests to appropriate User Server. Coordinates stream relay. | **Control and optional stream relay.** Validates token and orchestrates clip streaming from Edge; can relay encrypted stream back to client. | Reads clip from local SSD and streams it **on-demand** over the WireGuard tunnel (established via libp2p) to the User Server / client. |
+| **Health Monitoring** | **Global health dashboard.** Raises automated alerts if User Server or Edge goes offline or reports risk telemetry. | **Aggregates health data** from User Servers. Monitors User Server VM health and resource usage. | **Detailed telemetry collector.** Receives heartbeats and metrics (CPU/GPU load, unsynced queue length) from Edge. Forwards aggregated telemetry to Management Server. | Sends detailed **heartbeat and telemetry** (resource usage, camera status, storage capacity, archival backlog) to User Server regularly. |
+| **Updates & Maintenance** | Defines release channels and schedules for Edge and User Server software. | Coordinates User Server updates. Manages update rollout across User Servers. | Applies per-tenant update policies and can instruct Edge to upgrade when safe. Receives update instructions from Management Server. | Applies updates to local containers/OS based on instructions from User Server, ideally during low-usage windows. |
 | **Hardware Driver Support** | N/A | Receives hardware / driver version telemetry from Edge. | Ensures **iGPU driver support** (e.g., Intel Quick Sync) is functional via the custom ISO installer on supported Mini PCs. |
 
 ---
@@ -173,31 +195,53 @@ All workflows below are **conceptual**, describing behavior, not concrete protoc
 1. **Sign-up in SaaS UI**  
    User creates an account and selects a subscription plan (Base / Pro / etc.). SaaS creates a tenant record.
 
-2. **KVM VM Provisioning**  
-   SaaS provisions a dedicated KVM VM for the tenant and generates:
-   - WireGuard server keys and configuration.
-   - Initial bootstrap identifiers for the Edge.
+2. **User VM Provisioning**  
+   SaaS provisions a dedicated User VM (Private Cloud Node) for the tenant via the Management Server. The Management Server:
+   - Creates and configures the User VM instance.
+   - Generates WireGuard server keys and configuration on the User VM.
+   - Assigns a unique FQDN (Fully Qualified Domain Name) for the User VM endpoint.
+   - Generates client certificates and keys for the Edge Appliance.
+   - Stores bootstrap configuration and credentials securely.
 
-3. **ISO Generation**  
-   SaaS builds a **tenant-specific ISO image** for the Mini PC that contains:
-   - OS image and Edge agent stack.
-   - Bootstrap configuration to connect to that tenant's KVM VM via WireGuard.
+3. **Installation Package Generation**  
+   SaaS builds a **tenant-specific installation package** (ISO image, EXE installer, or other format - format to be determined) that contains:
+   - OS image and Edge agent stack (for ISO) or Edge application installer (for EXE).
+   - **Embedded certificates and keys** for authenticating to the User VM.
+   - **FQDN of the User VM** endpoint (e.g., `user-abc123.example.com`).
+   - Bootstrap configuration to establish WireGuard tunnel to the assigned User VM.
+   - All necessary configuration to connect to that tenant's User VM via WireGuard.
 
 4. **Download & Install (Mini PC)**  
-   User downloads the ISO and installs it on their Mini PC (e.g., via USB). After installation, the Mini PC reboots as an **Edge Appliance**.
+   User downloads the installation package from the SaaS UI and installs it on their Mini PC:
+   - **For ISO**: User writes ISO to USB drive, boots Mini PC from USB, and runs automated installation.
+   - **For EXE/Installer**: User runs the installer on their Mini PC (Windows/Linux).
+   - After installation, the Mini PC reboots (if applicable) and runs as an **Edge Appliance**.
 
-5. **First Connection (Edge → KVM VM)**  
-   - Edge boots, brings up WireGuard, and connects to the KVM VM using embedded bootstrap credentials.
-   - KVM VM validates and **promotes** the Edge to a fully registered device.
-   - KVM VM issues stable credentials and long-lived WireGuard configuration.
+5. **Automatic WireGuard Tunnel Establishment (Edge → User VM)**  
+   Upon first boot/startup, the Edge Go application automatically:
+   - Reads the embedded certificates, keys, and FQDN from the installation package.
+   - Configures WireGuard client with the provided credentials.
+   - Establishes a WireGuard tunnel to the User VM using the provided FQDN.
+   - Authenticates using the embedded certificates and keys.
+   - The User VM validates the Edge Appliance credentials and **promotes** it to a fully registered device.
+   - The User VM issues stable, long-lived WireGuard configuration (if needed for rotation).
 
 6. **Camera Discovery & Configuration**  
+   Once the WireGuard tunnel is established:
    - Edge scans LAN for RTSP/ONVIF-compatible network cameras.
    - Edge detects USB cameras connected directly to the Mini PC (via V4L2).
+   - Edge reports discovered cameras to the User VM, which forwards metadata to SaaS.
    - SaaS UI displays discovered cameras (both network and USB).
-   - User labels/configures cameras (e.g., "Front Door", "Parking Lot", schedules, zones).
+   - User labels/configures cameras (e.g., "Front Door", "Parking Lot", schedules, zones) via SaaS UI.
+   - Configuration is pushed from SaaS → User VM → Edge Appliance.
 
-Result: the tenant has a functioning **local AI appliance** connected to their **private cloud node**, visible and configurable through the SaaS UI.
+**Result**: The tenant has a functioning **local AI appliance** connected to their **private cloud node** (User VM) via a secure WireGuard tunnel, visible and configurable through the SaaS UI.
+
+**Key Security Properties**:
+- Each Edge Appliance is cryptographically bound to its specific User VM via embedded certificates.
+- The FQDN ensures Edge Appliances connect to the correct User VM endpoint.
+- WireGuard tunnel provides encrypted, authenticated communication.
+- No manual configuration required on the Edge Appliance - everything is embedded in the installation package.
 
 ---
 
@@ -267,9 +311,11 @@ No permanent copy of the full clip is stored in the multi-tenant SaaS; streaming
 
 ---
 
-### 6.4 Filecoin Archiving & Retrieval (Pro Concept)
+### 6.4 Remote Storage Archiving & Retrieval (MinIO/S3 for PoC, Filecoin post-PoC)
 
 Archiving is **event-based**, not continuous. Only selected event clips are archived.
+
+**PoC Note**: For PoC, we use **MinIO** (S3-compatible) with **per-camera buckets**. User VM API uses **AWS Go SDK v2** to manage storage. Post-PoC, an S3-Filecoin bridge will migrate data to Filecoin.
 
 #### 6.4.1 Archiving Flow
 
@@ -283,39 +329,45 @@ Archiving is **event-based**, not continuous. Only selected event clips are arch
      - A key derived from a user secret and/or device-specific secret.
    - Result: an encrypted blob ready for offsite storage.
 
-3. **Policy & Quota Check (KVM VM)**  
-   - Edge sends the encrypted blob plus metadata to the KVM VM.
-   - KVM VM checks:
-     - Subscription tier.
-     - Current usage vs. quota (GB / #clips / retention).
-   - If over quota, KVM VM can reject archiving for that event or request user action.
+3. **Policy & Quota Check (User VM API)**  
+   - Edge sends the encrypted blob plus metadata to the User VM API.
+   - User VM API checks:
+     - Per-camera quota (GB per camera bucket).
+     - Current usage vs. quota for that camera's bucket.
+   - If over quota, User VM API can reject archiving for that event or request user action.
 
-4. **Upload (KVM VM → Filecoin/IPFS)**  
-   - KVM VM uploads the encrypted blob to a Filecoin/IPFS-backed provider.
-   - KVM VM receives a **Content Identifier (CID)** and stores:
-     - CID.
-     - Clip metadata (size, timestamp, retention target).
+4. **Upload (User VM API → MinIO/S3 for PoC)**  
+   - User VM API uses **AWS Go SDK v2** to upload to MinIO.
+   - **Per-camera bucket organization**: Each camera has its own bucket (`camera-{camera_id}`).
+   - Upload structure:
+     - Clips: `events/{event_id}/clip.mp4` in camera bucket
+     - Snapshots: `events/{event_id}/snapshot.jpg` in camera bucket
+     - Metadata: `events/{event_id}/metadata.json` in camera bucket
+   - User VM API stores object keys in SQLite (replacing CID storage for PoC):
+     - Object key, bucket name, size, timestamp, retention target.
      - A hash/identifier of the encryption metadata (not the key itself).
 
-5. **Status Update (KVM VM → SaaS)**  
-   - KVM VM notifies SaaS that event X is archived with CID Y.
-   - SaaS updates the event record to show archive status and retention.
+5. **Status Update (User VM API)**  
+   - User VM API tracks archive status locally in SQLite (no SaaS in PoC).
+   - Post-PoC: User VM API notifies SaaS that event X is archived with object key Y.
+   - Post-PoC: SaaS updates the event record to show archive status and retention.
 
 #### 6.4.2 Retrieval Flow
 
 1. **User Requests Archived Clip**  
-   - In SaaS UI, user opens an older event and selects "Download from archive" or equivalent.
+   - In Edge Web UI (PoC) or SaaS UI (post-PoC), user opens an older event and selects "Download from archive" or equivalent.
 
-2. **Archive Info (SaaS → Client)**  
-   - SaaS provides the client with:
-     - CID.
+2. **Archive Info (User VM API → Client)**  
+   - User VM API provides the client with:
+     - MinIO object key and bucket name (PoC) or CID (post-PoC).
      - Encryption metadata hash/identifier.
-   - Optionally, SaaS may provide information on which key slot to use.
+   - Optionally, User VM API may provide information on which key slot to use.
 
 3. **Download & Decrypt (Client)**  
-   - Client fetches the encrypted blob directly from the Filecoin/IPFS provider.
+   - **PoC**: Client fetches the encrypted blob from MinIO using AWS SDK (via User VM API or directly).
+   - **Post-PoC**: Client fetches the encrypted blob directly from the Filecoin/IPFS provider.
    - Client uses the user-derived secret to reconstruct the decryption key and decrypt locally.
-   - Clip is then viewable on the client, without SaaS or KVM VM ever seeing plaintext.
+   - Clip is then viewable on the client, without SaaS or User VM API ever seeing plaintext.
 
 ---
 
@@ -475,10 +527,11 @@ This document should live in the `docs/` directory as the **single source of tru
 
 ## Repository Structure Note
 
-The public open-source components (Edge Appliance software, encryption libraries, and protocol definitions) are developed directly in this meta repository:
+The public open-source components (Edge Appliance software, User Server, encryption libraries, and protocol definitions) are developed directly in this meta repository:
 
 - **`edge/`** - Edge Appliance software (runs on customer hardware)
+- **`user-vm-api/`** - User Server (runs on per-tenant VMs, user's private cloud node)
 - **`crypto/`** - Encryption libraries (client-side encryption/decryption)
 - **`proto/`** - Protocol definitions (communication contracts)
 
-These components are fully auditable and open source (Apache 2.0), supporting the "trust us / verify us" privacy story. Private components (SaaS Control Plane, production KVM VM agent, infrastructure) remain in separate private repositories.
+These components are fully auditable and open source (Apache 2.0), supporting the "trust us / verify us" privacy story. The User Server is open source because it handles user data and AI models on their dedicated VM - only secrets (WireGuard keys, encryption key identifiers) are kept in memory at runtime. Private components (SaaS Control Plane, Management Server, infrastructure automation) remain in separate private repositories.

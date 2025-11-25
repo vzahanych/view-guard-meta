@@ -93,6 +93,7 @@ type ScreenshotService interface {
 	UpdateScreenshot(ctx context.Context, id string, updates *screenshots.ScreenshotUpdate) error
 	DeleteScreenshot(ctx context.Context, id string) error
 	GetScreenshotImage(ctx context.Context, id string) ([]byte, error)
+	ExportDataset(ctx context.Context, filters *screenshots.ScreenshotFilters, includeMetadata bool) (*screenshots.DatasetExportResult, error)
 }
 
 // NewServer creates a new web server service
