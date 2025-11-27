@@ -268,7 +268,7 @@ export default function Screenshots() {
             <Camera className="w-4 h-4 mr-2" />
             {saving ? 'Capturing...' : 'Capture Screenshot'}
           </Button>
-          <Button variant="outline" onClick={exportDataset} disabled={exporting}>
+          <Button variant="secondary" onClick={exportDataset} disabled={exporting}>
             {exporting ? 'Exporting...' : 'Export Dataset'}
           </Button>
         </div>
@@ -338,7 +338,7 @@ export default function Screenshots() {
                 <div className="flex gap-2">
                   <Button
                     size="sm"
-                    variant="outline"
+                    variant="secondary"
                     onClick={() => {
                       const newLabel = screenshot.label === 'normal' ? 'threat' : 'normal'
                       updateScreenshotLabel(screenshot.id, newLabel)
@@ -347,11 +347,7 @@ export default function Screenshots() {
                     <Tag className="w-3 h-3 mr-1" />
                     Re-label
                   </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => deleteScreenshot(screenshot.id)}
-                  >
+                  <Button size="sm" variant="secondary" onClick={() => deleteScreenshot(screenshot.id)}>
                     <Trash2 className="w-3 h-3 mr-1" />
                     Delete
                   </Button>
@@ -405,7 +401,7 @@ export default function Screenshots() {
                 />
               </div>
               <div className="flex gap-2 justify-end">
-                <Button variant="outline" onClick={() => setShowCaptureModal(false)}>
+                <Button variant="secondary" onClick={() => setShowCaptureModal(false)}>
                   Cancel
                 </Button>
                 <Button onClick={saveScreenshot} disabled={saving}>

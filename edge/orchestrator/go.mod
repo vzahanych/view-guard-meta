@@ -10,7 +10,7 @@ require (
 	github.com/pion/rtp v1.8.3
 	github.com/stretchr/testify v1.11.1
 	github.com/vzahanych/view-guard-meta/crypto/go v0.0.0-20251123111624-e8e78104904b
-	github.com/vzahanych/view-guard-meta/proto v0.0.0-20251123071821-e3a4380befa5
+	github.com/vzahanych/view-guard-meta/proto/go v0.0.0
 	go.uber.org/zap v1.27.0
 	google.golang.org/grpc v1.64.0
 	gopkg.in/yaml.v3 v3.0.1
@@ -59,5 +59,7 @@ require (
 )
 
 replace github.com/vzahanych/view-guard-meta/proto => ../../proto
+
+replace github.com/vzahanych/view-guard-meta/proto/go => ../../proto/go
 
 replace github.com/vzahanych/view-guard-meta/crypto/go => ../../crypto/go

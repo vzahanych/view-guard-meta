@@ -5,8 +5,12 @@ import (
 	"fmt"
 
 	"github.com/vzahanych/view-guard-meta/user-vm-api/internal/shared/config"
+	"github.com/vzahanych/view-guard-meta/user-vm-api/internal/shared/database"
+	"github.com/vzahanych/view-guard-meta/user-vm-api/internal/shared/database/migrations"
 	"github.com/vzahanych/view-guard-meta/user-vm-api/internal/shared/logging"
 	"github.com/vzahanych/view-guard-meta/user-vm-api/internal/shared/service"
+	"github.com/vzahanych/view-guard-meta/user-vm-api/internal/tunnel-gateway"
+	"go.uber.org/zap"
 )
 
 // Server is the main orchestrator server
@@ -14,6 +18,7 @@ type Server struct {
 	config  *config.Config
 	logger  *logging.Logger
 	manager *service.Manager
+	db      *database.DB
 }
 
 // NewServer creates a new orchestrator server
@@ -28,6 +33,44 @@ func NewServer(cfg *config.Config, log *logging.Logger) *Server {
 // Start starts the orchestrator server and all services
 func (s *Server) Start(ctx context.Context) error {
 	s.logger.Info("Starting User VM API orchestrator")
+
+	// Initialize database (single SQLite DB for all services)
+	dbCfg := database.DefaultConfig(s.config.UserVMAPI.EventCache.DatabasePath)
+	db, err := database.New(dbCfg)
+	if err != nil {
+		s.logger.Error("Failed to initialize database", zap.Error(err))
+		return fmt.Errorf("failed to initialize database: %w", err)
+	}
+	s.db = db
+
+	// Run database migrations (create all tables)
+	migrator := migrations.NewMigrator(db)
+	if err := migrator.Up(ctx); err != nil {
+		s.logger.Error("Failed to run database migrations", zap.Error(err))
+		return fmt.Errorf("failed to run database migrations: %w", err)
+	}
+
+	// Register Tunnel Gateway / WireGuard services when enabled
+	if s.config.UserVMAPI.WireGuardServer.Enabled {
+		// WireGuard server (acts as KVM-side tunnel endpoint)
+		wgServer, err := tunnelgateway.NewWireGuardServer(s.config, s.logger, db)
+		if err != nil {
+			s.logger.Error("Failed to create WireGuard server", zap.Error(err))
+			return fmt.Errorf("failed to create WireGuard server: %w", err)
+		}
+		s.manager.Register(wgServer)
+
+		// Edge authentication/registration manager
+		edgeAuth := tunnelgateway.NewEdgeAuth(s.config, s.logger, db, wgServer)
+
+		// Edge-facing gRPC API (over WireGuard tunnel)
+		edgeAPIServer, err := tunnelgateway.NewEdgeAPIServer(s.config, s.logger, db, wgServer, edgeAuth)
+		if err != nil {
+			s.logger.Error("Failed to create Edge API server", zap.Error(err))
+			return fmt.Errorf("failed to create Edge API server: %w", err)
+		}
+		s.manager.Register(edgeAPIServer)
+	}
 
 	// Register services here as they are implemented
 	// Example:
@@ -49,6 +92,12 @@ func (s *Server) Stop(ctx context.Context) error {
 
 	if err := s.manager.Stop(ctx); err != nil {
 		return fmt.Errorf("failed to stop services: %w", err)
+	}
+
+	if s.db != nil {
+		if err := s.db.Close(); err != nil {
+			s.logger.Error("Failed to close database", zap.Error(err))
+		}
 	}
 
 	s.logger.Info("User VM API orchestrator stopped")

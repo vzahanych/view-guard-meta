@@ -8,6 +8,7 @@ import (
 
 	"github.com/vzahanych/view-guard-meta/user-vm-api/internal/shared/config"
 	"github.com/vzahanych/view-guard-meta/user-vm-api/internal/shared/logging"
+	"go.uber.org/zap"
 )
 
 // Manager manages the lifecycle of all services
@@ -39,7 +40,7 @@ func NewManager(log *logging.Logger) *Manager {
 	return &Manager{
 		logger:     log,
 		services:   make([]Service, 0),
-		statuses:   make(map[string]*Status),
+		statuses:   make(map[string]*ServiceStatus),
 		eventBus:   NewEventBus(100),
 		startOrder: make([]string, 0),
 	}
@@ -71,24 +72,27 @@ func (m *Manager) Start(ctx context.Context, cfg *config.Config) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	m.logger.Info("Starting services", "count", len(m.services))
+	m.logger.Info("Starting services", zap.Int("count", len(m.services)))
 
 	for _, svc := range m.services {
 		status := m.statuses[svc.Name()]
 		status.SetStatus(StatusStarting)
 
-		m.logger.Info("Starting service", "service", svc.Name())
+		m.logger.Info("Starting service", zap.String("service", svc.Name()))
 
 		m.wg.Add(1)
-		go func(s Service, st *Status) {
+		go func(s Service, st *ServiceStatus) {
 			defer m.wg.Done()
 			if err := s.Start(ctx); err != nil {
-				m.logger.Error("Service failed to start", "service", s.Name(), "error", err)
+				m.logger.Error("Service failed to start",
+					zap.String("service", s.Name()),
+					zap.Error(err),
+				)
 				st.SetStatus(StatusError)
 				st.SetError(err)
 			} else {
 				st.SetStatus(StatusRunning)
-				m.logger.Info("Service started", "service", s.Name())
+				m.logger.Info("Service started", zap.String("service", s.Name()))
 			}
 		}(svc, status)
 
@@ -106,7 +110,7 @@ func (m *Manager) Stop(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	m.logger.Info("Stopping services", "count", len(m.services))
+	m.logger.Info("Stopping services", zap.Int("count", len(m.services)))
 
 	// Stop in reverse order
 	for i := len(m.services) - 1; i >= 0; i-- {
@@ -115,15 +119,18 @@ func (m *Manager) Stop(ctx context.Context) error {
 
 		if status.GetStatus() == StatusRunning {
 			status.SetStatus(StatusStopping)
-			m.logger.Info("Stopping service", "service", svc.Name())
+			m.logger.Info("Stopping service", zap.String("service", svc.Name()))
 
 			if err := svc.Stop(ctx); err != nil {
-				m.logger.Error("Service failed to stop", "service", svc.Name(), "error", err)
+				m.logger.Error("Service failed to stop",
+					zap.String("service", svc.Name()),
+					zap.Error(err),
+				)
 				status.SetStatus(StatusError)
 				status.SetError(err)
 			} else {
 				status.SetStatus(StatusStopped)
-				m.logger.Info("Service stopped", "service", svc.Name())
+				m.logger.Info("Service stopped", zap.String("service", svc.Name()))
 			}
 		}
 	}

@@ -6,13 +6,13 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/vzahanych/view-guard-meta/user-vm-api/internal/orchestrator"
 	"github.com/vzahanych/view-guard-meta/user-vm-api/internal/shared/config"
 	"github.com/vzahanych/view-guard-meta/user-vm-api/internal/shared/logging"
+	"go.uber.org/zap"
 )
 
 var (
@@ -47,9 +47,9 @@ func main() {
 	defer log.Sync()
 
 	log.Info("Starting User VM API",
-		"version", version,
-		"build_time", buildTime,
-		"git_commit", gitCommit,
+		zap.String("version", version),
+		zap.String("build_time", buildTime),
+		zap.String("git_commit", gitCommit),
 	)
 
 	// Create main context with cancellation
@@ -61,7 +61,7 @@ func main() {
 
 	// Start the server
 	if err := server.Start(ctx); err != nil {
-		log.Error("Failed to start server", "error", err)
+		log.Error("Failed to start server", zap.Error(err))
 		os.Exit(1)
 	}
 
@@ -78,7 +78,7 @@ func main() {
 
 	// Stop the server
 	if err := server.Stop(shutdownCtx); err != nil {
-		log.Error("Error during shutdown", "error", err)
+		log.Error("Error during shutdown", zap.Error(err))
 		os.Exit(1)
 	}
 

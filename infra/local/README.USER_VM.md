@@ -1,11 +1,24 @@
 # User VM API Docker Compose Setup (PoC)
 
-This Docker Compose configuration runs the User VM API and MinIO services for local PoC testing.
+This Docker Compose configuration runs the User VM API, Python AI Service, and MinIO services for local PoC testing.
 
 ## Overview
 
 For PoC, the User VM API runs as a Docker Compose service alongside the Edge Appliance:
-- **User VM API**: Go service handling WireGuard server, event cache, stream relay, and MinIO integration
+- **User VM API**: Go service (single binary) with all logical services:
+  - Tunnel Gateway & Edge API Service (WireGuard server, gRPC/HTTP APIs)
+  - Event Cache Service
+  - Deep Analysis Service
+  - Anomaly Reasoning Service
+  - Risk Scoring Service
+  - Dataset Storage Service
+  - Model Catalog & Distribution Service
+  - Baseline Inventory Service
+  - Storage Sync Service (MinIO integration)
+  - Stream Relay Service
+  - Telemetry Aggregator Service
+  - Orchestrator & API Gateway Service
+- **Python AI Service**: FastAPI service for CAE model training and heavy model inference (YOLOv8, etc.)
 - **MinIO**: S3-compatible storage for remote clip archiving (replaces Filecoin in PoC)
 
 **Note**: No SaaS components are needed for PoC. Edge Appliance and User VM API communicate directly.
@@ -18,12 +31,12 @@ For PoC, the User VM API runs as a Docker Compose service alongside the Edge App
 
 ## Quick Start
 
-### 1. Start User VM API and MinIO
+### 1. Start User VM API, Python AI Service, and MinIO
 
 ```bash
 cd infra/local
 
-# Start User VM API and MinIO services
+# Start all services (User VM API, Python AI Service, MinIO)
 docker-compose -f docker-compose.user-vm.yml up -d
 
 # View logs
@@ -31,6 +44,7 @@ docker-compose -f docker-compose.user-vm.yml logs -f
 
 # Or follow specific service logs
 docker-compose -f docker-compose.user-vm.yml logs -f user-vm-api
+docker-compose -f docker-compose.user-vm.yml logs -f python-ai-service
 docker-compose -f docker-compose.user-vm.yml logs -f minio
 ```
 
@@ -42,6 +56,9 @@ docker-compose -f docker-compose.user-vm.yml ps
 
 # Check User VM API health (mapped to host port 8280)
 curl http://localhost:8280/health
+
+# Check Python AI Service health (mapped to host port 8000)
+curl http://localhost:8000/health
 
 # Check MinIO health (mapped to host port 9000)
 curl http://localhost:9000/minio/health/live
@@ -121,13 +138,21 @@ MinIO is configured with:
 ## Data Persistence
 
 Data is stored in Docker volumes:
-- `user-vm-data`: User VM API data (events.db, WireGuard config, models)
+- `user-vm-data`: User VM API data (events.db, WireGuard config, baselines)
+- `user-vm-datasets`: Shared dataset storage (labeled snapshots for training)
+- `user-vm-models`: Shared model storage (ONNX models and metadata)
 - `minio-data`: MinIO storage (archived clips)
 
 To access data:
 ```bash
 # View User VM API data
 docker-compose -f docker-compose.user-vm.yml exec user-vm-api ls -la /app/data
+
+# View datasets (shared with Python AI Service)
+docker-compose -f docker-compose.user-vm.yml exec user-vm-api ls -la /app/data/datasets
+
+# View models (shared with Python AI Service)
+docker-compose -f docker-compose.user-vm.yml exec user-vm-api ls -la /app/data/models
 
 # View MinIO data
 docker-compose -f docker-compose.user-vm.yml exec minio ls -la /data
@@ -137,8 +162,14 @@ docker-compose -f docker-compose.user-vm.yml exec minio ls -la /data
 
 Services communicate via the `view-guard-edge` bridge network:
 - **User VM API**: `http://user-vm-api:8080` (from Edge)
+- **Python AI Service**: `http://python-ai-service:8000` (from User VM API)
 - **MinIO**: `http://minio:9000` (from User VM API)
 - **WireGuard**: UDP port 51820
+
+**Shared Volumes**:
+- Datasets and models are shared between User VM API and Python AI Service via Docker volumes
+- This allows Go services to store datasets and retrieve trained models
+- Python AI Service reads datasets and writes trained models to the same paths
 
 ## Post-PoC: S3-Filecoin Bridge
 
@@ -150,9 +181,15 @@ After PoC, we'll develop an S3-Filecoin bridge to migrate from MinIO to Filecoin
 ## Troubleshooting
 
 ### User VM API won't start
-- Check Docker logs: `docker-compose -f docker-compose.user-vm.yml logs`
+- Check Docker logs: `docker-compose -f docker-compose.user-vm.yml logs user-vm-api`
 - Verify MinIO is healthy: `curl http://localhost:9000/minio/health/live`
+- Verify Python AI Service is healthy: `curl http://localhost:8000/health`
 - Check disk space: `df -h`
+
+### Python AI Service won't start
+- Check Docker logs: `docker-compose -f docker-compose.user-vm.yml logs python-ai-service`
+- Verify Python dependencies installed: `docker-compose exec python-ai-service pip list`
+- Check shared volumes: `docker-compose exec python-ai-service ls -la /app/data/datasets`
 
 ### WireGuard tunnel not working
 - Verify WireGuard keys are generated: `docker-compose exec user-vm-api ls -la /app/data/wireguard`

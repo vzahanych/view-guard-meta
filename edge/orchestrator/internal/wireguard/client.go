@@ -169,34 +169,177 @@ func (c *Client) GetEndpoint() string {
 	return c.config.KVMEndpoint
 }
 
+// parseWireGuardConfig parses a WireGuard config file and returns the configuration values
+func parseWireGuardConfig(configData string) (privateKey string, peerPublicKey string, peerAllowedIPs string, peerEndpoint string, peerPresharedKey string, peerKeepalive string, address string, err error) {
+	lines := strings.Split(configData, "\n")
+	var inInterface, inPeer bool
+	
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		
+		// Skip comments and empty lines
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		
+		// Check for section headers
+		if trimmed == "[Interface]" {
+			inInterface = true
+			inPeer = false
+			continue
+		}
+		if trimmed == "[Peer]" {
+			inPeer = true
+			inInterface = false
+			continue
+		}
+		
+		// Parse Interface section
+		if inInterface {
+			if strings.HasPrefix(trimmed, "PrivateKey") {
+				parts := strings.SplitN(trimmed, "=", 2)
+				if len(parts) == 2 {
+					privateKey = strings.TrimSpace(parts[1])
+				}
+			} else if strings.HasPrefix(trimmed, "Address") {
+				parts := strings.SplitN(trimmed, "=", 2)
+				if len(parts) == 2 {
+					address = strings.TrimSpace(parts[1])
+				}
+			}
+		}
+		
+		// Parse Peer section
+		if inPeer {
+			if strings.HasPrefix(trimmed, "PublicKey") {
+				parts := strings.SplitN(trimmed, "=", 2)
+				if len(parts) == 2 {
+					peerPublicKey = strings.TrimSpace(parts[1])
+				}
+			} else if strings.HasPrefix(trimmed, "AllowedIPs") {
+				parts := strings.SplitN(trimmed, "=", 2)
+				if len(parts) == 2 {
+					peerAllowedIPs = strings.TrimSpace(parts[1])
+				}
+			} else if strings.HasPrefix(trimmed, "Endpoint") {
+				parts := strings.SplitN(trimmed, "=", 2)
+				if len(parts) == 2 {
+					peerEndpoint = strings.TrimSpace(parts[1])
+				}
+			} else if strings.HasPrefix(trimmed, "PresharedKey") {
+				parts := strings.SplitN(trimmed, "=", 2)
+				if len(parts) == 2 {
+					peerPresharedKey = strings.TrimSpace(parts[1])
+				}
+			} else if strings.HasPrefix(trimmed, "PersistentKeepalive") {
+				parts := strings.SplitN(trimmed, "=", 2)
+				if len(parts) == 2 {
+					peerKeepalive = strings.TrimSpace(parts[1])
+				}
+			}
+		}
+	}
+	
+	if privateKey == "" {
+		return "", "", "", "", "", "", "", fmt.Errorf("PrivateKey not found in config")
+	}
+	if peerPublicKey == "" {
+		return "", "", "", "", "", "", "", fmt.Errorf("Peer PublicKey not found in config")
+	}
+	
+	return privateKey, peerPublicKey, peerAllowedIPs, peerEndpoint, peerPresharedKey, peerKeepalive, address, nil
+}
+
 // startTunnel starts the WireGuard tunnel
 func (c *Client) startTunnel() error {
-	// Use wg-quick to bring up the interface
-	cmd := exec.CommandContext(c.ctx, "wg-quick", "up", c.interfaceName)
-	cmd.Env = os.Environ()
-
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("failed to start tunnel: %w, output: %s", err, string(output))
+	// Create WireGuard interface if it does not exist
+	linkAdd := exec.CommandContext(c.ctx, "ip", "link", "add", "dev", c.interfaceName, "type", "wireguard")
+	linkAdd.Env = os.Environ()
+	if output, err := linkAdd.CombinedOutput(); err != nil {
+		// If the interface already exists, ignore the error
+		if !strings.Contains(string(output), "File exists") {
+			return fmt.Errorf("failed to add wireguard interface %s: %w, output: %s", c.interfaceName, err, string(output))
+		}
 	}
 
-	c.LogDebug("Tunnel started", "interface", c.interfaceName)
+	// Read and parse config file
+	configData, err := os.ReadFile(c.configPath)
+	if err != nil {
+		return fmt.Errorf("failed to read config file: %w", err)
+	}
+
+	privateKey, peerPublicKey, peerAllowedIPs, peerEndpoint, peerPresharedKey, peerKeepalive, address, err := parseWireGuardConfig(string(configData))
+	if err != nil {
+		return fmt.Errorf("failed to parse config file: %w", err)
+	}
+
+	// Configure interface using individual wg set commands (more reliable than wg setconf)
+	// Set private key
+	cmd := exec.CommandContext(c.ctx, "wg", "set", c.interfaceName, "private-key", "/dev/stdin")
+	cmd.Stdin = strings.NewReader(privateKey)
+	cmd.Env = os.Environ()
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to set private key: %w, output: %s", err, string(output))
+	}
+
+	// Add peer
+	peerCmd := exec.CommandContext(c.ctx, "wg", "set", c.interfaceName, "peer", peerPublicKey)
+	if peerAllowedIPs != "" {
+		peerCmd.Args = append(peerCmd.Args, "allowed-ips", peerAllowedIPs)
+	}
+	if peerEndpoint != "" {
+		peerCmd.Args = append(peerCmd.Args, "endpoint", peerEndpoint)
+	}
+	if peerPresharedKey != "" {
+		peerCmd.Args = append(peerCmd.Args, "preshared-key", "/dev/stdin")
+		peerCmd.Stdin = strings.NewReader(peerPresharedKey)
+	}
+	if peerKeepalive != "" {
+		peerCmd.Args = append(peerCmd.Args, "persistent-keepalive", peerKeepalive)
+	}
+	peerCmd.Env = os.Environ()
+	if output, err := peerCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to add peer: %w, output: %s", err, string(output))
+	}
+
+	// Add IP address to the interface
+	ipAddr := "10.0.0.2/24"
+	if address != "" {
+		ipAddr = address
+	}
+	addrAdd := exec.CommandContext(c.ctx, "ip", "addr", "add", ipAddr, "dev", c.interfaceName)
+	addrAdd.Env = os.Environ()
+	if output, err := addrAdd.CombinedOutput(); err != nil {
+		// Ignore "File exists" error (address already assigned)
+		if !strings.Contains(string(output), "File exists") && !strings.Contains(string(output), "already assigned") {
+			return fmt.Errorf("failed to add IP address to interface %s: %w, output: %s", c.interfaceName, err, string(output))
+		}
+	}
+
+	// Bring interface up
+	linkUp := exec.CommandContext(c.ctx, "ip", "link", "set", "up", "dev", c.interfaceName)
+	linkUp.Env = os.Environ()
+	if output, err := linkUp.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to bring interface up: %w, output: %s", err, string(output))
+	}
+
+	c.LogInfo("WireGuard tunnel started", "interface", c.interfaceName, "address", ipAddr)
 	return nil
 }
 
 // stopTunnel stops the WireGuard tunnel
 func (c *Client) stopTunnel() error {
-	// Use wg-quick to bring down the interface
-	cmd := exec.CommandContext(c.ctx, "wg-quick", "down", c.interfaceName)
-	cmd.Env = os.Environ()
+	// Bring interface down and delete it; ignore errors if it does not exist
+	linkDown := exec.CommandContext(c.ctx, "ip", "link", "set", "down", "dev", c.interfaceName)
+	linkDown.Env = os.Environ()
+	if output, err := linkDown.CombinedOutput(); err != nil && !strings.Contains(string(output), "Cannot find device") {
+		return fmt.Errorf("failed to bring interface down: %w, output: %s", err, string(output))
+	}
 
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		// Ignore error if interface is already down
-		if strings.Contains(string(output), "does not exist") {
-			return nil
-		}
-		return fmt.Errorf("failed to stop tunnel: %w, output: %s", err, string(output))
+	linkDel := exec.CommandContext(c.ctx, "ip", "link", "del", "dev", c.interfaceName)
+	linkDel.Env = os.Environ()
+	if output, err := linkDel.CombinedOutput(); err != nil && !strings.Contains(string(output), "Cannot find device") {
+		return fmt.Errorf("failed to delete interface: %w, output: %s", err, string(output))
 	}
 
 	c.LogDebug("Tunnel stopped", "interface", c.interfaceName)

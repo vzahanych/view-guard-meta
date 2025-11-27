@@ -48,13 +48,17 @@ RUN CGO_ENABLED=1 go build -o orchestrator .
 # Runtime stage
 FROM alpine:latest
 
-# Install runtime dependencies
+# Install runtime dependencies (including WireGuard tools for tunnel client)
 RUN apk add --no-cache \
     ca-certificates \
     ffmpeg \
     sqlite \
     v4l-utils \
     wget \
+    bash \
+    coreutils \
+    wireguard-tools \
+    iproute2 \
     && rm -rf /var/cache/apk/*
 
 WORKDIR /app

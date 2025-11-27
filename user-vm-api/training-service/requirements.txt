@@ -1,0 +1,22 @@
+# Python AI Service dependencies
+# PyTorch 2.9.x (or latest stable)
+torch>=2.9.0
+torchvision>=0.20.0
+
+# ONNX for model export
+onnx>=1.16.0
+onnxruntime>=1.19.0
+
+# FastAPI for HTTP API
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+pydantic>=2.9.0
+
+# Image processing
+opencv-python>=4.10.0
+Pillow>=11.0.0
+numpy>=1.26.0
+
+# Utilities
+pyyaml>=6.0.1
+requests>=2.32.0

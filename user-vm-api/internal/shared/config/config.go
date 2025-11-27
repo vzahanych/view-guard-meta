@@ -114,6 +114,7 @@ func Load(configPath string) (*Config, error) {
 	// If no path provided, search common locations
 	if configPath == "" {
 		searchPaths := []string{
+			"/app/config/config.yaml", // Docker runtime default
 			"config/config.yaml",
 			"config/config.dev.yaml",
 			"../config/config.yaml",

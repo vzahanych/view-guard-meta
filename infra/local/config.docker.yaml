@@ -6,9 +6,9 @@ edge:
     config_file: /app/config/config.yaml
 
   wireguard:
-    enabled: false
-    config_path: ""
-    kvm_endpoint: ""
+    enabled: true
+    config_path: "/etc/wireguard/wg0.conf"
+    kvm_endpoint: "user-vm-api"
 
   cameras:
     discovery:
