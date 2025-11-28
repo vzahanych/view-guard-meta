@@ -17,32 +17,33 @@ type CameraType string
 const (
 	CameraTypeRTSP  CameraType = "rtsp"
 	CameraTypeONVIF CameraType = "onvif"
-	CameraTypeUSB  CameraType = "usb"
+	CameraTypeUSB   CameraType = "usb"
 )
 
 // Camera represents a unified camera interface
 type Camera struct {
-	ID            string
-	Name          string
-	Type          CameraType
-	Manufacturer  string
-	Model         string
-	Enabled       bool
-	Status        CameraStatus
-	LastSeen      *time.Time
-	DiscoveredAt  time.Time
-	
+	ID           string
+	Name         string
+	Type         CameraType
+	Manufacturer string
+	Model        string
+	Enabled      bool
+	Status       CameraStatus
+	LastSeen     *time.Time
+	DiscoveredAt time.Time
+
 	// Network camera fields
 	IPAddress     string
 	ONVIFEndpoint string
 	RTSPURLs      []string
-	
+
 	// USB camera fields
-	DevicePath    string
-	
+	DevicePath string
+
 	// Configuration
 	Config        CameraConfig
 	Capabilities  CameraCapabilities
+	DatasetStatus *CameraDatasetStatus
 }
 
 // CameraStatus represents camera connection status
@@ -65,18 +66,27 @@ type CameraConfig struct {
 	Resolution       string
 }
 
+// CameraDatasetStatus captures labeled data readiness for a camera
+type CameraDatasetStatus struct {
+	LabelCounts           map[string]int
+	LabeledSnapshotCount  int
+	RequiredSnapshotCount int
+	SnapshotRequired      bool
+	LastSynced            time.Time
+}
+
 // Manager manages cameras (unified interface for network and USB cameras)
 type Manager struct {
 	*service.ServiceBase
-	stateMgr        *state.Manager
-	onvifDiscovery  *ONVIFDiscoveryService
-	usbDiscovery    *USBDiscoveryService
-	rtspClients     map[string]*RTSPClient
-	cameras         map[string]*Camera
-	mu              sync.RWMutex
-	ctx             context.Context
-	cancel          context.CancelFunc
-	statusInterval  time.Duration
+	stateMgr       *state.Manager
+	onvifDiscovery *ONVIFDiscoveryService
+	usbDiscovery   *USBDiscoveryService
+	rtspClients    map[string]*RTSPClient
+	cameras        map[string]*Camera
+	mu             sync.RWMutex
+	ctx            context.Context
+	cancel         context.CancelFunc
+	statusInterval time.Duration
 }
 
 // NewManager creates a new camera manager
@@ -212,18 +222,18 @@ func (m *Manager) handleCameraDiscovered(ch <-chan service.Event) {
 			}
 
 			cameraID, _ := event.Data["camera_id"].(string)
-	if cameraID == "" {
-		return
-	}
+			if cameraID == "" {
+				return
+			}
 
-	// Get discovered camera from appropriate discovery service
-	var discoveredCam *DiscoveredCamera
-	if m.onvifDiscovery != nil {
-		discoveredCam = m.onvifDiscovery.GetCameraByID(cameraID)
-	}
-	if discoveredCam == nil && m.usbDiscovery != nil {
-		discoveredCam = m.usbDiscovery.GetCameraByID(cameraID)
-	}
+			// Get discovered camera from appropriate discovery service
+			var discoveredCam *DiscoveredCamera
+			if m.onvifDiscovery != nil {
+				discoveredCam = m.onvifDiscovery.GetCameraByID(cameraID)
+			}
+			if discoveredCam == nil && m.usbDiscovery != nil {
+				discoveredCam = m.usbDiscovery.GetCameraByID(cameraID)
+			}
 
 			if discoveredCam == nil {
 				continue
@@ -255,14 +265,14 @@ func (m *Manager) RegisterCamera(ctx context.Context, discovered *DiscoveredCame
 		cameraType = CameraTypeUSB
 		devicePath = discovered.RTSPURLs[0]
 		rtspURLs = []string{}
-		
+
 		// For USB cameras, check if we already have a camera with the same device path(s)
 		// This handles the case where the camera ID changed but it's the same physical device
 		devicePaths := discovered.RTSPURLs
 		if len(devicePaths) == 0 {
 			devicePaths = []string{devicePath}
 		}
-		
+
 		// Look for existing cameras with any of these device paths
 		for existingID, existingCam := range m.cameras {
 			if existingCam.Type == CameraTypeUSB && existingID != discovered.ID {
@@ -271,7 +281,7 @@ func (m *Manager) RegisterCamera(ctx context.Context, discovered *DiscoveredCame
 				if existingCam.DevicePath != "" {
 					existingPaths = append(existingPaths, existingCam.DevicePath)
 				}
-				
+
 				for _, newPath := range devicePaths {
 					for _, existingPath := range existingPaths {
 						if newPath == existingPath {
@@ -281,7 +291,7 @@ func (m *Manager) RegisterCamera(ctx context.Context, discovered *DiscoveredCame
 								"new_id", discovered.ID,
 								"device_path", newPath,
 							)
-							
+
 							// Delete old camera from state
 							if err := m.stateMgr.DeleteCamera(ctx, existingID); err != nil {
 								m.LogError("Failed to delete old camera", err, "camera_id", existingID)
@@ -321,10 +331,10 @@ func (m *Manager) RegisterCamera(ctx context.Context, discovered *DiscoveredCame
 
 	// Save to state
 	camState := state.CameraState{
-		ID:      camera.ID,
-		Name:    camera.Name,
-		RTSPURL: m.getPrimaryURL(camera),
-		Enabled: camera.Enabled,
+		ID:       camera.ID,
+		Name:     camera.Name,
+		RTSPURL:  m.getPrimaryURL(camera),
+		Enabled:  camera.Enabled,
 		LastSeen: camera.LastSeen,
 	}
 
@@ -407,10 +417,10 @@ func (m *Manager) UpdateCameraConfig(ctx context.Context, cameraID string, confi
 
 	// Save to state
 	camState := state.CameraState{
-		ID:      camera.ID,
-		Name:    camera.Name,
-		RTSPURL: m.getPrimaryURL(camera),
-		Enabled: camera.Enabled,
+		ID:       camera.ID,
+		Name:     camera.Name,
+		RTSPURL:  m.getPrimaryURL(camera),
+		Enabled:  camera.Enabled,
 		LastSeen: camera.LastSeen,
 	}
 
@@ -446,10 +456,10 @@ func (m *Manager) setCameraEnabled(ctx context.Context, cameraID string, enabled
 
 	// Save to state
 	camState := state.CameraState{
-		ID:      camera.ID,
-		Name:    camera.Name,
-		RTSPURL: m.getPrimaryURL(camera),
-		Enabled: camera.Enabled,
+		ID:       camera.ID,
+		Name:     camera.Name,
+		RTSPURL:  m.getPrimaryURL(camera),
+		Enabled:  camera.Enabled,
 		LastSeen: camera.LastSeen,
 	}
 
@@ -459,6 +469,16 @@ func (m *Manager) setCameraEnabled(ctx context.Context, cameraID string, enabled
 
 	m.LogInfo("Camera enabled/disabled", "camera_id", cameraID, "enabled", enabled)
 	return nil
+}
+
+// UpdateDatasetStatus updates dataset readiness info for a camera
+func (m *Manager) UpdateDatasetStatus(cameraID string, status *CameraDatasetStatus) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if cam, ok := m.cameras[cameraID]; ok {
+		cam.DatasetStatus = status
+	}
 }
 
 // DeleteCamera deletes a camera
@@ -512,10 +532,10 @@ func (m *Manager) AddCamera(ctx context.Context, camera *Camera) error {
 
 	// Save to state
 	camState := state.CameraState{
-		ID:      camera.ID,
-		Name:    camera.Name,
-		RTSPURL: m.getPrimaryURL(camera),
-		Enabled: camera.Enabled,
+		ID:       camera.ID,
+		Name:     camera.Name,
+		RTSPURL:  m.getPrimaryURL(camera),
+		Enabled:  camera.Enabled,
 		LastSeen: camera.LastSeen,
 	}
 
@@ -581,10 +601,10 @@ func (m *Manager) UpdateCamera(ctx context.Context, cameraID string, updates *Ca
 
 	// Save to state
 	camState := state.CameraState{
-		ID:      camera.ID,
-		Name:    camera.Name,
-		RTSPURL: m.getPrimaryURL(camera),
-		Enabled: camera.Enabled,
+		ID:       camera.ID,
+		Name:     camera.Name,
+		RTSPURL:  m.getPrimaryURL(camera),
+		Enabled:  camera.Enabled,
 		LastSeen: camera.LastSeen,
 	}
 
@@ -724,4 +744,3 @@ func (m *Manager) TriggerDiscovery() {
 		m.usbDiscovery.TriggerDiscovery()
 	}
 }
-

@@ -64,7 +64,22 @@ func getMigrations() []Migration {
 				return nil
 			},
 		},
-		// Future migrations can be added here
+		{
+			Version:     2,
+			Description: "Add edge camera status table",
+			Up: func(tx *sql.Tx) error {
+				if _, err := tx.Exec(database.CreateEdgeCameraStatusTable); err != nil {
+					return fmt.Errorf("failed to create edge_camera_status table: %w", err)
+				}
+				return nil
+			},
+			Down: func(tx *sql.Tx) error {
+				if _, err := tx.Exec("DROP TABLE IF EXISTS edge_camera_status"); err != nil {
+					return fmt.Errorf("failed to drop edge_camera_status table: %w", err)
+				}
+				return nil
+			},
+		},
 	}
 }
 

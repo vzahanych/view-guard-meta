@@ -7,11 +7,19 @@ import Loading from '../components/Loading'
 import { api } from '../utils/api'
 import { Camera, Save, Trash2, Tag } from 'lucide-react'
 
+interface DatasetStatus {
+  labeled_snapshot_count: number
+  required_snapshot_count: number
+  snapshot_required: boolean
+  label_counts?: Record<string, number>
+}
+
 interface Camera {
   id: string
   name: string
   type: string
   enabled: boolean
+  dataset_status?: DatasetStatus
 }
 
 interface Screenshot {
@@ -27,6 +35,7 @@ interface Screenshot {
 
 export default function Screenshots() {
   const [cameras, setCameras] = useState<Camera[]>([])
+  const [snapshotAlerts, setSnapshotAlerts] = useState<Camera[]>([])
   const [screenshots, setScreenshots] = useState<Screenshot[]>([])
   const [selectedCameraId, setSelectedCameraId] = useState<string>('')
   const [filterLabel, setFilterLabel] = useState<string>('')
@@ -54,6 +63,8 @@ export default function Screenshots() {
       const response = await api.get<{ cameras: Camera[]; count: number }>('/cameras')
       const enabledCameras = response.cameras.filter((cam) => cam.enabled)
       setCameras(enabledCameras)
+      const needingSnapshots = enabledCameras.filter((cam) => cam.dataset_status?.snapshot_required)
+      setSnapshotAlerts(needingSnapshots)
       if (enabledCameras.length > 0 && !selectedCameraId) {
         setSelectedCameraId(enabledCameras[0].id)
       }
@@ -136,6 +147,7 @@ export default function Screenshots() {
       setCaptureCustomLabel('')
       setCaptureDescription('')
       fetchScreenshots()
+      fetchCameras()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save screenshot')
     } finally {
@@ -238,8 +250,114 @@ export default function Screenshots() {
     )
   }
 
+  const acknowledgeReminder = async (cameraId: string) => {
+    try {
+      // Send telemetry about reminder acknowledgment
+      await api.post('/telemetry/reminder', {
+        camera_id: cameraId,
+        action: 'acknowledged',
+        timestamp: new Date().toISOString(),
+      })
+    } catch (err) {
+      // Silently fail - telemetry is not critical
+      console.warn('Failed to send reminder telemetry', err)
+    }
+  }
+
+  const completeReminder = async (cameraId: string) => {
+    try {
+      // Send telemetry about reminder completion
+      await api.post('/telemetry/reminder', {
+        camera_id: cameraId,
+        action: 'completed',
+        timestamp: new Date().toISOString(),
+      })
+    } catch (err) {
+      // Silently fail - telemetry is not critical
+      console.warn('Failed to send reminder telemetry', err)
+    }
+  }
+
   return (
     <div className="space-y-6">
+      {snapshotAlerts.length > 0 && (
+        <div className="rounded-lg border border-yellow-300 bg-yellow-50 p-4">
+          <div className="flex items-start justify-between">
+            <div className="flex-1">
+              <div className="flex items-center gap-2 mb-2">
+                <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-yellow-200 text-yellow-800">
+                  ⚠️ Action Required
+                </span>
+                <h3 className="text-sm font-semibold text-yellow-900">
+                  {snapshotAlerts.length === 1
+                    ? `Camera "${snapshotAlerts[0].name}" needs more labeled snapshots`
+                    : `${snapshotAlerts.length} cameras need more labeled snapshots`}
+                </h3>
+              </div>
+              <div className="space-y-2 mb-3">
+                {snapshotAlerts.map((cam) => {
+                  const progress = cam.dataset_status
+                    ? (cam.dataset_status.labeled_snapshot_count / cam.dataset_status.required_snapshot_count) * 100
+                    : 0
+                  const remaining = cam.dataset_status
+                    ? cam.dataset_status.required_snapshot_count - cam.dataset_status.labeled_snapshot_count
+                    : 0
+
+                  return (
+                    <div
+                      key={cam.id}
+                      className="bg-white rounded-md p-3 border border-yellow-200"
+                    >
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium text-sm text-gray-900">{cam.name}</span>
+                          <span className="text-xs text-gray-600">
+                            {cam.dataset_status?.labeled_snapshot_count || 0}/
+                            {cam.dataset_status?.required_snapshot_count || 0} normal snapshots
+                          </span>
+                        </div>
+                        <span className="text-xs font-medium text-yellow-700">
+                          {remaining} more needed
+                        </span>
+                      </div>
+                      <div className="w-full bg-gray-200 rounded-full h-2 mb-2">
+                        <div
+                          className="bg-yellow-500 h-2 rounded-full transition-all"
+                          style={{ width: `${Math.min(progress, 100)}%` }}
+                        />
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <Button
+                          size="sm"
+                          onClick={() => {
+                            setSelectedCameraId(cam.id)
+                            setCaptureLabel('normal')
+                            captureScreenshot()
+                            completeReminder(cam.id)
+                          }}
+                        >
+                          <Camera className="w-3 h-3 mr-1" />
+                          Capture Now
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          onClick={() => acknowledgeReminder(cam.id)}
+                        >
+                          Dismiss
+                        </Button>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+              <p className="text-xs text-yellow-800">
+                💡 Capture labeled <span className="font-semibold">normal</span> snapshots to enable training for these cameras.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-3xl font-bold text-gray-900">Screenshot Management</h1>
@@ -257,20 +375,86 @@ export default function Screenshots() {
 
       {/* Capture Section */}
       <Card>
-        <div className="flex flex-wrap items-end gap-4">
-          <Select
-            label="Camera"
-            value={selectedCameraId}
-            onChange={(e) => setSelectedCameraId(e.target.value)}
-            options={cameras.map((cam) => ({ value: cam.id, label: cam.name }))}
-          />
-          <Button onClick={captureScreenshot} disabled={!selectedCameraId || saving}>
-            <Camera className="w-4 h-4 mr-2" />
-            {saving ? 'Capturing...' : 'Capture Screenshot'}
-          </Button>
-          <Button variant="secondary" onClick={exportDataset} disabled={exporting}>
-            {exporting ? 'Exporting...' : 'Export Dataset'}
-          </Button>
+        <div className="space-y-4">
+          <div className="flex flex-wrap items-end gap-4">
+            <Select
+              label="Camera"
+              value={selectedCameraId}
+              onChange={(e) => setSelectedCameraId(e.target.value)}
+              options={cameras.map((cam) => ({ value: cam.id, label: cam.name }))}
+            />
+            <Button onClick={captureScreenshot} disabled={!selectedCameraId || saving}>
+              <Camera className="w-4 h-4 mr-2" />
+              {saving ? 'Capturing...' : 'Capture Screenshot'}
+            </Button>
+            <Button variant="secondary" onClick={exportDataset} disabled={exporting}>
+              {exporting ? 'Exporting...' : 'Export Dataset'}
+            </Button>
+          </div>
+          {/* Camera Dataset Progress Display */}
+          {selectedCameraId && cameras.find((c) => c.id === selectedCameraId)?.dataset_status && (
+            <div className="mt-4 pt-4 border-t border-gray-200">
+              <h3 className="text-sm font-semibold text-gray-900 mb-3">Dataset Progress</h3>
+              {(() => {
+                const selectedCam = cameras.find((c) => c.id === selectedCameraId)
+                const status = selectedCam?.dataset_status
+                if (!status) return null
+
+                const progress = (status.labeled_snapshot_count / status.required_snapshot_count) * 100
+                const remaining = status.required_snapshot_count - status.labeled_snapshot_count
+                const isComplete = !status.snapshot_required
+
+                return (
+                  <div className="space-y-3">
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-sm text-gray-700">Normal Snapshots</span>
+                        <span className="text-sm font-medium text-gray-900">
+                          {status.labeled_snapshot_count} / {status.required_snapshot_count}
+                        </span>
+                      </div>
+                      <div className="w-full bg-gray-200 rounded-full h-3">
+                        <div
+                          className={`h-3 rounded-full transition-all ${
+                            isComplete ? 'bg-green-500' : 'bg-blue-500'
+                          }`}
+                          style={{ width: `${Math.min(progress, 100)}%` }}
+                        />
+                      </div>
+                      {!isComplete && (
+                        <p className="text-xs text-gray-600 mt-1">
+                          {remaining} more normal snapshots needed for training
+                        </p>
+                      )}
+                      {isComplete && (
+                        <p className="text-xs text-green-600 mt-1 font-medium">
+                          ✓ Ready for training
+                        </p>
+                      )}
+                    </div>
+                    <div className="grid grid-cols-2 gap-4 text-xs">
+                      <div>
+                        <span className="text-gray-600">Label Coverage:</span>
+                        <span className="ml-2 font-medium text-gray-900">
+                          {Object.keys(status.label_counts || {}).length} labels
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-gray-600">Status:</span>
+                        <span
+                          className={`ml-2 font-medium ${
+                            isComplete ? 'text-green-600' : 'text-yellow-600'
+                          }`}
+                        >
+                          {isComplete ? 'Ready' : 'In Progress'}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                )
+              })()}
+            </div>
+          )}
         </div>
       </Card>
 

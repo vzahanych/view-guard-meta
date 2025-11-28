@@ -602,6 +602,11 @@ func (w *WireGuardServer) updatePeerStatus() {
 		// Publish events for connection state changes
 		if w.eventBus != nil {
 			if !wasConnected && peerInfo.Connected {
+				// New handshake detected - peer just connected
+				w.logger.Info("WireGuard peer connected, ready for capability sync",
+					zap.String("public_key", peerKey),
+					zap.Time("last_handshake", peer.LastHandshakeTime),
+				)
 				w.eventBus.Publish(service.Event{
 					Type:      service.EventTypeWireGuardClientConnected,
 					Timestamp: time.Now().Unix(),
@@ -621,6 +626,16 @@ func (w *WireGuardServer) updatePeerStatus() {
 						"last_handshake": peer.LastHandshakeTime.Unix(),
 					},
 				})
+			} else if peerInfo.Connected && !peer.LastHandshakeTime.IsZero() {
+				// Check if this is a new handshake (handshake time changed)
+				lastHandshake := peerInfo.LastHandshake
+				if !lastHandshake.IsZero() && peer.LastHandshakeTime.After(lastHandshake) {
+					// New handshake detected on existing connection
+					w.logger.Debug("WireGuard handshake updated, capability sync may be needed",
+						zap.String("public_key", peerKey),
+						zap.Time("last_handshake", peer.LastHandshakeTime),
+					)
+				}
 			}
 		}
 	}

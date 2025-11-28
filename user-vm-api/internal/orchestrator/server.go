@@ -50,6 +50,12 @@ func (s *Server) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to run database migrations: %w", err)
 	}
 
+	// Get event bus from manager (already created)
+	eventBus := s.manager.GetEventBus()
+
+	var edgeAPIServer *tunnelgateway.EdgeAPIServer
+	var capStore *tunnelgateway.CapabilityStore
+
 	// Register Tunnel Gateway / WireGuard services when enabled
 	if s.config.UserVMAPI.WireGuardServer.Enabled {
 		// WireGuard server (acts as KVM-side tunnel endpoint)
@@ -58,18 +64,28 @@ func (s *Server) Start(ctx context.Context) error {
 			s.logger.Error("Failed to create WireGuard server", zap.Error(err))
 			return fmt.Errorf("failed to create WireGuard server: %w", err)
 		}
+		wgServer.SetEventBus(eventBus)
 		s.manager.Register(wgServer)
 
 		// Edge authentication/registration manager
 		edgeAuth := tunnelgateway.NewEdgeAuth(s.config, s.logger, db, wgServer)
 
 		// Edge-facing gRPC API (over WireGuard tunnel)
-		edgeAPIServer, err := tunnelgateway.NewEdgeAPIServer(s.config, s.logger, db, wgServer, edgeAuth)
+		edgeAPIServer, err = tunnelgateway.NewEdgeAPIServer(s.config, s.logger, db, wgServer, edgeAuth)
 		if err != nil {
 			s.logger.Error("Failed to create Edge API server", zap.Error(err))
 			return fmt.Errorf("failed to create Edge API server: %w", err)
 		}
+		edgeAPIServer.SetEventBus(eventBus)
+		capStore = edgeAPIServer.GetCapabilityStore()
 		s.manager.Register(edgeAPIServer)
+	}
+
+	// Register API Gateway when enabled
+	if s.config.UserVMAPI.APIGateway.Enabled {
+		apiServer := NewAPIServer(s.config, s.logger, capStore, edgeAPIServer)
+		s.manager.Register(apiServer)
+		s.logger.Info("API Gateway registered")
 	}
 
 	// Register services here as they are implemented

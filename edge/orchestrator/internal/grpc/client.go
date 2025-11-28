@@ -161,15 +161,10 @@ func (c *Client) connect(ctx context.Context, endpoint string) (*grpc.ClientConn
 
 // getEndpoint returns the gRPC endpoint address
 func (c *Client) getEndpoint() string {
-	// For PoC, use localhost or WireGuard interface IP
-	// In production, this would be configured via KVM VM endpoint
-	// KVM VM gRPC server typically runs on port 50051
-	if c.config.KVMEndpoint != "" {
-		// Extract host from WireGuard endpoint and use gRPC port
-		// For now, assume gRPC is on same host, port 50051
-		return "localhost:50051"
-	}
-	return "localhost:50051"
+	// Connect to VM over WireGuard tunnel using the WireGuard interface IP
+	// VM WireGuard IP is 10.0.0.1, Edge is 10.0.0.2
+	// gRPC server runs on port 50051
+	return "10.0.0.1:50051"
 }
 
 // GetEventClient returns the event service client

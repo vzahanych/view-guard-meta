@@ -82,6 +82,7 @@ type AIConfig struct {
 	ClipDuration          time.Duration `yaml:"clip_duration"`
 	PreEventDuration      time.Duration `yaml:"pre_event_duration"`
 	DatasetExportDir      string        `yaml:"dataset_export_dir"`
+	MinNormalSnapshots    int           `yaml:"min_normal_snapshots"`
 }
 
 // EventsConfig contains event management configuration
@@ -230,6 +231,9 @@ func (c *Config) setDefaults() {
 	}
 	if c.Edge.AI.DatasetExportDir == "" {
 		c.Edge.AI.DatasetExportDir = filepath.Join(c.Edge.Orchestrator.DataDir, "exports")
+	}
+	if c.Edge.AI.MinNormalSnapshots == 0 {
+		c.Edge.AI.MinNormalSnapshots = 50
 	}
 
 	if c.Edge.Events.QueueSize == 0 {

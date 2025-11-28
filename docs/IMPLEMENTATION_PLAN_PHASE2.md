@@ -1001,14 +1001,17 @@ services:
   - Set up pre-commit hooks
 - **Substep 2.1.2.2**: Local testing environment
   - **Status**: ✅ DONE
-  - Docker Compose for local services: `infra/local/docker-compose.user-vm.yml`
-    - User VM API (Go) service with all logical services
-    - Python AI Service (FastAPI) for CAE training and inference
-    - MinIO (S3-compatible) for encrypted clip storage
-    - Shared volumes for datasets and models
-  - Configuration file: `infra/local/user-vm-config.yaml`
-  - Local SQLite database setup (persisted in `user-vm-data` volume)
-  - Test WireGuard tunnel setup (port 51820/udp)
+  - Single `infra/local/docker-compose.yml` now orchestrates the entire PoC stack (Edge + User VM)
+    - Added WireGuard automation: `wg-setup` sidecar generates keys inside Docker and shares them via `infra/local/wg`
+    - Edge and User VM containers mount generated configs via volumes; both images now include `wireguard-tools`, `iproute2`, and supporting utilities
+    - User VM API (Go) + MinIO + Python AI service remain as separate services with shared volumes for datasets/models (`user-vm-data`, `user-vm-datasets`, `user-vm-models`, etc.)
+    - Edge orchestrator and edge AI services run in the same compose stack for end-to-end testing
+  - Added `infra/local/start-local-env.sh` helper that:
+    1. Runs `wg-setup` (Docker) to generate WireGuard key material under `infra/local/wg/keys`
+    2. Runs `wg/generate-configs.sh` to materialize server/edge configs under `infra/local/wg/config`
+    3. Brings the stack up (`docker compose up -d`) or handles restart/stop flows
+  - WireGuard tunnel now auto-establishes on `start-local-env.sh start` with no manual steps: edge client and server use `ip` + `wg set` commands to configure interfaces, assign `10.0.0.1/24` ↔ `10.0.0.2/24`, and verify connectivity (`ping` succeeds both ways)
+  - Local SQLite database persists via `user-vm-data` volume; MinIO data persists via `minio-data`
 - **Substep 2.1.2.3**: IDE configuration
   - **Status**: ✅ DONE
   - VS Code / Cursor workspace settings
@@ -1150,6 +1153,84 @@ services:
   - **P1**: Test tunnel health monitoring (ping/pong, latency, bandwidth)
   - Location: `internal/tunnel-gateway/*_test.go`
   - **Notes**: Comprehensive test suite covering server lifecycle, event upload (single and batch), telemetry/heartbeat handling, connection tracking, disconnection detection, and WireGuard connection monitoring features.
+
+---
+
+## Epic 2.2.1: Post-WireGuard Edge ↔ VM Coordination
+
+**Priority: P0**
+
+Once the WireGuard tunnel stands up automatically, the VM must immediately capture the edge’s camera inventory and dataset readiness, then guide the user toward collecting labeled snapshots where needed.
+
+### Step 2.2.1.1: Capability Sync RPC
+- **Substep 2.2.1.1.1**: Proto & RPC definitions
+  - **Status**: ✅ DONE
+  - Extended `proto/proto/edge/control.proto` with `CameraCapability`, `SyncCapabilitiesRequest`, `SyncCapabilitiesResponse`.
+  - Added `SyncCapabilities` gRPC method to `ControlService` (Edge calls VM to report capabilities).
+  - Location: `proto/proto/edge/control.proto`, `proto/go/generated/edge/control.pb.go`
+- **Substep 2.2.1.1.2**: VM-triggered sync after WG handshake
+  - **Status**: ✅ DONE
+  - VM WireGuard server detects `latest_handshake` events from WireGuard peers and publishes connection events.
+  - VM EdgeAPIServer receives `SyncCapabilities` calls from Edge and persists camera metadata, snapshot counts, and readiness flags in SQLite (`edge_camera_status` table via `CapabilityStore`).
+  - Edge SyncService schedules periodic re-sync every 5 minutes to catch new cameras or additional labeled data.
+  - Edge SyncService also triggers immediate sync when WireGuard connection is established (listens to `EventTypeWireGuardConnected` events).
+  - Location: `user-vm-api/internal/tunnel-gateway/wireguard.go`, `user-vm-api/internal/tunnel-gateway/edge_api.go`, `user-vm-api/internal/tunnel-gateway/capability_store.go`, `edge/orchestrator/internal/capabilities/sync_service.go`
+- **Substep 2.2.1.1.3**: Edge handler implementation
+  - **Status**: ✅ DONE
+  - Edge orchestrator's `SyncService` gathers discovery data (RTSP/USB inventory via `CameraManager`) plus labeled-snapshot counts per camera (via `ScreenshotService`).
+  - Responds with `snapshot_required=true` when a camera lacks the minimum number of labeled "normal" snapshots (configurable via `MinNormalSnapshots`, default 50).
+  - Location: `edge/orchestrator/internal/capabilities/sync_service.go`
+
+### Step 2.2.1.2: VM-side Dataset Tracking
+- **Substep 2.2.1.2.1**: Database extensions
+  - **Status**: ✅ DONE
+  - Extended `edge_camera_status` table with `training_eligibility_status` field to track camera readiness states (`needs_snapshots`, `ready_for_training`, `training_in_progress`).
+  - Added helper methods to `CapabilityStore`: `GetCameraStatus`, `ListCamerasReadyForTraining`, `ListCamerasNeedingSnapshots`, `SetTrainingInProgress`.
+  - These helpers allow Dataset Storage / Model Catalog services to query readiness state.
+  - Location: `user-vm-api/internal/shared/database/schema.go`, `user-vm-api/internal/tunnel-gateway/capability_store.go`
+- **Substep 2.2.1.2.2**: Event bus notifications
+  - **Status**: ✅ DONE
+  - Enhanced `CapabilityStore.UpsertCapabilities` to detect state transitions when camera training eligibility changes.
+  - Publishes events: `camera.ready_for_training`, `camera.training_started`, `camera.needs_snapshots` when cameras transition between states.
+  - Event bus integration: `CapabilityStore` receives event bus via `SetEventBus` and publishes transition events automatically.
+  - Consumers (e.g., training scheduler) can subscribe to these events to react automatically.
+  - Location: `user-vm-api/internal/tunnel-gateway/capability_store.go`
+- **Substep 2.2.1.2.3**: API exposure
+  - **Status**: ✅ DONE
+  - Created `APIServer` in `user-vm-api/internal/orchestrator/api.go` with HTTP REST endpoints.
+  - `GET /api/cameras` - Lists all cameras with their readiness status (supports `edge_id` query parameter).
+  - `GET /api/cameras/{id}/dataset` - Returns detailed dataset status for a specific camera.
+  - API Gateway integrated into orchestrator server and registered as a service.
+  - Added `APIGatewayConfig` to configuration for enabling/disabling and port configuration.
+  - Location: `user-vm-api/internal/orchestrator/api.go`, `user-vm-api/internal/orchestrator/server.go`, `user-vm-api/internal/shared/config/config.go`
+
+### Step 2.2.1.3: Edge UI Guidance
+- **Substep 2.2.1.3.1**: Notification surfacing
+  - **Status**: ✅ DONE
+  - Enhanced Edge UI Screenshots page with prominent notification banners showing cameras needing snapshots.
+  - Added badges ("⚠️ Action Required") and progress bars for each camera requiring snapshots.
+  - Each camera card shows: current/required snapshot counts, progress bar, remaining snapshots needed.
+  - Added "Capture Now" CTA button that selects the camera, sets label to "normal", and triggers capture.
+  - Added "Dismiss" button to acknowledge reminders.
+  - Location: `edge/orchestrator/internal/web/frontend/src/pages/Screenshots.tsx`
+- **Substep 2.2.1.3.2**: Progress display
+  - **Status**: ✅ DONE
+  - Enhanced Screenshots page with per-camera dataset progress display in the capture section.
+  - Enhanced Cameras page (single view) with detailed dataset progress showing:
+    - Collected vs. required snapshot counts with progress bar
+    - Label coverage (number of different labels)
+    - Dataset health status (Ready/In Progress)
+    - CTA to navigate to Screenshots page if more snapshots needed
+  - Added dataset status cards in Cameras page grid view showing progress badges for all cameras.
+  - Progress bars use color coding: green for ready, yellow/blue for in progress.
+  - Location: `edge/orchestrator/internal/web/frontend/src/pages/Screenshots.tsx`, `edge/orchestrator/internal/web/frontend/src/pages/Cameras.tsx`
+- **Substep 2.2.1.3.3**: Reminder telemetry
+  - **Status**: ✅ DONE
+  - Added `POST /api/telemetry/reminder` endpoint to handle reminder acknowledgments and completions.
+  - Edge UI sends telemetry when reminders are acknowledged ("dismiss") or completed ("capture now").
+  - Telemetry includes: camera_id, action (acknowledged/completed), timestamp.
+  - Edge logs reminder interactions for ops visibility (currently logged locally; can be extended to forward to VM via telemetry collector).
+  - Location: `edge/orchestrator/internal/web/handlers.go` (handleReminderTelemetry), `edge/orchestrator/internal/web/frontend/src/pages/Screenshots.tsx` (acknowledgeReminder, completeReminder)
 
 ---
 
@@ -1894,6 +1975,4 @@ services:
   - Location: `user-vm-api/training-service/tests/`
 
 ---
-
-**See [Main Implementation Plan](IMPLEMENTATION_PLAN.md) for success criteria and next phases.**
 

@@ -25,18 +25,20 @@ type EdgeAPIServer struct {
 	edge.UnimplementedTelemetryServiceServer
 	edge.UnimplementedControlServiceServer
 
-	config       *config.Config
-	logger       *logging.Logger
-	db           *database.DB
-	wgServer     *WireGuardServer
-	auth         *EdgeAuth
-	eventBus     *service.EventBus
-	grpcServer   *grpc.Server
-	listener     net.Listener
-	connections  map[string]*EdgeConnection // edge_id -> connection info
-	mu           sync.RWMutex
-	ctx          context.Context
-	cancel       context.CancelFunc
+	config      *config.Config
+	logger      *logging.Logger
+	db          *database.DB
+	wgServer    *WireGuardServer
+	auth        *EdgeAuth
+	eventBus    *service.EventBus
+	grpcServer  *grpc.Server
+	listener    net.Listener
+	connections map[string]*EdgeConnection // edge_id -> connection info
+	mu          sync.RWMutex
+	ctx         context.Context
+	cancel      context.CancelFunc
+
+	capStore *CapabilityStore
 
 	// Service interfaces (will be set when services are available)
 	eventReceiver    EventReceiver
@@ -47,19 +49,19 @@ type EdgeAPIServer struct {
 
 // EdgeConnection tracks connection state for an Edge Appliance
 type EdgeConnection struct {
-	EdgeID           string
-	PublicKey        string
-	ConnectedAt      time.Time
-	LastHeartbeat    time.Time
-	LastTelemetry    time.Time
-	Latency          time.Duration
-	ConnectionCount  int64
-	mu               sync.RWMutex
+	EdgeID          string
+	PublicKey       string
+	ConnectedAt     time.Time
+	LastHeartbeat   time.Time
+	LastTelemetry   time.Time
+	Latency         time.Duration
+	ConnectionCount int64
+	mu              sync.RWMutex
 }
 
 // EventReceiver interface for receiving events from Edge
 type EventReceiver interface {
-	ReceiveEvent(ctx context.Context, edgeID string, event *edge.Event) (string, error) // Returns event ID
+	ReceiveEvent(ctx context.Context, edgeID string, event *edge.Event) (string, error)       // Returns event ID
 	ReceiveEvents(ctx context.Context, edgeID string, events []*edge.Event) ([]string, error) // Returns event IDs
 }
 
@@ -93,6 +95,7 @@ func NewEdgeAPIServer(cfg *config.Config, log *logging.Logger, db *database.DB, 
 		connections: make(map[string]*EdgeConnection),
 		ctx:         ctx,
 		cancel:      cancel,
+		capStore:    NewCapabilityStore(db),
 	}
 
 	return server, nil
@@ -101,6 +104,15 @@ func NewEdgeAPIServer(cfg *config.Config, log *logging.Logger, db *database.DB, 
 // SetEventBus sets the event bus for publishing events
 func (s *EdgeAPIServer) SetEventBus(bus *service.EventBus) {
 	s.eventBus = bus
+	// Also set event bus on capability store for state transition events
+	if s.capStore != nil {
+		s.capStore.SetEventBus(bus)
+	}
+}
+
+// GetCapabilityStore returns the capability store instance
+func (s *EdgeAPIServer) GetCapabilityStore() *CapabilityStore {
+	return s.capStore
 }
 
 // SetEventReceiver sets the event receiver service
@@ -426,9 +438,9 @@ func (s *EdgeAPIServer) SendEvents(ctx context.Context, req *edge.SendEventsRequ
 
 	if s.eventReceiver == nil {
 		return &edge.SendEventsResponse{
-			Success:      false,
+			Success:       false,
 			ReceivedCount: 0,
-			ErrorMessage: "event receiver not configured",
+			ErrorMessage:  "event receiver not configured",
 		}, nil
 	}
 
@@ -437,9 +449,9 @@ func (s *EdgeAPIServer) SendEvents(ctx context.Context, req *edge.SendEventsRequ
 	if err != nil {
 		s.logger.Error("Failed to receive events", zap.String("edge_id", edgeID), zap.Error(err))
 		return &edge.SendEventsResponse{
-			Success:      false,
+			Success:       false,
 			ReceivedCount: 0,
-			ErrorMessage: err.Error(),
+			ErrorMessage:  err.Error(),
 		}, nil
 	}
 
@@ -449,9 +461,9 @@ func (s *EdgeAPIServer) SendEvents(ctx context.Context, req *edge.SendEventsRequ
 		zap.Int("received", len(eventIDs)))
 
 	return &edge.SendEventsResponse{
-		Success:      true,
+		Success:       true,
 		ReceivedCount: int32(len(eventIDs)),
-		EventIds:     eventIDs,
+		EventIds:      eventIDs,
 	}, nil
 }
 
@@ -557,7 +569,7 @@ func (s *EdgeAPIServer) Heartbeat(ctx context.Context, req *edge.HeartbeatReques
 	s.mu.Unlock()
 
 	return &edge.HeartbeatResponse{
-		Success:        true,
+		Success:         true,
 		ServerTimestamp: time.Now().UnixNano(),
 	}, nil
 }
@@ -569,7 +581,7 @@ func (s *EdgeAPIServer) GetConfig(ctx context.Context, req *edge.GetConfigReques
 	// TODO: Implement configuration retrieval
 	// For now, return empty config
 	return &edge.GetConfigResponse{
-		Success:     true,
+		Success:    true,
 		ConfigJson: "{}",
 	}, nil
 }
@@ -598,6 +610,63 @@ func (s *EdgeAPIServer) RestartService(ctx context.Context, req *edge.RestartSer
 	return &edge.RestartServiceResponse{
 		Success: true,
 	}, nil
+}
+
+// SyncCapabilities stores camera/dataset readiness data from Edge
+func (s *EdgeAPIServer) SyncCapabilities(ctx context.Context, req *edge.SyncCapabilitiesRequest) (*edge.SyncCapabilitiesResponse, error) {
+	edgeID := ctx.Value("edge_id").(string)
+
+	if s.capStore == nil {
+		return &edge.SyncCapabilitiesResponse{
+			Success:      false,
+			ErrorMessage: "capability store not configured",
+		}, nil
+	}
+
+	syncedAt := time.Unix(0, req.SyncedAt)
+	if syncedAt.IsZero() {
+		syncedAt = time.Now()
+	}
+
+	// Persist camera capabilities and dataset status
+	if err := s.capStore.UpsertCapabilities(ctx, edgeID, req.Cameras, syncedAt); err != nil {
+		s.logger.Error("Failed to persist capability sync", zap.String("edge_id", edgeID), zap.Error(err))
+		return &edge.SyncCapabilitiesResponse{
+			Success:      false,
+			ErrorMessage: err.Error(),
+		}, nil
+	}
+
+	// Count cameras needing snapshots
+	camerasNeedingSnapshots := 0
+	for _, cam := range req.Cameras {
+		if cam.SnapshotRequired {
+			camerasNeedingSnapshots++
+		}
+	}
+
+	s.logger.Info("Capability sync received and persisted",
+		zap.String("edge_id", edgeID),
+		zap.Int("cameras", len(req.Cameras)),
+		zap.Int("cameras_needing_snapshots", camerasNeedingSnapshots),
+		zap.Time("synced_at", syncedAt),
+	)
+
+	// Publish event for capability sync completion
+	if s.eventBus != nil {
+		s.eventBus.Publish(service.Event{
+			Type:      "edge.capability_sync",
+			Timestamp: time.Now().Unix(),
+			Data: map[string]interface{}{
+				"edge_id":                    edgeID,
+				"camera_count":               len(req.Cameras),
+				"cameras_needing_snapshots":  camerasNeedingSnapshots,
+				"synced_at":                  syncedAt.Unix(),
+			},
+		})
+	}
+
+	return &edge.SyncCapabilitiesResponse{Success: true}, nil
 }
 
 // wrappedServerStream wraps grpc.ServerStream to override context

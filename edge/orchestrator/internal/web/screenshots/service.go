@@ -328,6 +328,38 @@ func (s *Service) DeleteScreenshot(ctx context.Context, id string) error {
 	return nil
 }
 
+// GetLabelCounts returns the number of labeled screenshots per label for a camera
+func (s *Service) GetLabelCounts(ctx context.Context, cameraID string) (map[Label]int, error) {
+	query := `
+		SELECT label, COUNT(*)
+		FROM labeled_screenshots
+		WHERE camera_id = ?
+		GROUP BY label
+	`
+
+	rows, err := s.db.GetDB().QueryContext(ctx, query, cameraID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query label counts: %w", err)
+	}
+	defer rows.Close()
+
+	counts := make(map[Label]int)
+	for rows.Next() {
+		var label string
+		var count int
+		if err := rows.Scan(&label, &count); err != nil {
+			return nil, fmt.Errorf("failed to scan label count: %w", err)
+		}
+		counts[Label(label)] = count
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to iterate label counts: %w", err)
+	}
+
+	return counts, nil
+}
+
 // GetScreenshotImage reads the image file for a screenshot
 func (s *Service) GetScreenshotImage(ctx context.Context, id string) ([]byte, error) {
 	screenshot, err := s.GetScreenshot(ctx, id)

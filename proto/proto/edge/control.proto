@@ -14,6 +14,9 @@ service ControlService {
   
   // RestartService restarts a specific service
   rpc RestartService(RestartServiceRequest) returns (RestartServiceResponse);
+
+  // SyncCapabilities allows an Edge to report camera and dataset readiness
+  rpc SyncCapabilities(SyncCapabilitiesRequest) returns (SyncCapabilitiesResponse);
 }
 
 // GetConfigRequest requests current configuration
@@ -46,6 +49,31 @@ message RestartServiceRequest {
 
 // RestartServiceResponse contains restart result
 message RestartServiceResponse {
+  bool success = 1;
+  string error_message = 2;
+}
+
+// SyncCapabilitiesRequest contains camera/dataset readiness information
+message SyncCapabilitiesRequest {
+  repeated CameraCapability cameras = 1;
+  int64 synced_at = 2; // Unix nano timestamp when snapshot was taken
+}
+
+// CameraCapability describes a single camera's dataset readiness state
+message CameraCapability {
+  string camera_id = 1;
+  string name = 2;
+  string type = 3;
+  bool enabled = 4;
+  string status = 5;
+  uint32 labeled_snapshot_count = 6;
+  uint32 required_snapshot_count = 7;
+  bool snapshot_required = 8;
+  map<string, uint32> label_counts = 9;
+}
+
+// SyncCapabilitiesResponse contains the result of syncing capabilities
+message SyncCapabilitiesResponse {
   bool success = 1;
   string error_message = 2;
 }

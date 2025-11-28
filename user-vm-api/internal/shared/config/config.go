@@ -26,6 +26,7 @@ type UserVMAPIConfig struct {
 	EventAnalyzer        EventAnalyzerConfig        `yaml:"event_analyzer"`
 	TelemetryAggregator  TelemetryAggregatorConfig  `yaml:"telemetry_aggregator"`
 	ManagementServer     ManagementServerConfig     `yaml:"management_server"`
+	APIGateway           APIGatewayConfig           `yaml:"api_gateway"`
 }
 
 // OrchestratorConfig contains orchestrator service configuration
@@ -100,6 +101,12 @@ type ManagementServerConfig struct {
 	CertPath   string `yaml:"cert_path"`
 	KeyPath    string `yaml:"key_path"`
 	CAPath     string `yaml:"ca_path"`
+}
+
+// APIGatewayConfig contains API Gateway configuration
+type APIGatewayConfig struct {
+	Enabled bool `yaml:"enabled"`
+	Port    int  `yaml:"port"`
 }
 
 // LogConfig contains logging configuration

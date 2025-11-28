@@ -12,8 +12,10 @@ import (
 
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/anomaly"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/camera"
+	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/capabilities"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/config"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/events"
+	grpcclient "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/grpc"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/health"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/logger"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/service"
@@ -153,6 +155,19 @@ func main() {
 		log.Info("WireGuard client registered")
 	}
 
+	// Initialize gRPC client (communicates with User VM over WireGuard)
+	var grpcClient *grpcclient.Client
+	log.Info("DEBUG: About to check WireGuard.Enabled", "enabled", cfg.Edge.WireGuard.Enabled)
+	if cfg.Edge.WireGuard.Enabled {
+		log.Info("DEBUG: WireGuard enabled, creating gRPC client")
+		grpcClient = grpcclient.NewClient(&cfg.Edge.WireGuard, wgClient, log)
+		log.Info("DEBUG: gRPC client created, registering")
+		svcMgr.Register(grpcClient)
+		log.Info("gRPC client registered")
+	} else {
+		log.Info("DEBUG: WireGuard disabled, skipping gRPC client")
+	}
+
 	// Initialize telemetry collector
 	telemetryCollector := telemetry.NewCollector(
 		&cfg.Edge.Telemetry,
@@ -248,6 +263,11 @@ func main() {
 		svcMgr.Register(webServer)
 		log.Info("Web server registered", "host", cfg.Edge.Web.Host, "port", cfg.Edge.Web.Port)
 	}
+
+	// Register capability sync service (reports camera dataset readiness to VM)
+	capabilitySync := capabilities.NewSyncService(cfg, cameraMgr, screenshotSvc, grpcClient, log)
+	svcMgr.Register(capabilitySync)
+	log.Info("Capability sync service registered")
 
 	// Create health check manager
 	healthMgr := health.NewManager(log, svcMgr)

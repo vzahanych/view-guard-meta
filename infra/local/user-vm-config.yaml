@@ -91,6 +91,11 @@ user_vm_api:
     endpoint: ""
     mtls: false
 
+  # API Gateway (exposes camera/dataset readiness endpoints)
+  api_gateway:
+    enabled: true
+    port: 8280
+
 log:
   level: "info"
   format: "text"

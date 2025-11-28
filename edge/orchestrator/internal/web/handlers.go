@@ -404,6 +404,28 @@ func (s *Server) cameraToJSON(cam *camera.Camera) gin.H {
 		lastSeen = cam.LastSeen.Format(time.RFC3339)
 	}
 
+	var datasetStatus interface{}
+	if cam.DatasetStatus != nil {
+		var lastSynced interface{}
+		if !cam.DatasetStatus.LastSynced.IsZero() {
+			lastSynced = cam.DatasetStatus.LastSynced.Format(time.RFC3339)
+		}
+
+		// Convert label counts map to JSON-compatible format
+		labelCountsMap := make(map[string]int)
+		for label, count := range cam.DatasetStatus.LabelCounts {
+			labelCountsMap[label] = count
+		}
+
+		datasetStatus = gin.H{
+			"label_counts":            labelCountsMap,
+			"labeled_snapshot_count":  cam.DatasetStatus.LabeledSnapshotCount,
+			"required_snapshot_count": cam.DatasetStatus.RequiredSnapshotCount,
+			"snapshot_required":       cam.DatasetStatus.SnapshotRequired,
+			"last_synced":             lastSynced,
+		}
+	}
+
 	return gin.H{
 		"id":             cam.ID,
 		"name":           cam.Name,
@@ -430,6 +452,7 @@ func (s *Server) cameraToJSON(cam *camera.Camera) gin.H {
 			"has_snapshot":      cam.Capabilities.HasSnapshot,
 			"has_video_streams": cam.Capabilities.HasVideoStreams,
 		},
+		"dataset_status": datasetStatus,
 	}
 }
 
@@ -1824,4 +1847,36 @@ func decodeBase64Image(base64Str string) ([]byte, error) {
 	}
 
 	return decoded, nil
+}
+
+// handleReminderTelemetry handles telemetry for reminder acknowledgments and completions
+func (s *Server) handleReminderTelemetry(c *gin.Context) {
+	var req struct {
+		CameraID  string `json:"camera_id" binding:"required"`
+		Action    string `json:"action" binding:"required,oneof=acknowledged completed"`
+		Timestamp string `json:"timestamp"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Invalid request: " + err.Error(),
+		})
+		return
+	}
+
+	// Log reminder interaction for ops visibility
+	s.logger.Info("Reminder telemetry received",
+		"camera_id", req.CameraID,
+		"action", req.Action,
+		"timestamp", req.Timestamp,
+	)
+
+	// TODO: Forward to telemetry collector for transmission to VM
+	// For now, we just log it locally
+	// In the future, this could be sent via telemetry collector to VM
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "Reminder telemetry recorded",
+	})
 }

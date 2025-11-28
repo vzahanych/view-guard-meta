@@ -315,6 +315,221 @@ func (x *RestartServiceResponse) GetErrorMessage() string {
 	return ""
 }
 
+// SyncCapabilitiesRequest contains camera/dataset readiness information
+type SyncCapabilitiesRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Cameras       []*CameraCapability    `protobuf:"bytes,1,rep,name=cameras,proto3" json:"cameras,omitempty"`
+	SyncedAt      int64                  `protobuf:"varint,2,opt,name=synced_at,json=syncedAt,proto3" json:"synced_at,omitempty"` // Unix nano timestamp when snapshot was taken
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SyncCapabilitiesRequest) Reset() {
+	*x = SyncCapabilitiesRequest{}
+	mi := &file_edge_control_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SyncCapabilitiesRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SyncCapabilitiesRequest) ProtoMessage() {}
+
+func (x *SyncCapabilitiesRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_edge_control_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SyncCapabilitiesRequest.ProtoReflect.Descriptor instead.
+func (*SyncCapabilitiesRequest) Descriptor() ([]byte, []int) {
+	return file_edge_control_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *SyncCapabilitiesRequest) GetCameras() []*CameraCapability {
+	if x != nil {
+		return x.Cameras
+	}
+	return nil
+}
+
+func (x *SyncCapabilitiesRequest) GetSyncedAt() int64 {
+	if x != nil {
+		return x.SyncedAt
+	}
+	return 0
+}
+
+// CameraCapability describes a single camera's dataset readiness state
+type CameraCapability struct {
+	state                 protoimpl.MessageState `protogen:"open.v1"`
+	CameraId              string                 `protobuf:"bytes,1,opt,name=camera_id,json=cameraId,proto3" json:"camera_id,omitempty"`
+	Name                  string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	Type                  string                 `protobuf:"bytes,3,opt,name=type,proto3" json:"type,omitempty"`
+	Enabled               bool                   `protobuf:"varint,4,opt,name=enabled,proto3" json:"enabled,omitempty"`
+	Status                string                 `protobuf:"bytes,5,opt,name=status,proto3" json:"status,omitempty"`
+	LabeledSnapshotCount  uint32                 `protobuf:"varint,6,opt,name=labeled_snapshot_count,json=labeledSnapshotCount,proto3" json:"labeled_snapshot_count,omitempty"`
+	RequiredSnapshotCount uint32                 `protobuf:"varint,7,opt,name=required_snapshot_count,json=requiredSnapshotCount,proto3" json:"required_snapshot_count,omitempty"`
+	SnapshotRequired      bool                   `protobuf:"varint,8,opt,name=snapshot_required,json=snapshotRequired,proto3" json:"snapshot_required,omitempty"`
+	LabelCounts           map[string]uint32      `protobuf:"bytes,9,rep,name=label_counts,json=labelCounts,proto3" json:"label_counts,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"varint,2,opt,name=value"`
+	unknownFields         protoimpl.UnknownFields
+	sizeCache             protoimpl.SizeCache
+}
+
+func (x *CameraCapability) Reset() {
+	*x = CameraCapability{}
+	mi := &file_edge_control_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CameraCapability) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CameraCapability) ProtoMessage() {}
+
+func (x *CameraCapability) ProtoReflect() protoreflect.Message {
+	mi := &file_edge_control_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CameraCapability.ProtoReflect.Descriptor instead.
+func (*CameraCapability) Descriptor() ([]byte, []int) {
+	return file_edge_control_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *CameraCapability) GetCameraId() string {
+	if x != nil {
+		return x.CameraId
+	}
+	return ""
+}
+
+func (x *CameraCapability) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *CameraCapability) GetType() string {
+	if x != nil {
+		return x.Type
+	}
+	return ""
+}
+
+func (x *CameraCapability) GetEnabled() bool {
+	if x != nil {
+		return x.Enabled
+	}
+	return false
+}
+
+func (x *CameraCapability) GetStatus() string {
+	if x != nil {
+		return x.Status
+	}
+	return ""
+}
+
+func (x *CameraCapability) GetLabeledSnapshotCount() uint32 {
+	if x != nil {
+		return x.LabeledSnapshotCount
+	}
+	return 0
+}
+
+func (x *CameraCapability) GetRequiredSnapshotCount() uint32 {
+	if x != nil {
+		return x.RequiredSnapshotCount
+	}
+	return 0
+}
+
+func (x *CameraCapability) GetSnapshotRequired() bool {
+	if x != nil {
+		return x.SnapshotRequired
+	}
+	return false
+}
+
+func (x *CameraCapability) GetLabelCounts() map[string]uint32 {
+	if x != nil {
+		return x.LabelCounts
+	}
+	return nil
+}
+
+// SyncCapabilitiesResponse contains the result of syncing capabilities
+type SyncCapabilitiesResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Success       bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
+	ErrorMessage  string                 `protobuf:"bytes,2,opt,name=error_message,json=errorMessage,proto3" json:"error_message,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SyncCapabilitiesResponse) Reset() {
+	*x = SyncCapabilitiesResponse{}
+	mi := &file_edge_control_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SyncCapabilitiesResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SyncCapabilitiesResponse) ProtoMessage() {}
+
+func (x *SyncCapabilitiesResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_edge_control_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SyncCapabilitiesResponse.ProtoReflect.Descriptor instead.
+func (*SyncCapabilitiesResponse) Descriptor() ([]byte, []int) {
+	return file_edge_control_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *SyncCapabilitiesResponse) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
+func (x *SyncCapabilitiesResponse) GetErrorMessage() string {
+	if x != nil {
+		return x.ErrorMessage
+	}
+	return ""
+}
+
 var File_edge_control_proto protoreflect.FileDescriptor
 
 const file_edge_control_proto_rawDesc = "" +
@@ -336,11 +551,31 @@ const file_edge_control_proto_rawDesc = "" +
 	"\fservice_name\x18\x01 \x01(\tR\vserviceName\"W\n" +
 	"\x16RestartServiceResponse\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12#\n" +
-	"\rerror_message\x18\x02 \x01(\tR\ferrorMessage2\x92\x02\n" +
+	"\rerror_message\x18\x02 \x01(\tR\ferrorMessage\"p\n" +
+	"\x17SyncCapabilitiesRequest\x128\n" +
+	"\acameras\x18\x01 \x03(\v2\x1e.edge.control.CameraCapabilityR\acameras\x12\x1b\n" +
+	"\tsynced_at\x18\x02 \x01(\x03R\bsyncedAt\"\xb8\x03\n" +
+	"\x10CameraCapability\x12\x1b\n" +
+	"\tcamera_id\x18\x01 \x01(\tR\bcameraId\x12\x12\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\x12\x12\n" +
+	"\x04type\x18\x03 \x01(\tR\x04type\x12\x18\n" +
+	"\aenabled\x18\x04 \x01(\bR\aenabled\x12\x16\n" +
+	"\x06status\x18\x05 \x01(\tR\x06status\x124\n" +
+	"\x16labeled_snapshot_count\x18\x06 \x01(\rR\x14labeledSnapshotCount\x126\n" +
+	"\x17required_snapshot_count\x18\a \x01(\rR\x15requiredSnapshotCount\x12+\n" +
+	"\x11snapshot_required\x18\b \x01(\bR\x10snapshotRequired\x12R\n" +
+	"\flabel_counts\x18\t \x03(\v2/.edge.control.CameraCapability.LabelCountsEntryR\vlabelCounts\x1a>\n" +
+	"\x10LabelCountsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\rR\x05value:\x028\x01\"Y\n" +
+	"\x18SyncCapabilitiesResponse\x12\x18\n" +
+	"\asuccess\x18\x01 \x01(\bR\asuccess\x12#\n" +
+	"\rerror_message\x18\x02 \x01(\tR\ferrorMessage2\xf5\x02\n" +
 	"\x0eControlService\x12L\n" +
 	"\tGetConfig\x12\x1e.edge.control.GetConfigRequest\x1a\x1f.edge.control.GetConfigResponse\x12U\n" +
 	"\fUpdateConfig\x12!.edge.control.UpdateConfigRequest\x1a\".edge.control.UpdateConfigResponse\x12[\n" +
-	"\x0eRestartService\x12#.edge.control.RestartServiceRequest\x1a$.edge.control.RestartServiceResponseB>Z<github.com/vzahanych/view-guard-meta/proto/go/generated/edgeb\x06proto3"
+	"\x0eRestartService\x12#.edge.control.RestartServiceRequest\x1a$.edge.control.RestartServiceResponse\x12a\n" +
+	"\x10SyncCapabilities\x12%.edge.control.SyncCapabilitiesRequest\x1a&.edge.control.SyncCapabilitiesResponseB>Z<github.com/vzahanych/view-guard-meta/proto/go/generated/edgeb\x06proto3"
 
 var (
 	file_edge_control_proto_rawDescOnce sync.Once
@@ -354,27 +589,35 @@ func file_edge_control_proto_rawDescGZIP() []byte {
 	return file_edge_control_proto_rawDescData
 }
 
-var file_edge_control_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
+var file_edge_control_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
 var file_edge_control_proto_goTypes = []any{
-	(*GetConfigRequest)(nil),       // 0: edge.control.GetConfigRequest
-	(*GetConfigResponse)(nil),      // 1: edge.control.GetConfigResponse
-	(*UpdateConfigRequest)(nil),    // 2: edge.control.UpdateConfigRequest
-	(*UpdateConfigResponse)(nil),   // 3: edge.control.UpdateConfigResponse
-	(*RestartServiceRequest)(nil),  // 4: edge.control.RestartServiceRequest
-	(*RestartServiceResponse)(nil), // 5: edge.control.RestartServiceResponse
+	(*GetConfigRequest)(nil),         // 0: edge.control.GetConfigRequest
+	(*GetConfigResponse)(nil),        // 1: edge.control.GetConfigResponse
+	(*UpdateConfigRequest)(nil),      // 2: edge.control.UpdateConfigRequest
+	(*UpdateConfigResponse)(nil),     // 3: edge.control.UpdateConfigResponse
+	(*RestartServiceRequest)(nil),    // 4: edge.control.RestartServiceRequest
+	(*RestartServiceResponse)(nil),   // 5: edge.control.RestartServiceResponse
+	(*SyncCapabilitiesRequest)(nil),  // 6: edge.control.SyncCapabilitiesRequest
+	(*CameraCapability)(nil),         // 7: edge.control.CameraCapability
+	(*SyncCapabilitiesResponse)(nil), // 8: edge.control.SyncCapabilitiesResponse
+	nil,                              // 9: edge.control.CameraCapability.LabelCountsEntry
 }
 var file_edge_control_proto_depIdxs = []int32{
-	0, // 0: edge.control.ControlService.GetConfig:input_type -> edge.control.GetConfigRequest
-	2, // 1: edge.control.ControlService.UpdateConfig:input_type -> edge.control.UpdateConfigRequest
-	4, // 2: edge.control.ControlService.RestartService:input_type -> edge.control.RestartServiceRequest
-	1, // 3: edge.control.ControlService.GetConfig:output_type -> edge.control.GetConfigResponse
-	3, // 4: edge.control.ControlService.UpdateConfig:output_type -> edge.control.UpdateConfigResponse
-	5, // 5: edge.control.ControlService.RestartService:output_type -> edge.control.RestartServiceResponse
-	3, // [3:6] is the sub-list for method output_type
-	0, // [0:3] is the sub-list for method input_type
-	0, // [0:0] is the sub-list for extension type_name
-	0, // [0:0] is the sub-list for extension extendee
-	0, // [0:0] is the sub-list for field type_name
+	7, // 0: edge.control.SyncCapabilitiesRequest.cameras:type_name -> edge.control.CameraCapability
+	9, // 1: edge.control.CameraCapability.label_counts:type_name -> edge.control.CameraCapability.LabelCountsEntry
+	0, // 2: edge.control.ControlService.GetConfig:input_type -> edge.control.GetConfigRequest
+	2, // 3: edge.control.ControlService.UpdateConfig:input_type -> edge.control.UpdateConfigRequest
+	4, // 4: edge.control.ControlService.RestartService:input_type -> edge.control.RestartServiceRequest
+	6, // 5: edge.control.ControlService.SyncCapabilities:input_type -> edge.control.SyncCapabilitiesRequest
+	1, // 6: edge.control.ControlService.GetConfig:output_type -> edge.control.GetConfigResponse
+	3, // 7: edge.control.ControlService.UpdateConfig:output_type -> edge.control.UpdateConfigResponse
+	5, // 8: edge.control.ControlService.RestartService:output_type -> edge.control.RestartServiceResponse
+	8, // 9: edge.control.ControlService.SyncCapabilities:output_type -> edge.control.SyncCapabilitiesResponse
+	6, // [6:10] is the sub-list for method output_type
+	2, // [2:6] is the sub-list for method input_type
+	2, // [2:2] is the sub-list for extension type_name
+	2, // [2:2] is the sub-list for extension extendee
+	0, // [0:2] is the sub-list for field type_name
 }
 
 func init() { file_edge_control_proto_init() }
@@ -388,7 +631,7 @@ func file_edge_control_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_edge_control_proto_rawDesc), len(file_edge_control_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   6,
+			NumMessages:   10,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

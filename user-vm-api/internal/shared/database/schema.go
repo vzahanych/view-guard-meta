@@ -114,6 +114,29 @@ const (
 	CREATE INDEX IF NOT EXISTS idx_telemetry_buffer_timestamp ON telemetry_buffer(timestamp);
 	CREATE INDEX IF NOT EXISTS idx_telemetry_buffer_forwarded ON telemetry_buffer(forwarded);
 	`
+
+	// EdgeCameraStatusTable stores per-camera readiness data reported by Edge
+	CreateEdgeCameraStatusTable = `
+	CREATE TABLE IF NOT EXISTS edge_camera_status (
+		edge_id TEXT NOT NULL,
+		camera_id TEXT NOT NULL,
+		camera_name TEXT,
+		camera_type TEXT,
+		camera_status TEXT,
+		enabled INTEGER NOT NULL DEFAULT 1,
+		label_counts TEXT,
+		labeled_snapshot_count INTEGER NOT NULL DEFAULT 0,
+		required_snapshot_count INTEGER NOT NULL DEFAULT 0,
+		snapshot_required INTEGER NOT NULL DEFAULT 0,
+		training_eligibility_status TEXT NOT NULL DEFAULT 'needs_snapshots', -- needs_snapshots, ready_for_training, training_in_progress
+		synced_at INTEGER NOT NULL,
+		updated_at INTEGER NOT NULL,
+		PRIMARY KEY (edge_id, camera_id),
+		FOREIGN KEY (edge_id) REFERENCES edges(edge_id)
+	);
+	CREATE INDEX IF NOT EXISTS idx_edge_camera_status_edge_id ON edge_camera_status(edge_id);
+	CREATE INDEX IF NOT EXISTS idx_edge_camera_status_training_eligibility ON edge_camera_status(training_eligibility_status);
+	`
 )
 
 // AllTables returns all table creation statements in order
@@ -125,6 +148,7 @@ func AllTables() []string {
 		CreateAIModelsTable,
 		CreateCIDStorageTable,
 		CreateTelemetryBufferTable,
+		CreateEdgeCameraStatusTable,
 	}
 }
 
