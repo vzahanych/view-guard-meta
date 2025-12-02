@@ -477,8 +477,46 @@ func (m *Manager) UpdateDatasetStatus(cameraID string, status *CameraDatasetStat
 	defer m.mu.Unlock()
 
 	if cam, ok := m.cameras[cameraID]; ok {
+		oldStatus := cam.DatasetStatus
 		cam.DatasetStatus = status
+
+		// Audit trail logging for dataset status changes (Substep 2.2.2.7.2)
+		if oldStatus != nil {
+			// Log significant changes
+			snapshotRequiredChanged := oldStatus.SnapshotRequired != status.SnapshotRequired
+			labeledCountChanged := oldStatus.LabeledSnapshotCount != status.LabeledSnapshotCount
+			labelCountsChanged := false
+			if !mapsEqual(oldStatus.LabelCounts, status.LabelCounts) {
+				labelCountsChanged = true
+			}
+
+			if snapshotRequiredChanged || labeledCountChanged || labelCountsChanged {
+				m.LogInfo("Dataset status updated", "operation", "dataset_status_update", "camera_id", cameraID,
+					"old_snapshot_required", oldStatus.SnapshotRequired, "new_snapshot_required", status.SnapshotRequired,
+					"old_labeled_count", oldStatus.LabeledSnapshotCount, "new_labeled_count", status.LabeledSnapshotCount,
+					"old_label_counts", oldStatus.LabelCounts, "new_label_counts", status.LabelCounts,
+					"required_count", status.RequiredSnapshotCount)
+			}
+		} else {
+			// First time setting dataset status
+			m.LogInfo("Dataset status initialized", "operation", "dataset_status_init", "camera_id", cameraID,
+				"snapshot_required", status.SnapshotRequired, "labeled_count", status.LabeledSnapshotCount,
+				"label_counts", status.LabelCounts, "required_count", status.RequiredSnapshotCount)
+		}
 	}
+}
+
+// mapsEqual compares two maps for equality
+func mapsEqual(a, b map[string]int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if b[k] != v {
+			return false
+		}
+	}
+	return true
 }
 
 // DeleteCamera deletes a camera

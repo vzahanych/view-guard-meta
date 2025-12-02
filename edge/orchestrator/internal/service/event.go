@@ -36,6 +36,11 @@ const (
 	// Network events
 	EventTypeWireGuardConnected    EventType = "network.wireguard.connected"
 	EventTypeWireGuardDisconnected EventType = "network.wireguard.disconnected"
+
+	// Screenshot events
+	EventTypeScreenshotSaved   EventType = "screenshot.saved"
+	EventTypeScreenshotUpdated  EventType = "screenshot.updated"
+	EventTypeScreenshotDeleted  EventType = "screenshot.deleted"
 )
 
 // Event represents an event in the system

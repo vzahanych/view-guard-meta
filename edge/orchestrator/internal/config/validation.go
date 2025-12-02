@@ -37,6 +37,17 @@ func (c *Config) Validate() error {
 		errors = append(errors, fmt.Sprintf("retention_days must be >= 0, got: %d", c.Edge.Storage.RetentionDays))
 	}
 
+	// Validate screenshot storage settings (Substep 2.2.2.7.1)
+	if c.Edge.Storage.ScreenshotRetentionDays < 0 {
+		errors = append(errors, fmt.Sprintf("screenshot_retention_days must be >= 0, got: %d", c.Edge.Storage.ScreenshotRetentionDays))
+	}
+	if c.Edge.Storage.ScreenshotMaxSizeMB < 0 {
+		errors = append(errors, fmt.Sprintf("screenshot_max_size_mb must be >= 0, got: %d", c.Edge.Storage.ScreenshotMaxSizeMB))
+	}
+	if c.Edge.Storage.ScreenshotMaxTotalSizeGB < 0 {
+		errors = append(errors, fmt.Sprintf("screenshot_max_total_size_gb must be >= 0, got: %d", c.Edge.Storage.ScreenshotMaxTotalSizeGB))
+	}
+
 	// Validate AI settings
 	if c.Edge.AI.ConfidenceThreshold < 0 || c.Edge.AI.ConfidenceThreshold > 1 {
 		errors = append(errors, fmt.Sprintf("confidence_threshold must be between 0 and 1, got: %.2f", c.Edge.AI.ConfidenceThreshold))
@@ -114,6 +125,14 @@ func (c *Config) Validate() error {
 	// Validate AI inference interval
 	if c.Edge.AI.InferenceInterval <= 0 {
 		errors = append(errors, fmt.Sprintf("ai.inference_interval must be > 0, got: %v", c.Edge.AI.InferenceInterval))
+	}
+
+	// Validate MinNormalSnapshots (Substep 2.2.2.7.1)
+	// Note: This validation is called after setDefaults() in Load() and Service
+	// If MinNormalSnapshots is <= 0 after defaults, it means an invalid value was explicitly set
+	// (0 gets defaulted to 50 in setDefaults, so 0 after defaults means it was set to 0 explicitly, which is invalid)
+	if c.Edge.AI.MinNormalSnapshots <= 0 {
+		errors = append(errors, fmt.Sprintf("ai.min_normal_snapshots must be > 0, got: %d (default: 50 if not set)", c.Edge.AI.MinNormalSnapshots))
 	}
 
 	// Validate events transmission interval

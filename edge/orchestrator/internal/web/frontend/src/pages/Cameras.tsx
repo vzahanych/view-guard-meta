@@ -137,13 +137,16 @@ export default function Cameras() {
                   )}
                 </div>
                 {/* Dataset Progress Display */}
-                {selectedCamera.dataset_status && (
-                  <div className="pt-4 border-t border-gray-200">
-                    <h3 className="text-sm font-semibold text-gray-900 mb-3">Dataset Progress</h3>
-                    {(() => {
+                <div className="pt-4 border-t border-gray-200">
+                  <h3 className="text-sm font-semibold text-gray-900 mb-3">Dataset Progress</h3>
+                  {selectedCamera.dataset_status ? (
+                    (() => {
                       const status = selectedCamera.dataset_status!
-                      const progress = (status.labeled_snapshot_count / status.required_snapshot_count) * 100
-                      const remaining = status.required_snapshot_count - status.labeled_snapshot_count
+                      // Fix progress calculation - handle division by zero (Substep 2.2.2.3.1)
+                      const progress = status.required_snapshot_count > 0
+                        ? Math.min(100, Math.max(0, (status.labeled_snapshot_count / status.required_snapshot_count) * 100))
+                        : 0
+                      const remaining = Math.max(0, status.required_snapshot_count - status.labeled_snapshot_count)
                       const isComplete = !status.snapshot_required
 
                       return (
@@ -157,7 +160,7 @@ export default function Cameras() {
                             </div>
                             <div className="w-full bg-gray-200 rounded-full h-3">
                               <div
-                                className={`h-3 rounded-full transition-all ${
+                                className={`h-3 rounded-full transition-all duration-500 ease-out ${
                                   isComplete ? 'bg-green-500' : 'bg-blue-500'
                                 }`}
                                 style={{ width: `${Math.min(progress, 100)}%` }}
@@ -174,7 +177,51 @@ export default function Cameras() {
                               </p>
                             )}
                           </div>
-                          <div className="grid grid-cols-2 gap-4 text-xs">
+                          {/* Snapshot count by label display (Substep 2.2.2.3.2) */}
+                          {status.label_counts && Object.keys(status.label_counts).length > 0 && (
+                            <div className="mt-3 pt-3 border-t border-gray-200">
+                              <div className="text-xs font-medium text-gray-700 mb-2">Snapshot Counts by Label:</div>
+                              <div className="flex flex-wrap gap-2">
+                                {Object.entries(status.label_counts).map(([label, count]) => {
+                                  const getLabelColor = (l: string) => {
+                                    switch (l.toLowerCase()) {
+                                      case 'normal':
+                                        return 'bg-green-100 text-green-800 border-green-200'
+                                      case 'threat':
+                                        return 'bg-red-100 text-red-800 border-red-200'
+                                      case 'abnormal':
+                                        return 'bg-yellow-100 text-yellow-800 border-yellow-200'
+                                      default:
+                                        return 'bg-gray-100 text-gray-800 border-gray-200'
+                                    }
+                                  }
+                                  const getLabelIcon = (l: string) => {
+                                    switch (l.toLowerCase()) {
+                                      case 'normal':
+                                        return '✓'
+                                      case 'threat':
+                                        return '⚠'
+                                      case 'abnormal':
+                                        return '!'
+                                      default:
+                                        return '•'
+                                    }
+                                  }
+                                  return (
+                                    <div
+                                      key={label}
+                                      className={`px-2 py-1 rounded-md border text-xs font-medium ${getLabelColor(label)}`}
+                                    >
+                                      <span className="mr-1">{getLabelIcon(label)}</span>
+                                      {label}: {count}
+                                    </div>
+                                  )
+                                })}
+                              </div>
+                            </div>
+                          )}
+
+                          <div className="grid grid-cols-2 gap-4 text-xs mt-3">
                             <div>
                               <span className="text-gray-600">Label Coverage:</span>
                               <span className="ml-2 font-medium text-gray-900">
@@ -209,15 +256,32 @@ export default function Cameras() {
                           )}
                         </div>
                       )
-                    })()}
-                  </div>
-                )}
+                    })()
+                  ) : (
+                    <div className="text-sm text-gray-500 italic">
+                      Calculating dataset status...
+                    </div>
+                  )}
+                </div>
               </div>
             )}
           </Card>
 
           {selectedCameraId ? (
             <CameraViewer
+              onScreenshotSaved={() => {
+                // Refresh cameras to get updated dataset status (Substep 2.2.2.2.4)
+                const fetchCameras = async () => {
+                  try {
+                    const response = await api.get<{ cameras: Camera[]; count: number }>('/cameras')
+                    const enabledCameras = response.cameras.filter((cam) => cam.enabled)
+                    setCameras(enabledCameras)
+                  } catch (err) {
+                    console.error('Failed to refresh cameras:', err)
+                  }
+                }
+                fetchCameras()
+              }}
               cameraId={selectedCameraId}
               cameraName={selectedCamera?.name}
               className="w-full"
@@ -240,7 +304,10 @@ export default function Cameras() {
                   .filter((cam) => cam.dataset_status)
                   .map((cam) => {
                     const status = cam.dataset_status!
-                    const progress = (status.labeled_snapshot_count / status.required_snapshot_count) * 100
+                    // Fix progress calculation - handle division by zero (Substep 2.2.2.3.1)
+                    const progress = status.required_snapshot_count > 0
+                      ? Math.min(100, Math.max(0, (status.labeled_snapshot_count / status.required_snapshot_count) * 100))
+                      : 0
                     const isComplete = !status.snapshot_required
 
                     return (
@@ -262,7 +329,7 @@ export default function Cameras() {
                         </div>
                         <div className="w-full bg-gray-200 rounded-full h-2 mb-1">
                           <div
-                            className={`h-2 rounded-full transition-all ${
+                            className={`h-2 rounded-full transition-all duration-500 ease-out ${
                               isComplete ? 'bg-green-500' : 'bg-yellow-500'
                             }`}
                             style={{ width: `${Math.min(progress, 100)}%` }}

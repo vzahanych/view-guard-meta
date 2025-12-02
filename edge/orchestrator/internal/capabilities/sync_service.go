@@ -76,6 +76,16 @@ func (s *SyncService) Start(ctx context.Context) error {
 			}
 		}()
 		s.LogInfo("Subscribed to WireGuard connection events for immediate capability sync")
+
+		// Subscribe to screenshot events for immediate dataset status refresh (Step 2.2.2.1.2)
+		screenshotCh := s.GetEventBus().Subscribe(service.EventTypeScreenshotSaved)
+		go s.handleScreenshotSaved(runCtx, screenshotCh)
+
+		updateCh := s.GetEventBus().Subscribe(service.EventTypeScreenshotUpdated)
+		go s.handleScreenshotSaved(runCtx, updateCh) // Reuse same handler
+
+		deleteCh := s.GetEventBus().Subscribe(service.EventTypeScreenshotDeleted)
+		go s.handleScreenshotSaved(runCtx, deleteCh) // Reuse same handler
 	}
 
 	go s.syncLoop(runCtx)
@@ -121,6 +131,44 @@ func (s *SyncService) handleWireGuardConnected(event service.Event) {
 		// Sync triggered successfully
 	default:
 		// Channel is full, sync already queued
+	}
+}
+
+// handleScreenshotSaved handles screenshot saved/updated/deleted events and triggers immediate dataset status refresh
+func (s *SyncService) handleScreenshotSaved(ctx context.Context, ch <-chan service.Event) {
+	for {
+		select {
+		case event, ok := <-ch:
+			if !ok {
+				return
+			}
+			// Extract camera_id from event data
+			cameraID, ok := event.Data["camera_id"].(string)
+			if !ok || cameraID == "" {
+				continue
+			}
+
+			// Get camera and refresh its dataset status immediately
+			if s.cameraMgr != nil {
+				cam, err := s.cameraMgr.GetCamera(cameraID)
+				if err == nil && cam != nil {
+					// Recalculate dataset status for this camera
+					status := s.buildDatasetStatus(ctx, cam)
+					s.cameraMgr.UpdateDatasetStatus(cameraID, status)
+					s.LogDebug("Refreshed dataset status after screenshot event", "camera_id", cameraID, "event_type", event.Type)
+				}
+			}
+
+			// Trigger capability sync to VM (if connected)
+			select {
+			case s.syncTrigger <- struct{}{}:
+				// Sync triggered successfully
+			default:
+				// Channel is full, sync already queued
+			}
+		case <-ctx.Done():
+			return
+		}
 	}
 }
 
@@ -175,33 +223,35 @@ func (s *SyncService) syncOnce(ctx context.Context) {
 }
 
 func (s *SyncService) buildDatasetStatus(ctx context.Context, cam *camera.Camera) *camera.CameraDatasetStatus {
-	stats := &camera.CameraDatasetStatus{
-		LabelCounts:           make(map[string]int),
-		RequiredSnapshotCount: s.minSnapshots,
-		LastSynced:            time.Now(),
-	}
-
+	// Use the shared helper method from ScreenshotService
 	if s.screenshotSvc == nil {
-		stats.SnapshotRequired = true
-		return stats
-	}
-
-	counts, err := s.screenshotSvc.GetLabelCounts(ctx, cam.ID)
-	if err != nil {
-		s.LogInfo("Failed to get label counts", "camera_id", cam.ID, "error", err)
-		stats.SnapshotRequired = true
-		return stats
-	}
-
-	for label, count := range counts {
-		stats.LabelCounts[string(label)] = count
-		if label == screenshots.LabelNormal {
-			stats.LabeledSnapshotCount = count
+		return &camera.CameraDatasetStatus{
+			LabelCounts:           make(map[string]int),
+			RequiredSnapshotCount: s.minSnapshots,
+			SnapshotRequired:      true,
+			LastSynced:            time.Now(),
 		}
 	}
 
-	stats.SnapshotRequired = stats.LabeledSnapshotCount < s.minSnapshots
-	return stats
+	datasetStatus, err := s.screenshotSvc.GetDatasetStatus(ctx, cam.ID, s.minSnapshots)
+	if err != nil {
+		s.LogInfo("Failed to get dataset status", "camera_id", cam.ID, "error", err)
+		return &camera.CameraDatasetStatus{
+			LabelCounts:           make(map[string]int),
+			RequiredSnapshotCount: s.minSnapshots,
+			SnapshotRequired:      true,
+			LastSynced:            time.Now(),
+		}
+	}
+
+	// Convert DatasetStatus to CameraDatasetStatus
+	return &camera.CameraDatasetStatus{
+		LabelCounts:           datasetStatus.LabelCounts,
+		LabeledSnapshotCount:  datasetStatus.LabeledSnapshotCount,
+		RequiredSnapshotCount: datasetStatus.RequiredSnapshotCount,
+		SnapshotRequired:      datasetStatus.SnapshotRequired,
+		LastSynced:            datasetStatus.LastSynced,
+	}
 }
 
 func (s *SyncService) toProto(cam *camera.Camera, status *camera.CameraDatasetStatus) *edgeproto.CameraCapability {

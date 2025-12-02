@@ -23,6 +23,10 @@ edge:
     snapshots_dir: /var/lib/view-guard-edge/snapshots
     retention_days: 7
     max_disk_usage_percent: 80
+    # Screenshot storage configuration (Substep 2.2.2.7.1)
+    screenshot_retention_days: 0      # Retention for labeled screenshots in days (0 = no automatic deletion)
+    screenshot_max_size_mb: 0          # Maximum size per screenshot in MB (0 = no limit, default: no limit)
+    screenshot_max_total_size_gb: 0   # Maximum total size for all screenshots in GB (0 = no limit, default: no limit)
 
   ai:
     service_url: "http://localhost:8080"
@@ -34,6 +38,7 @@ edge:
     clip_duration: 10s
     pre_event_duration: 2s
     dataset_export_dir: ./data/exports
+    min_normal_snapshots: 50          # Minimum number of "normal" labeled snapshots required per camera for training (default: 50)
 
   events:
     queue_size: 1000

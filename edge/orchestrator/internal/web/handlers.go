@@ -1,8 +1,12 @@
 package web
 
 import (
+	"bytes"
 	"encoding/base64"
 	"fmt"
+	"image"
+	_ "image/jpeg" // Register JPEG decoder
+	_ "image/png"  // Register PNG decoder
 	"io"
 	"net/http"
 	"os"
@@ -404,6 +408,7 @@ func (s *Server) cameraToJSON(cam *camera.Camera) gin.H {
 		lastSeen = cam.LastSeen.Format(time.RFC3339)
 	}
 
+	// Always include dataset_status, even if null (Substep 2.2.2.3.1)
 	var datasetStatus interface{}
 	if cam.DatasetStatus != nil {
 		var lastSynced interface{}
@@ -424,6 +429,9 @@ func (s *Server) cameraToJSON(cam *camera.Camera) gin.H {
 			"snapshot_required":       cam.DatasetStatus.SnapshotRequired,
 			"last_synced":             lastSynced,
 		}
+	} else {
+		// Return null explicitly to indicate dataset status is not available yet
+		datasetStatus = nil
 	}
 
 	return gin.H{
@@ -1594,6 +1602,15 @@ func (s *Server) handleListScreenshots(c *gin.Context) {
 	if customLabel := c.Query("custom_label"); customLabel != "" {
 		filters.CustomLabel = customLabel
 	}
+	if description := c.Query("description"); description != "" {
+		filters.Description = description
+	}
+	if sortBy := c.Query("sort_by"); sortBy != "" {
+		filters.SortBy = sortBy
+	}
+	if sortOrder := c.Query("sort_order"); sortOrder != "" {
+		filters.SortOrder = sortOrder
+	}
 	if limitStr := c.Query("limit"); limitStr != "" {
 		if limit, err := strconv.Atoi(limitStr); err == nil && limit > 0 {
 			filters.Limit = limit
@@ -1661,6 +1678,27 @@ func (s *Server) handleGetScreenshotImage(c *gin.Context) {
 	c.Data(http.StatusOK, "image/jpeg", imageData)
 }
 
+// handleGetScreenshotThumbnail handles getting the thumbnail image for a screenshot
+func (s *Server) handleGetScreenshotThumbnail(c *gin.Context) {
+	if s.screenshotSvc == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error": "Screenshot service not available",
+		})
+		return
+	}
+
+	id := c.Param("id")
+	thumbnailData, err := s.screenshotSvc.GetScreenshotThumbnail(c.Request.Context(), id)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"error": fmt.Sprintf("Screenshot thumbnail not found: %v", err),
+		})
+		return
+	}
+
+	c.Data(http.StatusOK, "image/jpeg", thumbnailData)
+}
+
 // handleSaveScreenshot handles saving a labeled screenshot
 func (s *Server) handleSaveScreenshot(c *gin.Context) {
 	if s.screenshotSvc == nil {
@@ -1681,15 +1719,17 @@ func (s *Server) handleSaveScreenshot(c *gin.Context) {
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
+		s.logger.Error("Invalid screenshot save request", "error", err, "camera_id", req.CameraID, "operation", "create")
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": fmt.Sprintf("Invalid request: %v", err),
 		})
 		return
 	}
 
-	// Decode base64 image data
+	// Decode and validate base64 image data (Substep 2.2.2.4.3)
 	imageData, err := decodeBase64Image(req.ImageData)
 	if err != nil {
+		s.logger.Error("Invalid screenshot image data", "error", err, "camera_id", req.CameraID, "operation", "create", "created_by", req.CreatedBy)
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": fmt.Sprintf("Invalid image data: %v", err),
 		})
@@ -1706,14 +1746,107 @@ func (s *Server) handleSaveScreenshot(c *gin.Context) {
 		CreatedBy:   req.CreatedBy,
 	}
 
+	// Save screenshot (Substep 2.2.2.4.3)
 	if err := s.screenshotSvc.SaveScreenshot(c.Request.Context(), screenshot, imageData); err != nil {
+		s.logger.Error("Failed to save screenshot", "error", err, "camera_id", screenshot.CameraID, "screenshot_id", screenshot.ID, "operation", "create", "created_by", screenshot.CreatedBy, "label", screenshot.Label)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": fmt.Sprintf("Failed to save screenshot: %v", err),
 		})
 		return
 	}
 
-	c.JSON(http.StatusCreated, screenshot)
+	// Verify saved file exists and is readable (Substep 2.2.2.4.3)
+	if screenshot.FilePath != "" {
+		if _, err := os.Stat(screenshot.FilePath); os.IsNotExist(err) {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": fmt.Sprintf("Screenshot file was not created at path: %s", screenshot.FilePath),
+			})
+			return
+		}
+		// Try to read the file to ensure it's readable
+		file, err := os.Open(screenshot.FilePath)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": fmt.Sprintf("Screenshot file is not readable: %v", err),
+			})
+			return
+		}
+		file.Close()
+	}
+
+	// Immediately refresh dataset status for this camera (Step 2.2.2.1.1)
+	var (
+		updatedDatasetStatus  *camera.CameraDatasetStatus
+		datasetStatusForReply *screenshots.DatasetStatus
+	)
+	if s.screenshotSvc != nil {
+		// Get minSnapshots from config
+		minSnapshots := 50 // Default
+		if s.configSvc != nil {
+			cfg := s.configSvc.Get()
+			if cfg != nil && cfg.Edge.AI.MinNormalSnapshots > 0 {
+				minSnapshots = cfg.Edge.AI.MinNormalSnapshots
+			}
+		}
+
+		// Get updated dataset status using the shared helper method
+		datasetStatus, err := s.screenshotSvc.GetDatasetStatus(c.Request.Context(), screenshot.CameraID, minSnapshots)
+		if err == nil && datasetStatus != nil {
+			datasetStatusForReply = datasetStatus
+
+			// Update camera manager with fresh dataset status if available
+			if s.cameraMgr != nil {
+				updatedDatasetStatus = &camera.CameraDatasetStatus{
+					LabelCounts:           datasetStatus.LabelCounts,
+					LabeledSnapshotCount:  datasetStatus.LabeledSnapshotCount,
+					RequiredSnapshotCount: datasetStatus.RequiredSnapshotCount,
+					SnapshotRequired:      datasetStatus.SnapshotRequired,
+					LastSynced:            datasetStatus.LastSynced,
+				}
+				s.cameraMgr.UpdateDatasetStatus(screenshot.CameraID, updatedDatasetStatus)
+			}
+		}
+	}
+
+	// Publish screenshot.saved event (Step 2.2.2.1.2)
+	if s.GetEventBus() != nil {
+		s.PublishEvent(service.EventTypeScreenshotSaved, map[string]interface{}{
+			"screenshot_id": screenshot.ID,
+			"camera_id":     screenshot.CameraID,
+			"label":         string(screenshot.Label),
+			"custom_label":  screenshot.CustomLabel,
+		})
+	}
+
+	// Return screenshot with updated dataset status (Step 2.2.2.4.1)
+	response := gin.H{
+		"id":             screenshot.ID,
+		"camera_id":      screenshot.CameraID,
+		"file_path":      screenshot.FilePath,
+		"label":          string(screenshot.Label),
+		"custom_label":   screenshot.CustomLabel,
+		"description":    screenshot.Description,
+		"created_at":     screenshot.CreatedAt.Format(time.RFC3339),
+		"updated_at":     screenshot.UpdatedAt.Format(time.RFC3339),
+		"dataset_status": nil, // Always include field for consistency
+	}
+
+	// Include dataset status in response if available
+	if datasetStatusForReply != nil {
+		var lastSynced interface{}
+		if !datasetStatusForReply.LastSynced.IsZero() {
+			lastSynced = datasetStatusForReply.LastSynced.Format(time.RFC3339)
+		}
+		response["dataset_status"] = gin.H{
+			"label_counts":            datasetStatusForReply.LabelCounts,
+			"labeled_snapshot_count":  datasetStatusForReply.LabeledSnapshotCount,
+			"required_snapshot_count": datasetStatusForReply.RequiredSnapshotCount,
+			"snapshot_required":       datasetStatusForReply.SnapshotRequired,
+			"last_synced":             lastSynced,
+		}
+	}
+
+	c.JSON(http.StatusCreated, response)
 }
 
 // handleUpdateScreenshot handles updating a screenshot's label/metadata
@@ -1735,6 +1868,7 @@ func (s *Server) handleUpdateScreenshot(c *gin.Context) {
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
+		s.logger.Error("Invalid screenshot update request", "error", err, "screenshot_id", id, "operation", "update")
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": fmt.Sprintf("Invalid request: %v", err),
 		})
@@ -1750,7 +1884,16 @@ func (s *Server) handleUpdateScreenshot(c *gin.Context) {
 	updates.Description = req.Description
 	updates.Metadata = req.Metadata
 
+	// Get screenshot before update for logging context
+	oldScreenshot, _ := s.screenshotSvc.GetScreenshot(c.Request.Context(), id)
+
 	if err := s.screenshotSvc.UpdateScreenshot(c.Request.Context(), id, updates); err != nil {
+		s.logger.Error("Failed to update screenshot", "error", err, "screenshot_id", id, "camera_id", func() string {
+			if oldScreenshot != nil {
+				return oldScreenshot.CameraID
+			}
+			return ""
+		}(), "operation", "update")
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": fmt.Sprintf("Failed to update screenshot: %v", err),
 		})
@@ -1760,13 +1903,79 @@ func (s *Server) handleUpdateScreenshot(c *gin.Context) {
 	// Return updated screenshot
 	screenshot, err := s.screenshotSvc.GetScreenshot(c.Request.Context(), id)
 	if err != nil {
+		s.logger.Error("Failed to get updated screenshot", "error", err, "screenshot_id", id, "operation", "update")
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": fmt.Sprintf("Failed to get updated screenshot: %v", err),
 		})
 		return
 	}
 
-	c.JSON(http.StatusOK, screenshot)
+	// Refresh dataset status after update (Step 2.2.2.1.1)
+	var datasetStatusForReply *screenshots.DatasetStatus
+	if s.screenshotSvc != nil {
+		minSnapshots := 50 // Default
+		if s.configSvc != nil {
+			cfg := s.configSvc.Get()
+			if cfg != nil && cfg.Edge.AI.MinNormalSnapshots > 0 {
+				minSnapshots = cfg.Edge.AI.MinNormalSnapshots
+			}
+		}
+
+		datasetStatus, err := s.screenshotSvc.GetDatasetStatus(c.Request.Context(), screenshot.CameraID, minSnapshots)
+		if err == nil && datasetStatus != nil {
+			datasetStatusForReply = datasetStatus
+			if s.cameraMgr != nil {
+				updatedDatasetStatus := &camera.CameraDatasetStatus{
+					LabelCounts:           datasetStatus.LabelCounts,
+					LabeledSnapshotCount:  datasetStatus.LabeledSnapshotCount,
+					RequiredSnapshotCount: datasetStatus.RequiredSnapshotCount,
+					SnapshotRequired:      datasetStatus.SnapshotRequired,
+					LastSynced:            datasetStatus.LastSynced,
+				}
+				s.cameraMgr.UpdateDatasetStatus(screenshot.CameraID, updatedDatasetStatus)
+			}
+		}
+	}
+
+	// Publish screenshot.updated event
+	if s.GetEventBus() != nil {
+		s.PublishEvent(service.EventTypeScreenshotUpdated, map[string]interface{}{
+			"screenshot_id": screenshot.ID,
+			"camera_id":     screenshot.CameraID,
+			"label":         string(screenshot.Label),
+		})
+	}
+
+	// Return screenshot with updated dataset status (Substep 2.2.2.4.1)
+	response := gin.H{
+		"id":             screenshot.ID,
+		"camera_id":      screenshot.CameraID,
+		"file_path":      screenshot.FilePath,
+		"label":          string(screenshot.Label),
+		"custom_label":   screenshot.CustomLabel,
+		"description":    screenshot.Description,
+		"created_at":     screenshot.CreatedAt.Format(time.RFC3339),
+		"updated_at":     screenshot.UpdatedAt.Format(time.RFC3339),
+		"dataset_status": nil,
+	}
+
+	// Include dataset status in response if available
+	if datasetStatusForReply != nil {
+		var lastSynced interface{}
+		if !datasetStatusForReply.LastSynced.IsZero() {
+			lastSynced = datasetStatusForReply.LastSynced.Format(time.RFC3339)
+		}
+
+		response["dataset_status"] = gin.H{
+			"label_counts":            datasetStatusForReply.LabelCounts,
+			"labeled_snapshot_count":  datasetStatusForReply.LabeledSnapshotCount,
+			"required_snapshot_count": datasetStatusForReply.RequiredSnapshotCount,
+			"snapshot_required":       datasetStatusForReply.SnapshotRequired,
+			"last_synced":             lastSynced,
+		}
+	}
+
+	c.JSON(http.StatusOK, response)
 }
 
 // handleDeleteScreenshot handles deleting a screenshot
@@ -1779,11 +1988,51 @@ func (s *Server) handleDeleteScreenshot(c *gin.Context) {
 	}
 
 	id := c.Param("id")
+
+	// Get screenshot before deletion to know which camera to update
+	var cameraID string
+	screenshot, err := s.screenshotSvc.GetScreenshot(c.Request.Context(), id)
+	if err == nil {
+		cameraID = screenshot.CameraID
+	}
+
 	if err := s.screenshotSvc.DeleteScreenshot(c.Request.Context(), id); err != nil {
+		s.logger.Error("Failed to delete screenshot", "error", err, "screenshot_id", id, "camera_id", cameraID, "operation", "delete")
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": fmt.Sprintf("Failed to delete screenshot: %v", err),
 		})
 		return
+	}
+
+	// Refresh dataset status after deletion (Step 2.2.2.1.1)
+	if cameraID != "" && s.cameraMgr != nil && s.screenshotSvc != nil {
+		minSnapshots := 50 // Default
+		if s.configSvc != nil {
+			cfg := s.configSvc.Get()
+			if cfg != nil && cfg.Edge.AI.MinNormalSnapshots > 0 {
+				minSnapshots = cfg.Edge.AI.MinNormalSnapshots
+			}
+		}
+
+		datasetStatus, err := s.screenshotSvc.GetDatasetStatus(c.Request.Context(), cameraID, minSnapshots)
+		if err == nil && datasetStatus != nil {
+			updatedDatasetStatus := &camera.CameraDatasetStatus{
+				LabelCounts:           datasetStatus.LabelCounts,
+				LabeledSnapshotCount:  datasetStatus.LabeledSnapshotCount,
+				RequiredSnapshotCount: datasetStatus.RequiredSnapshotCount,
+				SnapshotRequired:      datasetStatus.SnapshotRequired,
+				LastSynced:            datasetStatus.LastSynced,
+			}
+			s.cameraMgr.UpdateDatasetStatus(cameraID, updatedDatasetStatus)
+		}
+	}
+
+	// Publish screenshot.deleted event
+	if s.GetEventBus() != nil {
+		s.PublishEvent(service.EventTypeScreenshotDeleted, map[string]interface{}{
+			"screenshot_id": id,
+			"camera_id":     cameraID,
+		})
 	}
 
 	c.Status(http.StatusNoContent)
@@ -1832,7 +2081,248 @@ func (s *Server) handleExportScreenshots(c *gin.Context) {
 	c.FileAttachment(result.FilePath, filepath.Base(result.FilePath))
 }
 
-// decodeBase64Image decodes a base64-encoded image string
+// handleGetScreenshotStorageStats returns storage usage statistics for labeled screenshots (Substep 2.2.2.4.5)
+func (s *Server) handleGetScreenshotStorageStats(c *gin.Context) {
+	if s.screenshotSvc == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error": "Screenshot service not available",
+		})
+		return
+	}
+
+	stats, err := s.screenshotSvc.GetStorageStats(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": fmt.Sprintf("Failed to get screenshot storage stats: %v", err),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, stats)
+}
+
+// handleCleanupScreenshotStorage triggers storage cleanup for labeled screenshots (Substep 2.2.2.4.5)
+func (s *Server) handleCleanupScreenshotStorage(c *gin.Context) {
+	if s.screenshotSvc == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error": "Screenshot service not available",
+		})
+		return
+	}
+
+	var req struct {
+		CleanupOrphanedFiles   bool `json:"cleanup_orphaned_files"`
+		CleanupOrphanedRecords bool `json:"cleanup_orphaned_records"`
+		RetentionDays          int  `json:"retention_days"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil && err != io.EOF {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": fmt.Sprintf("Invalid request: %v", err),
+		})
+		return
+	}
+
+	opts := screenshots.StorageCleanupOptions{
+		CleanupOrphanedFiles:   req.CleanupOrphanedFiles,
+		CleanupOrphanedRecords: req.CleanupOrphanedRecords,
+		RetentionDays:          req.RetentionDays,
+	}
+
+	result, err := s.screenshotSvc.CleanupStorage(c.Request.Context(), opts)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": fmt.Sprintf("Failed to cleanup screenshot storage: %v", err),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, result)
+}
+
+// buildDatasetStatusResponse builds a JSON-friendly response object for dataset status.
+func buildDatasetStatusResponse(cameraID string, datasetStatus *screenshots.DatasetStatus) gin.H {
+	var lastSynced interface{}
+	if datasetStatus != nil && !datasetStatus.LastSynced.IsZero() {
+		lastSynced = datasetStatus.LastSynced.Format(time.RFC3339)
+	}
+
+	response := gin.H{
+		"camera_id": cameraID,
+	}
+
+	if datasetStatus != nil {
+		response["dataset_status"] = gin.H{
+			"label_counts":            datasetStatus.LabelCounts,
+			"labeled_snapshot_count":  datasetStatus.LabeledSnapshotCount,
+			"required_snapshot_count": datasetStatus.RequiredSnapshotCount,
+			"snapshot_required":       datasetStatus.SnapshotRequired,
+			"last_synced":             lastSynced,
+		}
+	} else {
+		response["dataset_status"] = nil
+	}
+
+	return response
+}
+
+// handleRefreshDatasetStatus handles manual dataset status refresh (Substep 2.2.2.4.2)
+func (s *Server) handleRefreshDatasetStatus(c *gin.Context) {
+	if s.screenshotSvc == nil || s.cameraMgr == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error": "Screenshot service or camera manager not available",
+		})
+		return
+	}
+
+	cameraID := c.Param("id")
+	if cameraID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Camera ID is required",
+		})
+		return
+	}
+
+	// Get minSnapshots from config
+	minSnapshots := 50 // Default
+	if s.configSvc != nil {
+		cfg := s.configSvc.Get()
+		if cfg != nil && cfg.Edge.AI.MinNormalSnapshots > 0 {
+			minSnapshots = cfg.Edge.AI.MinNormalSnapshots
+		}
+	}
+
+	// Get updated dataset status
+	datasetStatus, err := s.screenshotSvc.GetDatasetStatus(c.Request.Context(), cameraID, minSnapshots)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": fmt.Sprintf("Failed to refresh dataset status: %v", err),
+		})
+		return
+	}
+
+	// Update camera manager with fresh dataset status
+	if datasetStatus != nil {
+		updatedDatasetStatus := &camera.CameraDatasetStatus{
+			LabelCounts:           datasetStatus.LabelCounts,
+			LabeledSnapshotCount:  datasetStatus.LabeledSnapshotCount,
+			RequiredSnapshotCount: datasetStatus.RequiredSnapshotCount,
+			SnapshotRequired:      datasetStatus.SnapshotRequired,
+			LastSynced:            datasetStatus.LastSynced,
+		}
+		s.cameraMgr.UpdateDatasetStatus(cameraID, updatedDatasetStatus)
+	}
+
+	// Return updated dataset status
+	c.JSON(http.StatusOK, buildDatasetStatusResponse(cameraID, datasetStatus))
+}
+
+// handleGetDatasetStatus returns dataset status for a single camera without modifying state.
+// This is a read-only counterpart to handleRefreshDatasetStatus (Substep 2.2.2.8.1).
+func (s *Server) handleGetDatasetStatus(c *gin.Context) {
+	if s.screenshotSvc == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error": "Screenshot service not available",
+		})
+		return
+	}
+
+	cameraID := c.Param("id")
+	if cameraID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Camera ID is required",
+		})
+		return
+	}
+
+	// Get minSnapshots from config
+	minSnapshots := 50 // Default
+	if s.configSvc != nil {
+		cfg := s.configSvc.Get()
+		if cfg != nil && cfg.Edge.AI.MinNormalSnapshots > 0 {
+			minSnapshots = cfg.Edge.AI.MinNormalSnapshots
+		}
+	}
+
+	datasetStatus, err := s.screenshotSvc.GetDatasetStatus(c.Request.Context(), cameraID, minSnapshots)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": fmt.Sprintf("Failed to get dataset status: %v", err),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, buildDatasetStatusResponse(cameraID, datasetStatus))
+}
+
+// handleSyncDatasetStatus handles manual Edge -> VM dataset sync trigger for a single camera.
+// For Phase 2, this validates local readiness and returns success or a clear error.
+// VM push integration will be added in a follow-up step.
+func (s *Server) handleSyncDatasetStatus(c *gin.Context) {
+	if s.screenshotSvc == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error": "Screenshot service not available",
+		})
+		return
+	}
+
+	cameraID := c.Param("id")
+	if cameraID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Camera ID is required",
+		})
+		return
+	}
+
+	// Get minSnapshots from config
+	minSnapshots := 50 // Default
+	if s.configSvc != nil {
+		cfg := s.configSvc.Get()
+		if cfg != nil && cfg.Edge.AI.MinNormalSnapshots > 0 {
+			minSnapshots = cfg.Edge.AI.MinNormalSnapshots
+		}
+	}
+
+	datasetStatus, err := s.screenshotSvc.GetDatasetStatus(c.Request.Context(), cameraID, minSnapshots)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": fmt.Sprintf("Failed to get dataset status for sync: %v", err),
+		})
+		return
+	}
+
+	// If still requires snapshots, return a clear conflict-style error
+	if datasetStatus == nil || datasetStatus.SnapshotRequired {
+		c.JSON(http.StatusConflict, gin.H{
+			"error":              "Dataset not ready for training (snapshot_required=true)",
+			"camera_id":          cameraID,
+			"dataset_status":     buildDatasetStatusResponse(cameraID, datasetStatus)["dataset_status"],
+			"required_snapshots": datasetStatus.RequiredSnapshotCount,
+		})
+		return
+	}
+
+	// At this point, local Edge dataset is ready (>= required normal snapshots).
+	// TODO (Phase 2.2.2.8.3 follow-up): invoke VM API / gRPC to update edge_camera_status.training_eligibility_status.
+
+	c.JSON(http.StatusOK, gin.H{
+		"camera_id":      cameraID,
+		"dataset_synced": false, // VM push not yet wired
+		"dataset_status": buildDatasetStatusResponse(cameraID, datasetStatus)["dataset_status"],
+		"message":        "Local dataset is ready; VM sync endpoint not yet implemented",
+	})
+}
+
+// Image validation constants (Substep 2.2.2.4.3)
+const (
+	maxImageSizeBytes = 10 * 1024 * 1024 // 10MB
+	minImageWidth     = 32
+	minImageHeight    = 32
+	maxImageWidth     = 8192
+	maxImageHeight    = 8192
+)
+
+// decodeBase64Image decodes and validates a base64-encoded image string (Substep 2.2.2.4.3)
 func decodeBase64Image(base64Str string) ([]byte, error) {
 	// Remove data URL prefix if present (e.g., "data:image/jpeg;base64,")
 	parts := strings.Split(base64Str, ",")
@@ -1843,7 +2333,42 @@ func decodeBase64Image(base64Str string) ([]byte, error) {
 	// Decode base64
 	decoded, err := base64.StdEncoding.DecodeString(base64Str)
 	if err != nil {
-		return nil, fmt.Errorf("failed to decode base64: %w", err)
+		return nil, fmt.Errorf("invalid base64 encoding: %w", err)
+	}
+
+	// Validate file size (Substep 2.2.2.4.3)
+	if len(decoded) > maxImageSizeBytes {
+		return nil, fmt.Errorf("image size %d bytes exceeds maximum allowed size of %d bytes", len(decoded), maxImageSizeBytes)
+	}
+
+	if len(decoded) == 0 {
+		return nil, fmt.Errorf("image data is empty")
+	}
+
+	// Validate image format and dimensions (Substep 2.2.2.4.3)
+	// Decode image to verify format and get dimensions
+	img, format, err := image.Decode(bytes.NewReader(decoded))
+	if err != nil {
+		return nil, fmt.Errorf("invalid image format: %w (expected JPEG or PNG)", err)
+	}
+
+	// Verify format is JPEG or PNG
+	if format != "jpeg" && format != "png" {
+		return nil, fmt.Errorf("unsupported image format: %s (expected JPEG or PNG)", format)
+	}
+
+	// Get image dimensions
+	bounds := img.Bounds()
+	width := bounds.Dx()
+	height := bounds.Dy()
+
+	// Validate dimensions (Substep 2.2.2.4.3)
+	if width < minImageWidth || height < minImageHeight {
+		return nil, fmt.Errorf("image dimensions %dx%d are too small (minimum: %dx%d)", width, height, minImageWidth, minImageHeight)
+	}
+
+	if width > maxImageWidth || height > maxImageHeight {
+		return nil, fmt.Errorf("image dimensions %dx%d are too large (maximum: %dx%d)", width, height, maxImageWidth, maxImageHeight)
 	}
 
 	return decoded, nil

@@ -228,6 +228,28 @@ services:
       retries: 3
       start_period: 30s
 
+  # =========================
+  # Edge UI E2E tests (Playwright)
+  # =========================
+  edge-ui-tests:
+    image: mcr.microsoft.com/playwright:v1.49.0-jammy
+    container_name: view-guard-edge-ui-tests
+    working_dir: /workspace/edge/orchestrator/internal/web/frontend
+    depends_on:
+      edge-orchestrator:
+        condition: service_healthy
+    volumes:
+      - ../..:/workspace
+    # Run frontend E2E tests against the running edge-orchestrator UI
+    command: >
+      sh -c "
+        npm install &&
+        npx playwright install --with-deps &&
+        EDGE_UI_BASE_URL=http://edge-orchestrator:8081 npx playwright test
+      "
+    networks:
+      - view-guard-edge
+
 networks:
   view-guard-edge:
     driver: bridge

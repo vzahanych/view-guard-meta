@@ -114,6 +114,16 @@ export default function CameraGrid({ maxColumns = 2, showSelector = true }: Came
                 cameraId={cameraId}
                 cameraName={camera?.name}
                 className="aspect-video"
+                onScreenshotSaved={async () => {
+                  // Refresh cameras to get updated dataset status (Substep 2.2.2.2.4)
+                  try {
+                    const response = await api.get<{ cameras: Camera[]; count: number }>('/cameras')
+                    const enabledCameras = response.cameras.filter((cam) => cam.enabled)
+                    setCameras(enabledCameras)
+                  } catch (err) {
+                    console.error('Failed to refresh cameras:', err)
+                  }
+                }}
               />
             )
           })}

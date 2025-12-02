@@ -93,7 +93,11 @@ type ScreenshotService interface {
 	UpdateScreenshot(ctx context.Context, id string, updates *screenshots.ScreenshotUpdate) error
 	DeleteScreenshot(ctx context.Context, id string) error
 	GetScreenshotImage(ctx context.Context, id string) ([]byte, error)
+	GetScreenshotThumbnail(ctx context.Context, id string) ([]byte, error)
 	ExportDataset(ctx context.Context, filters *screenshots.ScreenshotFilters, includeMetadata bool) (*screenshots.DatasetExportResult, error)
+	GetDatasetStatus(ctx context.Context, cameraID string, minSnapshots int) (*screenshots.DatasetStatus, error)
+	GetStorageStats(ctx context.Context) (*screenshots.StorageStats, error)
+	CleanupStorage(ctx context.Context, opts screenshots.StorageCleanupOptions) (*screenshots.StorageCleanupResult, error)
 }
 
 // NewServer creates a new web server service
@@ -230,6 +234,10 @@ func (s *Server) setupRoutes() {
 			cameras.GET("", s.handleListCameras)
 			cameras.GET("/discover", s.handleDiscoverCameras)
 			cameras.GET("/:id", s.handleGetCamera)
+			// Dataset status (read-only and refresh)
+			cameras.GET("/:id/dataset", s.handleGetDatasetStatus)
+			cameras.GET("/:id/dataset-status", s.handleGetDatasetStatus)
+			cameras.POST("/:id/dataset/sync", s.handleSyncDatasetStatus)
 			cameras.POST("", s.handleAddCamera)
 			cameras.PUT("/:id", s.handleUpdateCamera)
 			cameras.DELETE("/:id", s.handleDeleteCamera)
@@ -239,6 +247,8 @@ func (s *Server) setupRoutes() {
 			cameras.GET("/:id/frame", s.handleSingleFrame)
 			// Snapshot endpoint
 			cameras.GET("/:id/snapshot", s.handleCameraSnapshot)
+			// Dataset status refresh endpoint (Substep 2.2.2.4.2)
+			cameras.POST("/:id/dataset/refresh", s.handleRefreshDatasetStatus)
 		}
 
 		// Event endpoints (Step 1.9.3)
@@ -255,6 +265,9 @@ func (s *Server) setupRoutes() {
 			screenshots.GET("", s.handleListScreenshots)
 			screenshots.GET("/:id", s.handleGetScreenshot)
 			screenshots.GET("/:id/image", s.handleGetScreenshotImage)
+			screenshots.GET("/:id/thumbnail", s.handleGetScreenshotThumbnail)
+			screenshots.GET("/storage", s.handleGetScreenshotStorageStats)
+			screenshots.POST("/storage/cleanup", s.handleCleanupScreenshotStorage)
 			screenshots.POST("/export", s.handleExportScreenshots)
 			screenshots.POST("", s.handleSaveScreenshot)
 			screenshots.PUT("/:id", s.handleUpdateScreenshot)

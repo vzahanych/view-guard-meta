@@ -67,6 +67,10 @@ type StorageConfig struct {
 	SnapshotsDir        string  `yaml:"snapshots_dir"`
 	RetentionDays       int     `yaml:"retention_days"`
 	MaxDiskUsagePercent float64 `yaml:"max_disk_usage_percent"`
+	// Screenshot storage configuration (Substep 2.2.2.7.1)
+	ScreenshotRetentionDays  int `yaml:"screenshot_retention_days"`    // Retention for labeled screenshots (0 = no automatic deletion)
+	ScreenshotMaxSizeMB      int `yaml:"screenshot_max_size_mb"`       // Maximum size per screenshot in MB (0 = no limit)
+	ScreenshotMaxTotalSizeGB int `yaml:"screenshot_max_total_size_gb"` // Maximum total size for all screenshots in GB (0 = no limit)
 }
 
 // AIConfig contains AI service configuration
@@ -232,7 +236,10 @@ func (c *Config) setDefaults() {
 	if c.Edge.AI.DatasetExportDir == "" {
 		c.Edge.AI.DatasetExportDir = filepath.Join(c.Edge.Orchestrator.DataDir, "exports")
 	}
-	if c.Edge.AI.MinNormalSnapshots == 0 {
+	// Set default for MinNormalSnapshots (Substep 2.2.2.7.1)
+	// Default: 50 normal snapshots required per camera
+	// Only set default if not explicitly configured (0 or negative means not set)
+	if c.Edge.AI.MinNormalSnapshots <= 0 {
 		c.Edge.AI.MinNormalSnapshots = 50
 	}
 

@@ -219,6 +219,11 @@ func applyEnvOverrides(cfg *Config) {
 	if val := os.Getenv("EDGE_AI_DATASET_EXPORT_DIR"); val != "" {
 		cfg.Edge.AI.DatasetExportDir = val
 	}
+	if val := os.Getenv("EDGE_AI_MIN_NORMAL_SNAPSHOTS"); val != "" {
+		if count, err := parseInt(val); err == nil {
+			cfg.Edge.AI.MinNormalSnapshots = count
+		}
+	}
 
 	// Storage settings
 	if val := os.Getenv("EDGE_STORAGE_CLIPS_DIR"); val != "" {
@@ -235,6 +240,22 @@ func applyEnvOverrides(cfg *Config) {
 	if val := os.Getenv("EDGE_STORAGE_MAX_DISK_USAGE_PERCENT"); val != "" {
 		if percent, err := parseFloat64(val); err == nil {
 			cfg.Edge.Storage.MaxDiskUsagePercent = percent
+		}
+	}
+	// Screenshot storage settings (Substep 2.2.2.7.1)
+	if val := os.Getenv("EDGE_STORAGE_SCREENSHOT_RETENTION_DAYS"); val != "" {
+		if days, err := parseInt(val); err == nil {
+			cfg.Edge.Storage.ScreenshotRetentionDays = days
+		}
+	}
+	if val := os.Getenv("EDGE_STORAGE_SCREENSHOT_MAX_SIZE_MB"); val != "" {
+		if size, err := parseInt(val); err == nil {
+			cfg.Edge.Storage.ScreenshotMaxSizeMB = size
+		}
+	}
+	if val := os.Getenv("EDGE_STORAGE_SCREENSHOT_MAX_TOTAL_SIZE_GB"); val != "" {
+		if size, err := parseInt(val); err == nil {
+			cfg.Edge.Storage.ScreenshotMaxTotalSizeGB = size
 		}
 	}
 
