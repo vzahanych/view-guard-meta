@@ -2089,6 +2089,286 @@ Once the WireGuard tunnel stands up automatically, the VM must immediately captu
 
 ---
 
+## Epic 2.2.3: Edge → VM Dataset Sync & Upload
+
+**Priority: P0**
+
+**Context**: Epic 2.2.2 implemented Edge-local dataset status tracking and a manual "Sync Dataset Status" button in the UI. When the user presses this button after accumulating ≥50 labeled screenshots, Edge calls `POST /api/cameras/{id}/dataset/sync`, which validates dataset readiness locally and triggers a gRPC `SyncCapabilities` call to the VM. However, the actual dataset (screenshot files) are not yet uploaded to the VM, and the VM-side training eligibility status update is not fully wired.
+
+**Goal**: Complete the Edge → VM dataset sync flow:
+1. When user presses "Sync Dataset Status" button, Edge validates dataset readiness (≥50 normal snapshots) and sends capability sync to VM.
+2. Edge uploads the actual screenshot dataset (all labeled screenshots for that camera) to the VM over the WireGuard tunnel.
+3. VM receives and stores datasets, updates training eligibility status, and prepares datasets for model training pipeline.
+
+**Prerequisites**:
+- ✅ WireGuard tunnel established (Epic 1.6)
+- ✅ gRPC `ControlService.SyncCapabilities` proto and VM handler exist (`user-vm-api/internal/tunnel-gateway/edge_api.go`)
+- ✅ Edge `POST /api/cameras/{id}/dataset/sync` endpoint exists (Epic 2.2.2)
+- ✅ Edge `SyncService` with gRPC client infrastructure (Epic 2.2.1)
+- ✅ VM `CapabilityStore` for persisting camera capabilities (Epic 2.2.1)
+
+### Step 2.2.3.1: Edge Dataset Upload Service
+
+- **Substep 2.2.3.1.1**: Dataset upload service implementation
+  - **Status**: ✅ DONE
+  - **P0**: Create `DatasetUploadService` in Edge that:
+    - Takes a camera ID and collects all labeled screenshots for that camera from `ScreenshotService`.
+    - Packages screenshots into a dataset archive (tar.gz or zip) with metadata (camera_id, label_counts, timestamps).
+    - Uploads dataset archive to VM via gRPC streaming or HTTP multipart upload over WireGuard tunnel.
+    - Tracks upload progress and handles retries on failure.
+  - **P0**: Add dataset upload endpoint to proto (or reuse existing streaming service):
+    - Option A: Extend `ControlService` with `UploadDataset` streaming RPC.
+    - Option B: Use HTTP multipart upload to VM HTTP endpoint (simpler for PoC).
+  - **P0**: Integrate upload service into `handleDatasetSync` handler:
+    - After validating dataset readiness, trigger dataset upload.
+    - Show upload progress in UI (optional for PoC, can be P1).
+  - Location: `edge/orchestrator/internal/dataset/uploader.go`, `edge/orchestrator/internal/web/handlers.go`
+  - **Design decision**: For PoC, use HTTP multipart upload to VM endpoint (simpler than gRPC streaming). Post-PoC can migrate to gRPC streaming for better progress tracking.
+  - **Implementation (Dec 2025)**:
+    - Created `dataset.Service` that combines `Packager` and `Uploader` services.
+    - `Packager` (`packager.go`): Packages screenshots into tar.gz archive with `metadata.json`, `screenshots/` directory, and `manifest.json`. Calculates SHA-256 checksum for integrity verification.
+    - `Uploader` (`uploader.go`): Implements HTTP multipart upload to VM endpoint (`POST /api/datasets/upload`). Uses configurable VM endpoint from `Edge.WireGuard.KVMEndpoint` (defaults to `http://localhost:8080` for PoC). Basic error handling implemented (retry logic deferred to future enhancement).
+    - Integrated into `handleSyncDatasetStatus` handler: After validating dataset readiness (≥50 normal snapshots), collects all screenshots for camera, packages dataset, uploads to VM, and returns dataset ID on success.
+    - Dataset service initialized in `main.go` with edge ID derived from hostname (fallback to "edge-local" for PoC).
+    - Archive files are automatically cleaned up after successful upload.
+
+- **Substep 2.2.3.1.2**: Dataset packaging and metadata
+  - **Status**: ✅ DONE
+  - **P0**: Package dataset as tar.gz archive containing:
+    - `metadata.json`: Camera ID, edge ID, label counts, total snapshot count, sync timestamp.
+    - `screenshots/`: Directory with all screenshot files, named by ID (e.g., `{screenshot_id}.jpg`).
+    - Optional: `manifest.json` listing all screenshot IDs with labels and timestamps.
+  - **P0**: Calculate dataset checksum (SHA-256) for integrity verification on VM side.
+  - **P0**: Compress dataset archive to minimize transfer over WireGuard tunnel.
+  - Location: `edge/orchestrator/internal/dataset/packager.go`
+  - **Implementation (Dec 2025)**:
+    - **Archive structure**: Created tar.gz archive with three components:
+      - `metadata.json`: Contains `edge_id`, `camera_id`, `total_snapshots`, `label_counts` (map of label to count), and `synced_at` timestamp. JSON formatted with indentation for readability.
+      - `screenshots/` directory: All screenshot files stored with naming pattern `{screenshot_id}.jpg` (consistent JPEG format regardless of original format).
+      - `manifest.json`: Complete listing of all screenshots with `screenshot_id`, `label`, `custom_label` (if present), `description` (if present), `created_at` timestamp, and relative `file_path` within archive.
+    - **Checksum calculation**: SHA-256 checksum calculated after archive creation by reading the complete archive file. Checksum returned as hexadecimal string for transmission to VM via upload form field.
+    - **Compression**: Archive compressed using gzip (via `compress/gzip` package) to minimize transfer size over WireGuard tunnel. Compression happens automatically during tar.gz creation.
+    - **Error handling**: Graceful handling of missing screenshot files (skips with warning log), invalid JSON marshaling, and file I/O errors. All errors properly propagated to caller.
+    - **Archive naming**: Archive files named with pattern `dataset_{edge_id}_{camera_id}_{timestamp}.tar.gz` for easy identification and uniqueness.
+
+- **Substep 2.2.3.1.3**: Upload retry and error handling
+  - **Status**: ✅ DONE
+  - **P0**: Implement exponential backoff retry logic for upload failures.
+  - **P0**: Handle network interruptions (WireGuard tunnel drops during upload).
+  - **P0**: Resume partial uploads if VM supports it (optional, P1 for PoC).
+  - **P0**: Log upload progress and failures for debugging.
+  - Location: `edge/orchestrator/internal/dataset/uploader.go`
+  - **Implementation (Dec 2025)**:
+    - **Exponential backoff retry**: Implemented retry logic with configurable max retries (default: 3). Backoff delay calculated as `baseDelay * 2^(attempt-1)` with base delay of 2 seconds, capped at 30 seconds maximum. Each retry recreates the multipart request body to ensure data integrity.
+    - **Network error handling**: Retries on network errors (connection failures, timeouts, WireGuard tunnel drops). Detects context cancellation and aborts retries immediately. Distinguishes between retryable errors (network, 5xx) and non-retryable errors (4xx client errors).
+    - **Error classification**: Client errors (4xx) are not retried as they indicate permanent issues (e.g., authentication failure, invalid request). Server errors (5xx) and network errors are retried with exponential backoff.
+    - **Logging**: Comprehensive logging at each attempt:
+      - Initial attempt: Logs upload start with file size, checksum, endpoint
+      - Retry attempts: Logs attempt number, backoff delay, reason for retry
+      - Success: Logs final attempt number, duration, dataset ID
+      - Failures: Logs error details, status codes, response bodies
+    - **Partial upload resume**: Deferred to P1 (not implemented for PoC). Current implementation requires full re-upload on retry, which is acceptable for PoC dataset sizes.
+    - **Request recreation**: Multipart form body is recreated for each retry attempt to ensure data integrity and handle file handle issues.
+
+### Step 2.2.3.2: VM Dataset Reception & Storage
+
+- **Substep 2.2.3.2.1**: VM dataset upload endpoint
+  - **Status**: ✅ DONE
+  - **P0**: Add HTTP endpoint `POST /api/datasets/upload` in VM API Gateway:
+    - Accepts multipart/form-data with dataset archive file.
+    - Validates request (authenticated Edge, valid camera ID).
+    - Extracts dataset archive to VM storage (local filesystem for PoC, MinIO bucket post-PoC).
+    - Stores dataset metadata in SQLite (`datasets` table: edge_id, camera_id, dataset_path, checksum, uploaded_at, status).
+  - **P0**: Integrate with existing `EdgeAPIServer` authentication (WireGuard peer → edge_id mapping).
+  - Location: `user-vm-api/internal/orchestrator/api.go` (HTTP handlers), `user-vm-api/internal/dataset-storage/receiver.go`
+  - **Implementation (Dec 2025)**:
+    - **HTTP endpoint**: Added `POST /api/datasets/upload` handler in `APIServer.handleDatasetUpload`. Accepts multipart/form-data with `dataset` file, `camera_id`, and `checksum` fields. Max upload size: 500MB.
+    - **Authentication**: Implemented `authenticateEdgeFromRequest` helper that:
+      - First tries `X-Edge-ID` header (if Edge sends it)
+      - Falls back to first connected edge from `EdgeAPIServer.GetConnectedEdges()` (for PoC)
+      - TODO: Implement proper IP-based authentication similar to gRPC `authInterceptor` for production
+    - **Dataset reception**: `Receiver.ReceiveDataset` method:
+      - Extracts tar.gz archive to `/app/data/datasets/{edge_id}/{camera_id}/{dataset_id}/`
+      - Verifies checksum (SHA-256) if provided
+      - Reads and validates `metadata.json`
+      - Verifies dataset structure (metadata.json, screenshots/, manifest.json)
+      - Stores metadata in `training_datasets` table (reusing existing schema)
+    - **Error handling**: Validates camera_id, handles file I/O errors, cleans up on failure, returns appropriate HTTP status codes.
+
+- **Substep 2.2.3.2.2**: Dataset storage organization
+  - **Status**: ✅ DONE
+  - **P0**: Organize datasets on VM filesystem:
+    - Base path: `/app/data/datasets/{edge_id}/{camera_id}/{dataset_id}/`
+    - Contents: `metadata.json`, `screenshots/` directory, `manifest.json` (if provided).
+  - **P0**: Store dataset metadata in SQLite:
+    - Table: `datasets` (dataset_id UUID, edge_id, camera_id, dataset_path, checksum, total_snapshots, label_counts JSON, uploaded_at, status, created_at, updated_at).
+    - Link to `edge_camera_status` via (edge_id, camera_id) for training eligibility tracking.
+  - **P0**: Verify dataset checksum after extraction to ensure integrity.
+  - Location: `user-vm-api/internal/dataset-storage/storage.go`, `user-vm-api/internal/shared/database/schema.go`
+  - **Implementation (Dec 2025)**:
+    - **Filesystem organization**: Implemented `Storage` service with `GetDatasetPath` and `EnsureDatasetDirectory` methods. Datasets stored at `/app/data/datasets/{edge_id}/{camera_id}/{dataset_id}/` with `screenshots/` subdirectory automatically created.
+    - **Database storage**: Reused existing `training_datasets` table schema. Stores `dataset_id` (UUID), `edge_id`, `dataset_dir_path`, `label_counts` (JSON), `total_images`, `status` ("ready"), `created_at`, `updated_at`. Dataset metadata stored via `Receiver.storeDatasetMetadata`.
+    - **Schema update**: Added `dataset_id` column to `edge_camera_status` table (via migration version 3) to link cameras to uploaded datasets. Foreign key relationship defined in schema (SQLite limitations noted in migration).
+    - **Checksum verification**: Implemented `calculateArchiveChecksum` in `Receiver` that calculates SHA-256 checksum of uploaded archive and compares with provided checksum. Upload fails if checksum mismatch detected.
+    - **Structure verification**: `Storage.VerifyDatasetStructure` validates presence of `metadata.json` and `screenshots/` directory. `manifest.json` is optional (warning logged if missing).
+
+- **Substep 2.2.3.2.3**: Training eligibility status update
+  - **Status**: ✅ DONE
+  - **P0**: When dataset upload completes successfully:
+    - Update `edge_camera_status.training_eligibility_status` to `ready_for_training`.
+    - Update `edge_camera_status.dataset_id` to link to the uploaded dataset.
+    - Publish event: `dataset.uploaded` (edge_id, camera_id, dataset_id) for downstream training service.
+  - **P0**: If upload fails or dataset is invalid:
+    - Keep `training_eligibility_status` as `needs_snapshots` or set to `upload_failed`.
+    - Log error and notify Edge (optional, via gRPC callback or next sync).
+  - Location: `user-vm-api/internal/dataset-storage/receiver.go`, `user-vm-api/internal/tunnel-gateway/capability_store.go`
+  - **Implementation (Dec 2025)**:
+    - **Status update method**: Added `CapabilityStore.UpdateTrainingEligibility` method that updates `training_eligibility_status` and `dataset_id` in `edge_camera_status` table. Handles backward compatibility (tries with dataset_id, falls back if column doesn't exist).
+    - **Event publishing**: `Receiver.ReceiveDataset` publishes `dataset.uploaded` event via event bus after successful upload, containing `edge_id`, `camera_id`, `dataset_id`, `total_snapshots`, and `label_counts` for downstream training service consumption.
+    - **Integration**: `APIServer.handleDatasetUpload` calls `updateTrainingEligibility` after successful dataset reception, which invokes `CapabilityStore.UpdateTrainingEligibility` to set status to `ready_for_training` and link `dataset_id`.
+    - **Error handling**: If dataset upload fails (extraction error, checksum mismatch, invalid structure), directory is cleaned up, error is logged, and training eligibility status remains unchanged (not set to `upload_failed` - this can be enhanced later if needed).
+    - **State transition events**: `UpdateTrainingEligibility` detects state transitions and publishes appropriate events (e.g., `camera.ready_for_training` when transitioning from `needs_snapshots`).
+
+### Step 2.2.3.3: Edge → VM Sync Flow Integration
+
+- **Substep 2.2.3.3.1**: Wire dataset upload into sync handler
+  - **Status**: ✅ DONE
+  - **P0**: Update `handleDatasetSync` in Edge to:
+    - After validating dataset readiness (≥50 normal snapshots):
+      1. Call `SyncCapabilities` gRPC to update VM with capability status.
+      2. Trigger dataset upload via `DatasetUploadService.UploadDataset`.
+      3. Wait for upload completion (or handle async upload in background).
+      4. Return success/error response to UI.
+  - **P0**: Handle sync button state:
+    - Disable button during upload (show "Uploading dataset...").
+    - Re-enable on completion or error.
+  - Location: `edge/orchestrator/internal/web/handlers.go`, `edge/orchestrator/internal/web/frontend/src/pages/Screenshots.tsx`
+
+- **Substep 2.2.3.3.2**: Sync status feedback in UI
+  - **Status**: ✅ DONE
+  - **P0**: Show sync status in Edge UI:
+    - "Syncing dataset..." toast/indicator during upload.
+    - "Dataset synced successfully" on completion.
+    - Error message if upload fails (with retry option, optional P1).
+  - **P0**: Update dataset progress widget to show sync status:
+    - "Ready for sync" → "Syncing..." → "Synced" (with timestamp).
+  - Location: `edge/orchestrator/internal/web/frontend/src/pages/Screenshots.tsx`
+
+- **Substep 2.2.3.3.3**: Error handling and edge cases
+  - **Status**: ✅ DONE
+  - **P0**: Handle sync failures gracefully:
+    - Network errors (WireGuard tunnel down): Show "Connection unavailable" error.
+    - Upload failures: Allow retry from UI.
+    - Invalid dataset: Log error, don't update training eligibility.
+  - **P0**: Prevent duplicate uploads:
+    - Check if dataset for (edge_id, camera_id) already exists on VM with same checksum.
+    - Skip upload if dataset is unchanged (optional optimization, P1).
+  - Location: `edge/orchestrator/internal/dataset/uploader.go`, `edge/orchestrator/internal/web/handlers.go`
+
+### Step 2.2.3.4: Testing & Validation
+
+- **Substep 2.2.3.4.1**: Integration tests for dataset sync flow
+  - **Status**: ✅ DONE
+  - **P0**: End-to-end test in `infra/local` docker-compose:
+    - Create 50+ labeled screenshots on Edge.
+    - Press "Sync Dataset Status" button via UI or curl.
+    - Verify dataset archive is created and uploaded to VM.
+    - Verify VM stores dataset in correct location.
+    - Verify `edge_camera_status.training_eligibility_status` is updated to `ready_for_training`.
+  - **P0**: Test error scenarios:
+    - Upload failure (simulate network error).
+    - Invalid dataset (corrupted archive).
+    - Duplicate upload (same dataset twice).
+  - **Implementation**:
+    - Created `edge/orchestrator/internal/web/dataset_sync_integration_test.go` with:
+      - `TestDatasetSync_CompleteFlow`: Tests complete sync flow with 50+ screenshots
+      - `TestDatasetSync_NotReady`: Tests sync rejection when < 50 snapshots
+      - `TestDatasetSync_UploadFailure`: Tests handling of VM server errors
+      - `TestDatasetSync_NetworkError`: Tests handling of network connection failures
+    - Created `user-vm-api/internal/dataset-storage/receiver_test.go` with:
+      - `TestReceiver_ReceiveDataset`: Tests successful dataset reception and storage
+      - `TestReceiver_InvalidChecksum`: Tests checksum validation
+      - `TestReceiver_DuplicateUpload`: Tests duplicate upload detection
+      - `TestReceiver_CorruptedArchive`: Tests handling of corrupted archives
+      - `TestReceiver_MissingMetadata`: Tests handling of archives missing metadata.json
+      - `TestReceiver_StorageOrganization`: Tests dataset storage directory structure
+  - Location: `edge/orchestrator/internal/web/dataset_sync_integration_test.go`, `user-vm-api/internal/dataset-storage/receiver_test.go`
+
+- **Substep 2.2.3.4.2**: Unit tests for dataset services
+  - **Status**: ✅ DONE
+  - **P0**: Test `DatasetUploadService`:
+    - Dataset packaging (tar.gz creation, metadata generation).
+    - Upload retry logic.
+    - Error handling.
+  - **P0**: Test VM `DatasetReceiver`:
+    - Dataset extraction and validation.
+    - Storage organization.
+    - Training eligibility status update.
+  - **Implementation**:
+    - Created `edge/orchestrator/internal/dataset/packager_test.go` with:
+      - `TestPackager_PackageDataset`: Tests tar.gz creation, metadata generation, manifest creation
+      - `TestPackager_PackageDataset_EmptyList`: Tests error handling for empty screenshot list
+      - `TestPackager_PackageDataset_MissingFile`: Tests handling of missing screenshot files
+      - `TestPackager_Checksum`: Tests SHA-256 checksum calculation and format
+    - Created `edge/orchestrator/internal/dataset/uploader_test.go` with:
+      - `TestUploader_UploadDataset_Success`: Tests successful upload with multipart form
+      - `TestUploader_UploadDataset_RetryLogic`: Tests exponential backoff retry on server errors
+      - `TestUploader_UploadDataset_ClientError`: Tests that 4xx errors are not retried
+      - `TestUploader_UploadDataset_MaxRetries`: Tests max retry limit (3 attempts)
+      - `TestUploader_UploadDataset_FileNotFound`: Tests error handling for missing archive file
+      - `TestUploader_UploadDataset_NetworkError`: Tests network error handling
+      - `TestUploader_UploadDataset_ContextCancellation`: Tests context cancellation handling
+    - Created `edge/orchestrator/internal/dataset/service_test.go` with:
+      - `TestService_UploadDatasetForCamera`: Tests complete service flow (package + upload)
+      - `TestService_UploadDatasetForCamera_EmptyList`: Tests error handling for empty list
+      - `TestService_UploadDatasetForCamera_UploadFailure`: Tests error handling on upload failure
+      - `TestService_UploadDatasetForCamera_ArchiveCleanup`: Tests archive cleanup after upload
+    - Created `user-vm-api/internal/dataset-storage/storage_test.go` with:
+      - `TestStorage_GetDatasetPath`: Tests dataset path generation
+      - `TestStorage_EnsureDatasetDirectory`: Tests directory creation with proper structure
+      - `TestStorage_EnsureDatasetDirectory_Idempotent`: Tests idempotent directory creation
+      - `TestStorage_VerifyDatasetStructure`: Tests dataset structure verification
+      - `TestStorage_VerifyDatasetStructure_MissingMetadata`: Tests verification failure for missing metadata
+      - `TestStorage_VerifyDatasetStructure_MissingScreenshotsDir`: Tests verification failure for missing screenshots dir
+      - `TestStorage_GetDatasetInfo`: Tests retrieving dataset info from database
+      - `TestStorage_GetDatasetInfo_NotFound`: Tests error handling for non-existent dataset
+    - Created `user-vm-api/internal/dataset-storage/training_eligibility_test.go` with:
+      - `TestReceiver_TrainingEligibilityUpdate`: Tests training eligibility status update after dataset upload
+      - `TestReceiver_TrainingEligibilityUpdate_NotFound`: Tests error handling when camera not found
+  - Location: `edge/orchestrator/internal/dataset/*_test.go`, `user-vm-api/internal/dataset-storage/*_test.go`
+
+- **Substep 2.2.3.4.3**: Documentation updates
+  - **Status**: ✅ DONE
+  - **P0**: Update `docs/SCREENSHOT_API.md` with dataset sync endpoint details.
+  - **P0**: Document dataset storage structure on VM.
+  - **P0**: Add troubleshooting guide for sync failures.
+  - **Implementation**:
+    - Updated `POST /api/cameras/{camera_id}/dataset/sync` endpoint documentation with:
+      - Complete process flow (validation → packaging → upload → status update)
+      - Success response format including `dataset_id`
+      - Error responses (409 Not Ready, 503 Connection Unavailable, 500 Upload Failure)
+      - Archive contents description (metadata.json, manifest.json, screenshots/)
+      - Duplicate upload detection behavior
+      - Retry logic details
+    - Added "Dataset Storage Structure (VM)" section documenting:
+      - Directory hierarchy: `/app/data/datasets/{edge_id}/{camera_id}/{dataset_id}/`
+      - File structure (metadata.json, manifest.json, screenshots/)
+      - Database storage in `training_datasets` table
+      - Training eligibility status update mechanism
+    - Added "Troubleshooting Dataset Sync" section covering:
+      - 6 common issues with symptoms, causes, and solutions:
+        1. Dataset Not Ready (409 Conflict)
+        2. Connection Unavailable (503 Service Unavailable)
+        3. Upload Failure (500 Internal Server Error)
+        4. Duplicate Upload Detection
+        5. Archive Cleanup Failure
+        6. Training Eligibility Not Updated
+      - Debugging steps (logs, status checks, connectivity tests, database queries)
+      - Performance considerations (timeouts, bandwidth, retry logic, concurrency)
+  - Location: `docs/SCREENSHOT_API.md`, `docs/IMPLEMENTATION_PLAN_PHASE2.md`
+
+---
+
 ## Epic 2.3: Event Cache Service
 
 **Priority: P0**

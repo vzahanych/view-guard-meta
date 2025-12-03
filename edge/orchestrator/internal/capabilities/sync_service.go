@@ -2,6 +2,7 @@ package capabilities
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/camera"
@@ -220,6 +221,56 @@ func (s *SyncService) syncOnce(ctx context.Context) {
 	}
 
 	s.LogInfo("Capability sync sent", "cameras", len(req.Cameras))
+}
+
+// SyncCameraCapabilities syncs capabilities for a single camera to the VM
+// This is used when a dataset is uploaded to immediately update the VM with the latest status
+func (s *SyncService) SyncCameraCapabilities(ctx context.Context, cameraID string) error {
+	if !s.grpcClient.IsConnected() {
+		return fmt.Errorf("gRPC not connected")
+	}
+
+	controlClient := s.grpcClient.GetControlClient()
+	if controlClient == nil {
+		return fmt.Errorf("control client unavailable")
+	}
+
+	// Get camera
+	cam, err := s.cameraMgr.GetCamera(cameraID)
+	if err != nil {
+		return fmt.Errorf("failed to get camera: %w", err)
+	}
+
+	// Build dataset status for this camera
+	status := s.buildDatasetStatus(ctx, cam)
+	if status == nil {
+		return fmt.Errorf("failed to build dataset status")
+	}
+
+	// Update camera manager with latest status
+	s.cameraMgr.UpdateDatasetStatus(cameraID, status)
+
+	// Build sync request with single camera
+	req := &edgeproto.SyncCapabilitiesRequest{
+		SyncedAt: time.Now().UnixNano(),
+		Cameras:  []*edgeproto.CameraCapability{s.toProto(cam, status)},
+	}
+
+	// Call SyncCapabilities with timeout
+	callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	resp, err := controlClient.SyncCapabilities(callCtx, req)
+	if err != nil {
+		return fmt.Errorf("capability sync failed: %w", err)
+	}
+
+	if !resp.Success {
+		return fmt.Errorf("capability sync rejected: %s", resp.ErrorMessage)
+	}
+
+	s.LogInfo("Camera capability synced", "camera_id", cameraID)
+	return nil
 }
 
 func (s *SyncService) buildDatasetStatus(ctx context.Context, cam *camera.Camera) *camera.CameraDatasetStatus {

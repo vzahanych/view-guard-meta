@@ -59,6 +59,8 @@ type Server struct {
 	eventQueue         EventQueue         // Optional event queue for creating events
 	eventStorage       EventStorage       // Optional event storage for saving events
 	screenshotSvc      ScreenshotService  // Optional screenshot service for labeled screenshots
+	datasetSvc         DatasetService     // Optional dataset service for packaging and uploading datasets
+	capabilitySync     CapabilitySyncService // Optional capability sync service for VM sync
 	version            string             // Application version
 	startTime          time.Time          // Server start time for uptime calculation
 }
@@ -159,6 +161,26 @@ func (s *Server) SetTelemetryDependency(collector TelemetryCollector) {
 // SetScreenshotService sets dependency for screenshot management API
 func (s *Server) SetScreenshotService(svc ScreenshotService) {
 	s.screenshotSvc = svc
+}
+
+// DatasetService interface for managing dataset packaging and upload
+type DatasetService interface {
+	UploadDatasetForCamera(ctx context.Context, cameraID string, screenshotList []*screenshots.Screenshot) (string, error)
+}
+
+// CapabilitySyncService interface for syncing capabilities to VM
+type CapabilitySyncService interface {
+	SyncCameraCapabilities(ctx context.Context, cameraID string) error
+}
+
+// SetDatasetService sets dependency for dataset upload service
+func (s *Server) SetDatasetService(svc DatasetService) {
+	s.datasetSvc = svc
+}
+
+// SetCapabilitySyncService sets the capability sync service for VM sync
+func (s *Server) SetCapabilitySyncService(capabilitySync CapabilitySyncService) {
+	s.capabilitySync = capabilitySync
 }
 
 // Start starts the web server

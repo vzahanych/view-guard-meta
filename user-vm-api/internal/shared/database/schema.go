@@ -73,12 +73,14 @@ const (
 		label_counts TEXT, -- JSON: {"normal": 100, "threat": 50, ...}
 		total_images INTEGER NOT NULL DEFAULT 0,
 		status TEXT NOT NULL DEFAULT 'pending', -- pending, ready, training, archived
+		checksum TEXT, -- SHA-256 checksum of the dataset archive (for duplicate detection)
 		created_at INTEGER NOT NULL,
 		updated_at INTEGER NOT NULL,
 		FOREIGN KEY (edge_id) REFERENCES edges(edge_id)
 	);
 	CREATE INDEX IF NOT EXISTS idx_training_datasets_edge_id ON training_datasets(edge_id);
 	CREATE INDEX IF NOT EXISTS idx_training_datasets_status ON training_datasets(status);
+	CREATE INDEX IF NOT EXISTS idx_training_datasets_checksum ON training_datasets(checksum);
 	`
 
 	// CID Storage table - Filecoin/IPFS storage metadata (post-PoC)
@@ -129,13 +131,16 @@ const (
 		required_snapshot_count INTEGER NOT NULL DEFAULT 0,
 		snapshot_required INTEGER NOT NULL DEFAULT 0,
 		training_eligibility_status TEXT NOT NULL DEFAULT 'needs_snapshots', -- needs_snapshots, ready_for_training, training_in_progress
+		dataset_id TEXT, -- Links to training_datasets.dataset_id when dataset is uploaded
 		synced_at INTEGER NOT NULL,
 		updated_at INTEGER NOT NULL,
 		PRIMARY KEY (edge_id, camera_id),
-		FOREIGN KEY (edge_id) REFERENCES edges(edge_id)
+		FOREIGN KEY (edge_id) REFERENCES edges(edge_id),
+		FOREIGN KEY (dataset_id) REFERENCES training_datasets(dataset_id)
 	);
 	CREATE INDEX IF NOT EXISTS idx_edge_camera_status_edge_id ON edge_camera_status(edge_id);
 	CREATE INDEX IF NOT EXISTS idx_edge_camera_status_training_eligibility ON edge_camera_status(training_eligibility_status);
+	CREATE INDEX IF NOT EXISTS idx_edge_camera_status_dataset_id ON edge_camera_status(dataset_id);
 	`
 )
 
@@ -151,4 +156,3 @@ func AllTables() []string {
 		CreateEdgeCameraStatusTable,
 	}
 }
-

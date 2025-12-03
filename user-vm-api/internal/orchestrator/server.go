@@ -4,12 +4,13 @@ import (
 	"context"
 	"fmt"
 
+	datasetstorage "github.com/vzahanych/view-guard-meta/user-vm-api/internal/dataset-storage"
 	"github.com/vzahanych/view-guard-meta/user-vm-api/internal/shared/config"
 	"github.com/vzahanych/view-guard-meta/user-vm-api/internal/shared/database"
 	"github.com/vzahanych/view-guard-meta/user-vm-api/internal/shared/database/migrations"
 	"github.com/vzahanych/view-guard-meta/user-vm-api/internal/shared/logging"
 	"github.com/vzahanych/view-guard-meta/user-vm-api/internal/shared/service"
-	"github.com/vzahanych/view-guard-meta/user-vm-api/internal/tunnel-gateway"
+	tunnelgateway "github.com/vzahanych/view-guard-meta/user-vm-api/internal/tunnel-gateway"
 	"go.uber.org/zap"
 )
 
@@ -81,9 +82,20 @@ func (s *Server) Start(ctx context.Context) error {
 		s.manager.Register(edgeAPIServer)
 	}
 
+	// Register Dataset Storage service
+	var datasetReceiver *datasetstorage.Receiver
+	if s.config.UserVMAPI.APIGateway.Enabled {
+		datasetReceiver = datasetstorage.NewReceiver(s.config, s.logger, db, capStore, edgeAPIServer)
+		datasetReceiver.SetEventBus(eventBus)
+		s.logger.Info("Dataset receiver initialized")
+	}
+
 	// Register API Gateway when enabled
 	if s.config.UserVMAPI.APIGateway.Enabled {
 		apiServer := NewAPIServer(s.config, s.logger, capStore, edgeAPIServer)
+		if datasetReceiver != nil {
+			apiServer.SetDatasetReceiver(datasetReceiver)
+		}
 		s.manager.Register(apiServer)
 		s.logger.Info("API Gateway registered")
 	}
@@ -124,4 +136,3 @@ func (s *Server) Stop(ctx context.Context) error {
 func (s *Server) GetStatus() *service.ServiceStatus {
 	return s.manager.GetStatus()
 }
-

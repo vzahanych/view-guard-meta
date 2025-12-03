@@ -8,7 +8,7 @@ edge:
   wireguard:
     enabled: true
     config_path: "/etc/wireguard/wg0.conf"
-    kvm_endpoint: "user-vm-api"
+    kvm_endpoint: "http://10.0.0.1:8280"
 
   cameras:
     discovery:

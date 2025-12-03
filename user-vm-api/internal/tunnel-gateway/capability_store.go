@@ -16,8 +16,8 @@ import (
 type TrainingEligibilityStatus string
 
 const (
-	TrainingEligibilityNeedsSnapshots    TrainingEligibilityStatus = "needs_snapshots"
-	TrainingEligibilityReadyForTraining TrainingEligibilityStatus = "ready_for_training"
+	TrainingEligibilityNeedsSnapshots     TrainingEligibilityStatus = "needs_snapshots"
+	TrainingEligibilityReadyForTraining   TrainingEligibilityStatus = "ready_for_training"
 	TrainingEligibilityTrainingInProgress TrainingEligibilityStatus = "training_in_progress"
 )
 
@@ -77,9 +77,10 @@ func (s *CapabilityStore) UpsertCapabilities(ctx context.Context, edgeID string,
 		required_snapshot_count,
 		snapshot_required,
 		training_eligibility_status,
+		dataset_id,
 		synced_at,
 		updated_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(edge_id, camera_id) DO UPDATE SET
 		camera_name = excluded.camera_name,
 		camera_type = excluded.camera_type,
@@ -90,6 +91,7 @@ func (s *CapabilityStore) UpsertCapabilities(ctx context.Context, edgeID string,
 		required_snapshot_count = excluded.required_snapshot_count,
 		snapshot_required = excluded.snapshot_required,
 		training_eligibility_status = excluded.training_eligibility_status,
+		dataset_id = COALESCE(excluded.dataset_id, edge_camera_status.dataset_id),
 		synced_at = excluded.synced_at,
 		updated_at = excluded.updated_at
 	`
@@ -110,14 +112,15 @@ func (s *CapabilityStore) UpsertCapabilities(ctx context.Context, edgeID string,
 		// Detect state transition
 		if existed && oldStatus != newStatus {
 			stateTransitions = append(stateTransitions, StateTransition{
-				EdgeID:      edgeID,
-				CameraID:    cam.CameraId,
-				CameraName:  cam.Name,
-				OldStatus:   oldStatus,
-				NewStatus:   newStatus,
+				EdgeID:     edgeID,
+				CameraID:   cam.CameraId,
+				CameraName: cam.Name,
+				OldStatus:  oldStatus,
+				NewStatus:  newStatus,
 			})
 		}
 
+		// dataset_id is NULL for capability sync (only set when dataset is uploaded)
 		if _, err := tx.ExecContext(ctx, upsertSQL,
 			edgeID,
 			cam.CameraId,
@@ -130,6 +133,7 @@ func (s *CapabilityStore) UpsertCapabilities(ctx context.Context, edgeID string,
 			cam.RequiredSnapshotCount,
 			boolToInt(cam.SnapshotRequired),
 			string(newStatus),
+			nil, // dataset_id - set to NULL for capability sync
 			syncedAt.Unix(),
 			now,
 		); err != nil {
@@ -209,7 +213,7 @@ func (s *CapabilityStore) ListCameraStatuses(ctx context.Context, edgeID string)
 	const query = `
 	SELECT camera_id, camera_name, camera_type, camera_status, enabled,
 	       label_counts, labeled_snapshot_count, required_snapshot_count,
-	       snapshot_required, training_eligibility_status, synced_at, updated_at
+	       snapshot_required, training_eligibility_status, dataset_id, synced_at, updated_at
 	FROM edge_camera_status
 	WHERE edge_id = ?
 	ORDER BY camera_name
@@ -275,9 +279,10 @@ type EdgeCameraStatus struct {
 	Enabled                   bool
 	LabelCounts               map[string]uint32
 	LabeledSnapshotCount      uint32
-	RequiredSnapshotCount      uint32
+	RequiredSnapshotCount     uint32
 	SnapshotRequired          bool
-	TrainingEligibilityStatus  TrainingEligibilityStatus
+	TrainingEligibilityStatus TrainingEligibilityStatus
+	DatasetID                 string // Links to training_datasets.dataset_id
 	SyncedAt                  time.Time
 	UpdatedAt                 time.Time
 }
@@ -287,7 +292,7 @@ func (s *CapabilityStore) GetCameraStatus(ctx context.Context, edgeID, cameraID 
 	const query = `
 	SELECT camera_id, camera_name, camera_type, camera_status, enabled,
 	       label_counts, labeled_snapshot_count, required_snapshot_count,
-	       snapshot_required, training_eligibility_status, synced_at, updated_at
+	       snapshot_required, training_eligibility_status, dataset_id, synced_at, updated_at
 	FROM edge_camera_status
 	WHERE edge_id = ? AND camera_id = ?
 	`
@@ -296,6 +301,7 @@ func (s *CapabilityStore) GetCameraStatus(ctx context.Context, edgeID, cameraID 
 	var enabledInt, snapshotRequiredInt int
 	var labelCounts sql.NullString
 	var trainingEligibilityStatus string
+	var datasetID sql.NullString
 	var syncedAt, updatedAt int64
 
 	err := s.db.QueryRowContext(ctx, query, edgeID, cameraID).Scan(
@@ -309,6 +315,7 @@ func (s *CapabilityStore) GetCameraStatus(ctx context.Context, edgeID, cameraID 
 		&status.RequiredSnapshotCount,
 		&snapshotRequiredInt,
 		&trainingEligibilityStatus,
+		&datasetID,
 		&syncedAt,
 		&updatedAt,
 	)
@@ -322,6 +329,9 @@ func (s *CapabilityStore) GetCameraStatus(ctx context.Context, edgeID, cameraID 
 	status.Enabled = enabledInt == 1
 	status.SnapshotRequired = snapshotRequiredInt == 1
 	status.TrainingEligibilityStatus = TrainingEligibilityStatus(trainingEligibilityStatus)
+	if datasetID.Valid {
+		status.DatasetID = datasetID.String
+	}
 	status.SyncedAt = time.Unix(syncedAt, 0)
 	status.UpdatedAt = time.Unix(updatedAt, 0)
 
@@ -454,10 +464,68 @@ func (s *CapabilityStore) SetTrainingInProgress(ctx context.Context, edgeID, cam
 	return nil
 }
 
+// UpdateTrainingEligibility updates training eligibility status and dataset_id for a camera
+func (s *CapabilityStore) UpdateTrainingEligibility(ctx context.Context, edgeID string, cameraID string, datasetID string, status TrainingEligibilityStatus) error {
+	now := time.Now().Unix()
+
+	// Check if dataset_id column exists (for migration compatibility)
+	// For now, we'll try to update with dataset_id, and if it fails, update without it
+	query := `
+		UPDATE edge_camera_status
+		SET training_eligibility_status = ?,
+		    dataset_id = ?,
+		    updated_at = ?
+		WHERE edge_id = ? AND camera_id = ?
+	`
+
+	result, err := s.db.ExecContext(ctx, query, string(status), datasetID, now, edgeID, cameraID)
+	if err != nil {
+		// If column doesn't exist, try without dataset_id (for backward compatibility)
+		queryWithoutDatasetID := `
+			UPDATE edge_camera_status
+			SET training_eligibility_status = ?,
+			    updated_at = ?
+			WHERE edge_id = ? AND camera_id = ?
+		`
+		result, err = s.db.ExecContext(ctx, queryWithoutDatasetID, string(status), now, edgeID, cameraID)
+		if err != nil {
+			return fmt.Errorf("failed to update training eligibility: %w", err)
+		}
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected: %w", err)
+	}
+	if rowsAffected == 0 {
+		return fmt.Errorf("camera not found: edge_id=%s, camera_id=%s", edgeID, cameraID)
+	}
+
+	// Get old status and publish transition event
+	oldStatus, err := s.GetCameraStatus(ctx, edgeID, cameraID)
+	if err == nil && oldStatus.TrainingEligibilityStatus != status {
+		if s.eventBus != nil {
+			s.eventBus.Publish(service.Event{
+				Type:      "dataset.uploaded",
+				Timestamp: time.Now().Unix(),
+				Data: map[string]interface{}{
+					"edge_id":     edgeID,
+					"camera_id":   cameraID,
+					"camera_name": oldStatus.Name,
+					"dataset_id":  datasetID,
+					"old_status":  string(oldStatus.TrainingEligibilityStatus),
+					"new_status":  string(status),
+				},
+			})
+		}
+	}
+
+	return nil
+}
+
 func boolToInt(val bool) int {
 	if val {
 		return 1
 	}
 	return 0
 }
-

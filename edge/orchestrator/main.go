@@ -14,6 +14,7 @@ import (
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/camera"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/capabilities"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/config"
+	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/dataset"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/events"
 	grpcclient "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/grpc"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/health"
@@ -239,6 +240,12 @@ func main() {
 		}
 	}
 
+	// Register capability sync service first (reports camera dataset readiness to VM)
+	// This must be created before web server so we can pass it to web server
+	capabilitySync := capabilities.NewSyncService(cfg, cameraMgr, screenshotSvc, grpcClient, log)
+	svcMgr.Register(capabilitySync)
+	log.Info("Capability sync service registered")
+
 	// Register web server if enabled
 	if cfg.Edge.Web.Enabled {
 		webServer := web.NewServer(&cfg.Edge.Web, log)
@@ -260,14 +267,23 @@ func main() {
 			webServer.SetScreenshotService(screenshotSvc)
 		}
 
+		// Initialize dataset service for packaging and uploading datasets to VM
+		// Use hostname as edge ID (can be configured later)
+		edgeID := "edge-local" // Default for PoC
+		if hostname, err := os.Hostname(); err == nil && hostname != "" {
+			edgeID = hostname
+		}
+		datasetSvc := dataset.NewService(cfg, log, edgeID)
+		webServer.SetDatasetService(datasetSvc)
+		log.Info("Dataset service initialized", "edge_id", edgeID)
+
+		// Set capability sync service on web server for manual sync triggers
+		webServer.SetCapabilitySyncService(capabilitySync)
+		log.Info("Capability sync service wired to web server")
+
 		svcMgr.Register(webServer)
 		log.Info("Web server registered", "host", cfg.Edge.Web.Host, "port", cfg.Edge.Web.Port)
 	}
-
-	// Register capability sync service (reports camera dataset readiness to VM)
-	capabilitySync := capabilities.NewSyncService(cfg, cameraMgr, screenshotSvc, grpcClient, log)
-	svcMgr.Register(capabilitySync)
-	log.Info("Capability sync service registered")
 
 	// Create health check manager
 	healthMgr := health.NewManager(log, svcMgr)

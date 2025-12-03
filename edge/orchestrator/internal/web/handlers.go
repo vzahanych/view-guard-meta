@@ -2303,13 +2303,68 @@ func (s *Server) handleSyncDatasetStatus(c *gin.Context) {
 	}
 
 	// At this point, local Edge dataset is ready (>= required normal snapshots).
-	// TODO (Phase 2.2.2.8.3 follow-up): invoke VM API / gRPC to update edge_camera_status.training_eligibility_status.
+	// Step 1: Sync capabilities to VM first (update VM with current dataset status)
+	if s.capabilitySync != nil {
+		s.logger.Info("Syncing camera capabilities to VM", "camera_id", cameraID)
+		if err := s.capabilitySync.SyncCameraCapabilities(c.Request.Context(), cameraID); err != nil {
+			s.logger.Warn("Failed to sync capabilities before upload (continuing anyway)", "error", err, "camera_id", cameraID)
+			// Continue with upload even if capability sync fails (non-blocking)
+		}
+	}
+
+	// Step 2: Package and upload dataset to VM
+	if s.datasetSvc == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error": "Dataset upload service not available",
+		})
+		return
+	}
+
+	// Get all screenshots for this camera
+	filters := &screenshots.ScreenshotFilters{
+		CameraID: cameraID,
+	}
+	screenshotList, err := s.screenshotSvc.ListScreenshots(c.Request.Context(), filters)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": fmt.Sprintf("Failed to list screenshots for upload: %v", err),
+		})
+		return
+	}
+
+	if len(screenshotList) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "No screenshots found for camera",
+		})
+		return
+	}
+
+	// Upload dataset to VM
+	datasetID, err := s.datasetSvc.UploadDatasetForCamera(c.Request.Context(), cameraID, screenshotList)
+	if err != nil {
+		s.logger.Error("Dataset upload failed", "error", err, "camera_id", cameraID)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":     fmt.Sprintf("Failed to upload dataset: %v", err),
+			"camera_id": cameraID,
+		})
+		return
+	}
+
+	// Step 3: Sync capabilities again after successful upload (to update VM with dataset_id)
+	if s.capabilitySync != nil {
+		s.logger.Info("Syncing camera capabilities after upload", "camera_id", cameraID, "dataset_id", datasetID)
+		if err := s.capabilitySync.SyncCameraCapabilities(c.Request.Context(), cameraID); err != nil {
+			s.logger.Warn("Failed to sync capabilities after upload", "error", err, "camera_id", cameraID)
+			// Non-blocking: upload succeeded, capability sync failure is logged but doesn't fail the request
+		}
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"camera_id":      cameraID,
-		"dataset_synced": false, // VM push not yet wired
+		"dataset_synced": true,
+		"dataset_id":     datasetID,
 		"dataset_status": buildDatasetStatusResponse(cameraID, datasetStatus)["dataset_status"],
-		"message":        "Local dataset is ready; VM sync endpoint not yet implemented",
+		"message":        "Dataset uploaded successfully to VM",
 	})
 }
 

@@ -1229,7 +1229,7 @@ export default function Screenshots() {
                       )}
                       {isComplete && (
                         <p className="text-xs text-green-600 mt-1 font-medium">
-                          ✓ Ready for training
+                          ✓ Ready for training {syncing && <span className="text-blue-600">(Syncing...)</span>}
                         </p>
                       )}
                     </div>
@@ -1245,22 +1245,55 @@ export default function Screenshots() {
                           if (!selectedCameraId || !isComplete || syncing) return
                           try {
                             setSyncing(true)
-                            await api.post(`/cameras/${selectedCameraId}/dataset/sync`)
-                            showToast('Dataset status synced successfully.', 'success')
+                            setError(null)
+                            showToast('Syncing dataset to VM...', 'info')
+                            
+                            const response = await api.post<{
+                              camera_id: string
+                              dataset_synced: boolean
+                              dataset_id?: string
+                              message?: string
+                            }>(`/cameras/${selectedCameraId}/dataset/sync`)
+                            
+                            if (response.dataset_synced) {
+                              showToast(
+                                response.dataset_id
+                                  ? `Dataset synced successfully! Dataset ID: ${response.dataset_id}`
+                                  : 'Dataset synced successfully to VM',
+                                'success'
+                              )
+                              // Refresh cameras to get updated status
+                              setRefreshingStatus(true)
+                              try {
+                                await fetchCameras()
+                              } finally {
+                                setRefreshingStatus(false)
+                              }
+                            } else {
+                              throw new Error('Sync completed but dataset_synced is false')
+                            }
                           } catch (err) {
                             const message =
                               err instanceof Error ? err.message : 'Failed to sync dataset status'
                             setError(message)
-                            showToast(message, 'error')
+                            
+                            // Show appropriate error message based on error type
+                            if (message.includes('Connection') || message.includes('network') || message.includes('unavailable')) {
+                              showToast('Connection unavailable. Please check WireGuard tunnel.', 'error')
+                            } else if (message.includes('409') || message.includes('Conflict')) {
+                              showToast('Dataset not ready for sync. More snapshots needed.', 'warning')
+                            } else {
+                              showToast(message, 'error')
+                            }
                           } finally {
                             setSyncing(false)
                           }
                         }}
                         disabled={!isComplete || syncing}
-                        aria-label="Sync dataset status"
+                        aria-label={syncing ? 'Syncing dataset...' : 'Sync dataset status'}
                       >
-                        <RefreshCw className="w-3 h-3 mr-1" />
-                        Sync Dataset Status
+                        <RefreshCw className={`w-3 h-3 mr-1 ${syncing ? 'animate-spin' : ''}`} />
+                        {syncing ? 'Uploading dataset...' : 'Sync Dataset Status'}
                       </Button>
                     </div>
 

@@ -93,7 +93,7 @@ services:
       - EDGE_STORAGE_CLIPS_DIR=/app/data/clips
       - EDGE_STORAGE_SNAPSHOTS_DIR=/app/data/snapshots
       - EDGE_WIREGUARD_ENABLED=true
-      - EDGE_WIREGUARD_KVM_ENDPOINT=user-vm-api
+      - EDGE_WIREGUARD_KVM_ENDPOINT=http://10.0.0.1:8280
       - EDGE_TELEMETRY_ENABLED=true
       - EDGE_WEB_ENABLED=true
       - EDGE_WEB_HOST=0.0.0.0
