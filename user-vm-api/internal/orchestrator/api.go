@@ -9,10 +9,13 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
+	modelcatalog "github.com/vzahanych/view-guard-meta/user-vm-api/internal/model-catalog"
 	"github.com/vzahanych/view-guard-meta/user-vm-api/internal/shared/config"
 	"github.com/vzahanych/view-guard-meta/user-vm-api/internal/shared/logging"
+	"github.com/vzahanych/view-guard-meta/user-vm-api/internal/shared/storage"
 	tunnelgateway "github.com/vzahanych/view-guard-meta/user-vm-api/internal/tunnel-gateway"
 	"go.uber.org/zap"
 )
@@ -24,6 +27,8 @@ type APIServer struct {
 	capStore        *tunnelgateway.CapabilityStore
 	edgeAPIServer   *tunnelgateway.EdgeAPIServer
 	datasetReceiver DatasetReceiver
+	modelCatalog    *modelcatalog.ModelCatalog
+	modelStorage    *storage.ModelStorage
 	server          *http.Server
 }
 
@@ -47,6 +52,16 @@ func (s *APIServer) SetDatasetReceiver(receiver DatasetReceiver) {
 	s.datasetReceiver = receiver
 }
 
+// SetModelCatalog sets the model catalog service
+func (s *APIServer) SetModelCatalog(catalog *modelcatalog.ModelCatalog) {
+	s.modelCatalog = catalog
+}
+
+// SetModelStorage sets the model storage service
+func (s *APIServer) SetModelStorage(modelStorage *storage.ModelStorage) {
+	s.modelStorage = modelStorage
+}
+
 // Name returns the service name
 func (s *APIServer) Name() string {
 	return "api-gateway"
@@ -62,6 +77,12 @@ func (s *APIServer) Start(ctx context.Context) error {
 
 	// Dataset upload endpoint
 	mux.HandleFunc("/api/datasets/upload", s.handleDatasetUpload)
+
+	// Model management endpoints
+	// Register more specific routes first to avoid path matching issues
+	mux.HandleFunc("/api/models/baseline", s.handleBaselineModels)
+	mux.HandleFunc("/api/models", s.handleModels)
+	mux.HandleFunc("/api/models/", s.handleModelByID)
 
 	// Health check
 	mux.HandleFunc("/health", s.handleHealth)
@@ -423,4 +444,333 @@ type DatasetResponse struct {
 	LabelCounts               map[string]uint32 `json:"label_counts"`
 	SyncedAt                  time.Time         `json:"synced_at"`
 	UpdatedAt                 time.Time         `json:"updated_at"`
+}
+
+// handleModels handles model management endpoints
+// GET /api/models - List all models (with optional query parameters)
+// POST /api/models - Upload new model
+func (s *APIServer) handleModels(w http.ResponseWriter, r *http.Request) {
+	if s.modelCatalog == nil || s.modelStorage == nil {
+		http.Error(w, "Model catalog not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		s.handleListModels(w, r)
+	case http.MethodPost:
+		s.handleUploadModel(w, r)
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleListModels handles GET /api/models (with optional query parameters)
+func (s *APIServer) handleListModels(w http.ResponseWriter, r *http.Request) {
+	// Parse query parameters
+	cameraID := r.URL.Query().Get("camera_id")
+	datasetID := r.URL.Query().Get("dataset_id")
+	status := r.URL.Query().Get("status")
+
+	var entries []*modelcatalog.ModelEntry
+	var err error
+
+	// Filter by query parameters
+	if cameraID != "" {
+		entries, err = s.modelCatalog.GetModelsByCamera(cameraID)
+	} else if datasetID != "" {
+		entries, err = s.modelCatalog.GetModelsByDataset(datasetID)
+	} else if status != "" {
+		entries, err = s.modelCatalog.GetModelsByStatus(modelcatalog.ModelStatus(status))
+	} else {
+		// List all models
+		entries, err = s.modelCatalog.ListModels()
+	}
+
+	if err != nil {
+		s.logger.Error("Failed to list models", zap.Error(err))
+		http.Error(w, fmt.Sprintf("Failed to list models: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(entries); err != nil {
+		s.logger.Error("Failed to encode models response", zap.Error(err))
+		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+		return
+	}
+}
+
+// handleBaselineModels handles GET /api/models/baseline
+func (s *APIServer) handleBaselineModels(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if s.modelCatalog == nil {
+		http.Error(w, "Model catalog not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Parse query parameter for model type
+	modelType := r.URL.Query().Get("model_type")
+
+	var entries []*modelcatalog.ModelEntry
+	var err error
+
+	if modelType != "" {
+		entries, err = s.modelCatalog.GetBaselineModelsByType(modelType)
+	} else {
+		entries, err = s.modelCatalog.GetBaselineModels()
+	}
+
+	if err != nil {
+		s.logger.Error("Failed to get baseline models", zap.Error(err))
+		http.Error(w, fmt.Sprintf("Failed to get baseline models: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(entries); err != nil {
+		s.logger.Error("Failed to encode baseline models response", zap.Error(err))
+		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+		return
+	}
+}
+
+// handleModelByID handles model operations by ID
+// GET /api/models/{model_id} - Get model metadata
+// GET /api/models/{model_id}/file - Download model file
+// PUT /api/models/{model_id} - Update model metadata
+// DELETE /api/models/{model_id} - Delete model
+func (s *APIServer) handleModelByID(w http.ResponseWriter, r *http.Request) {
+	if s.modelCatalog == nil || s.modelStorage == nil {
+		http.Error(w, "Model catalog not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Extract model ID from path: /api/models/{model_id} or /api/models/{model_id}/file
+	path := strings.TrimPrefix(r.URL.Path, "/api/models/")
+	parts := strings.Split(path, "/")
+	modelID := parts[0]
+
+	if modelID == "" {
+		http.Error(w, "Model ID is required", http.StatusBadRequest)
+		return
+	}
+
+	// Check if this is a file download request
+	if len(parts) > 1 && parts[1] == "file" {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		s.handleDownloadModelFile(w, r, modelID)
+		return
+	}
+
+	// Handle other operations by method
+	switch r.Method {
+	case http.MethodGet:
+		s.handleGetModel(w, r, modelID)
+	case http.MethodPut:
+		s.handleUpdateModel(w, r, modelID)
+	case http.MethodDelete:
+		s.handleDeleteModel(w, r, modelID)
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleGetModel handles GET /api/models/{model_id}
+func (s *APIServer) handleGetModel(w http.ResponseWriter, r *http.Request, modelID string) {
+	entry, err := s.modelCatalog.GetModel(modelID)
+	if err != nil {
+		s.logger.Error("Failed to get model", zap.String("model_id", modelID), zap.Error(err))
+		http.Error(w, fmt.Sprintf("Failed to get model: %v", err), http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(entry); err != nil {
+		s.logger.Error("Failed to encode model response", zap.Error(err))
+		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+		return
+	}
+}
+
+// handleDownloadModelFile handles GET /api/models/{model_id}/file
+func (s *APIServer) handleDownloadModelFile(w http.ResponseWriter, r *http.Request, modelID string) {
+	// Read model file
+	modelData, err := s.modelStorage.ReadModel(modelID)
+	if err != nil {
+		s.logger.Error("Failed to read model file", zap.String("model_id", modelID), zap.Error(err))
+		http.Error(w, fmt.Sprintf("Failed to read model file: %v", err), http.StatusNotFound)
+		return
+	}
+
+	// Get model metadata to determine file name
+	metadata, err := s.modelStorage.GetMetadata(modelID)
+	if err != nil {
+		s.logger.Error("Failed to get model metadata", zap.String("model_id", modelID), zap.Error(err))
+		http.Error(w, "Failed to get model metadata", http.StatusInternalServerError)
+		return
+	}
+
+	// Set content type and headers
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", metadata.ONNXFile))
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(modelData)))
+
+	// Write model file
+	if _, err := w.Write(modelData); err != nil {
+		s.logger.Error("Failed to write model file", zap.Error(err))
+		return
+	}
+}
+
+// handleUploadModel handles POST /api/models (upload new model from training pipeline)
+func (s *APIServer) handleUploadModel(w http.ResponseWriter, r *http.Request) {
+	// Authenticate Edge from request (same as dataset upload)
+	edgeID, err := s.authenticateEdgeFromRequest(r)
+	if err != nil {
+		s.logger.Warn("Model upload authentication failed", zap.Error(err))
+		http.Error(w, fmt.Sprintf("Authentication failed: %v", err), http.StatusUnauthorized)
+		return
+	}
+
+	// Parse multipart form (max 50MB for model files)
+	if err := r.ParseMultipartForm(50 << 20); err != nil {
+		s.logger.Error("Failed to parse multipart form", zap.Error(err))
+		http.Error(w, fmt.Sprintf("Failed to parse form: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	// Get model_id from form (required)
+	modelID := r.FormValue("model_id")
+	if modelID == "" {
+		http.Error(w, "model_id is required", http.StatusBadRequest)
+		return
+	}
+
+	// Get metadata JSON from form
+	metadataJSON := r.FormValue("metadata")
+	if metadataJSON == "" {
+		http.Error(w, "metadata is required", http.StatusBadRequest)
+		return
+	}
+
+	// Parse metadata
+	var metadata storage.ModelMetadata
+	if err := json.Unmarshal([]byte(metadataJSON), &metadata); err != nil {
+		s.logger.Error("Failed to parse metadata", zap.Error(err))
+		http.Error(w, fmt.Sprintf("Failed to parse metadata: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	// Get model file from form
+	file, _, err := r.FormFile("model")
+	if err != nil {
+		s.logger.Error("Failed to get model file from form", zap.Error(err))
+		http.Error(w, fmt.Sprintf("Failed to get model file: %v", err), http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	// Read model data
+	modelData, err := io.ReadAll(file)
+	if err != nil {
+		s.logger.Error("Failed to read model file", zap.Error(err))
+		http.Error(w, "Failed to read model file", http.StatusInternalServerError)
+		return
+	}
+
+	s.logger.Info("Model upload received",
+		zap.String("edge_id", edgeID),
+		zap.String("model_id", modelID),
+		zap.String("model_type", metadata.ModelType),
+		zap.Int("size", len(modelData)),
+	)
+
+	// Store model
+	if err := s.modelStorage.StoreModel(modelID, modelData, &metadata); err != nil {
+		s.logger.Error("Failed to store model", zap.Error(err))
+		http.Error(w, fmt.Sprintf("Failed to store model: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Register model in catalog
+	if err := s.modelCatalog.RegisterModel(modelID, &metadata); err != nil {
+		s.logger.Warn("Failed to register model in catalog", zap.Error(err))
+		// Don't fail the upload, just log the warning
+	}
+
+	// Return success response
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"model_id": modelID,
+		"status":   "success",
+		"message":  "Model uploaded successfully",
+	})
+}
+
+// handleUpdateModel handles PUT /api/models/{model_id}
+func (s *APIServer) handleUpdateModel(w http.ResponseWriter, r *http.Request, modelID string) {
+	// Authenticate Edge from request
+	_, err := s.authenticateEdgeFromRequest(r)
+	if err != nil {
+		s.logger.Warn("Model update authentication failed", zap.Error(err))
+		http.Error(w, fmt.Sprintf("Authentication failed: %v", err), http.StatusUnauthorized)
+		return
+	}
+
+	// Parse request body
+	var metadata storage.ModelMetadata
+	if err := json.NewDecoder(r.Body).Decode(&metadata); err != nil {
+		s.logger.Error("Failed to decode metadata", zap.Error(err))
+		http.Error(w, fmt.Sprintf("Failed to decode metadata: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	// Update metadata
+	if err := s.modelStorage.UpdateMetadata(modelID, &metadata); err != nil {
+		s.logger.Error("Failed to update model metadata", zap.Error(err))
+		http.Error(w, fmt.Sprintf("Failed to update model metadata: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Return success response
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"model_id": modelID,
+		"status":   "success",
+		"message":  "Model metadata updated successfully",
+	})
+}
+
+// handleDeleteModel handles DELETE /api/models/{model_id}
+func (s *APIServer) handleDeleteModel(w http.ResponseWriter, r *http.Request, modelID string) {
+	// Authenticate Edge from request
+	_, err := s.authenticateEdgeFromRequest(r)
+	if err != nil {
+		s.logger.Warn("Model delete authentication failed", zap.Error(err))
+		http.Error(w, fmt.Sprintf("Authentication failed: %v", err), http.StatusUnauthorized)
+		return
+	}
+
+	// Delete model
+	if err := s.modelStorage.DeleteModel(modelID); err != nil {
+		s.logger.Error("Failed to delete model", zap.Error(err))
+		http.Error(w, fmt.Sprintf("Failed to delete model: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Return success response
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"model_id": modelID,
+		"status":   "success",
+		"message":  "Model deleted successfully",
+	})
 }

@@ -3,13 +3,16 @@ package orchestrator
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 
 	datasetstorage "github.com/vzahanych/view-guard-meta/user-vm-api/internal/dataset-storage"
+	modelcatalog "github.com/vzahanych/view-guard-meta/user-vm-api/internal/model-catalog"
 	"github.com/vzahanych/view-guard-meta/user-vm-api/internal/shared/config"
 	"github.com/vzahanych/view-guard-meta/user-vm-api/internal/shared/database"
 	"github.com/vzahanych/view-guard-meta/user-vm-api/internal/shared/database/migrations"
 	"github.com/vzahanych/view-guard-meta/user-vm-api/internal/shared/logging"
 	"github.com/vzahanych/view-guard-meta/user-vm-api/internal/shared/service"
+	"github.com/vzahanych/view-guard-meta/user-vm-api/internal/shared/storage"
 	tunnelgateway "github.com/vzahanych/view-guard-meta/user-vm-api/internal/tunnel-gateway"
 	"go.uber.org/zap"
 )
@@ -96,6 +99,27 @@ func (s *Server) Start(ctx context.Context) error {
 		if datasetReceiver != nil {
 			apiServer.SetDatasetReceiver(datasetReceiver)
 		}
+
+		// Initialize Model Storage and Catalog
+		modelsDir := filepath.Join(s.config.UserVMAPI.Orchestrator.DataDir, "models")
+		modelStorage, err := storage.NewModelStorage(modelsDir)
+		if err != nil {
+			s.logger.Error("Failed to create model storage", zap.Error(err))
+			return fmt.Errorf("failed to create model storage: %w", err)
+		}
+		apiServer.SetModelStorage(modelStorage)
+
+		modelCatalog, err := modelcatalog.NewModelCatalog(modelStorage, modelsDir)
+		if err != nil {
+			s.logger.Error("Failed to create model catalog", zap.Error(err))
+			return fmt.Errorf("failed to create model catalog: %w", err)
+		}
+		// Scan models on initialization
+		if err := modelCatalog.ScanModels(); err != nil {
+			s.logger.Warn("Failed to scan models on initialization", zap.Error(err))
+		}
+		apiServer.SetModelCatalog(modelCatalog)
+
 		s.manager.Register(apiServer)
 		s.logger.Info("API Gateway registered")
 	}

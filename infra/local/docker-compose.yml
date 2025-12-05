@@ -136,7 +136,7 @@ services:
       python-ai-service:
         condition: service_started
     ports:
-      - "8280:8080" # Stream relay / API Gateway port
+      - "8280:8280" # Stream relay / API Gateway port (service listens on 8280 inside container)
       - "51820:51820/udp" # WireGuard server port
       - "9090:9090" # gRPC port (if exposed separately)
     environment:
@@ -169,7 +169,7 @@ services:
       - view-guard-edge
     restart: unless-stopped
     healthcheck:
-      test: [ "CMD", "wget", "--spider", "-q", "http://localhost:8080/health" ]
+      test: [ "CMD", "wget", "--spider", "-q", "http://localhost:8280/health" ]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -249,6 +249,40 @@ services:
       "
     networks:
       - view-guard-edge
+
+  # =========================
+  # Model Management Integration Tests
+  # =========================
+  model-management-tests:
+    image: alpine:latest
+    container_name: view-guard-model-management-tests
+    working_dir: /workspace/infra/local
+    depends_on:
+      user-vm-api:
+        condition: service_healthy
+      python-ai-service:
+        condition: service_started
+      minio:
+        condition: service_healthy
+    volumes:
+      - ../..:/workspace
+    # Install dependencies and run model management integration tests
+    # Test script is adapted to work inside container using service names
+    command: >
+      sh -c "
+        apk add --no-cache bash curl &&
+        chmod +x /workspace/infra/local/test-model-management.sh &&
+        cd /workspace/infra/local &&
+        # Override VM_API to use service name with correct port (8280 inside container)
+        VM_API=http://user-vm-api:8280 \
+        IN_CONTAINER=true \
+        /workspace/infra/local/test-model-management.sh
+      "
+    networks:
+      - view-guard-edge
+    environment:
+      - VM_API=http://user-vm-api:8280
+      - IN_CONTAINER=true
 
 networks:
   view-guard-edge:

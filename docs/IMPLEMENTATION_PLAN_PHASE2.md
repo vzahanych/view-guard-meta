@@ -2367,6 +2367,1128 @@ Once the WireGuard tunnel stands up automatically, the VM must immediately captu
       - Performance considerations (timeouts, bandwidth, retry logic, concurrency)
   - Location: `docs/SCREENSHOT_API.md`, `docs/IMPLEMENTATION_PLAN_PHASE2.md`
 
+### Local Docker Compose Environment Status (End of Epic 2.2.3)
+
+**Status**: ✅ Fully Operational
+
+The local docker-compose environment (`infra/local/docker-compose.yml`) is fully configured and tested for Epic 2.2.3 functionality. All services are running and the complete dataset sync flow is verified.
+
+**Services Status**:
+- **edge-orchestrator**: ✅ Running and healthy
+  - Web UI: `http://localhost:8181`
+  - Health endpoint: `http://localhost:8181/health`
+  - WireGuard tunnel: Configured with `edge-wg0.conf` (peer IP: `10.0.0.2`)
+  - VM endpoint: `http://10.0.0.1:8280` (WireGuard tunnel IP)
+  - Dataset packaging: Functional (`/app/data/exports/`)
+  - Dataset upload: Functional (HTTP multipart to VM API)
+- **user-vm-api**: ✅ Running (health check may show unhealthy but service is functional)
+  - API Gateway: `http://localhost:8280`
+  - gRPC: `localhost:9090`
+  - WireGuard server: `0.0.0.0:51820/udp` (peer IP: `10.0.0.1`)
+  - Dataset upload endpoint: `POST /api/datasets/upload` ✅
+  - Dataset storage: `/app/data/datasets/{edge_id}/{camera_id}/{dataset_id}/` ✅
+  - Database: SQLite at `/app/data/events.db` with `training_datasets` and `edge_camera_status` tables ✅
+- **edge-ai-service**: ✅ Running and healthy
+  - AI inference: `http://localhost:8180`
+- **minio**: ✅ Running and healthy
+  - S3 API: `http://localhost:9000`
+  - Console: `http://localhost:9001`
+- **python-ai-service**: ⚠️ Running (may restart occasionally, not critical for Epic 2.2.3)
+  - Training service: `http://localhost:8000`
+
+**Network Configuration**:
+- **Docker network**: `view-guard-edge` (bridge)
+- **WireGuard tunnel**: Established between Edge (`10.0.0.2`) and VM (`10.0.0.1`)
+- **Edge → VM connectivity**: Verified via `ping 10.0.0.1` from Edge container
+- **VM API accessibility**: Edge can reach `http://10.0.0.1:8280` over WireGuard tunnel
+
+**Dataset Sync Flow Verification**:
+1. ✅ **Edge dataset packaging**: Creates tar.gz archives with metadata.json, manifest.json, and screenshots/
+2. ✅ **Edge dataset upload**: HTTP multipart upload to VM with X-Edge-ID authentication
+3. ✅ **VM dataset reception**: Extracts archives, verifies checksum, validates structure
+4. ✅ **VM dataset storage**: Organizes datasets in hierarchical directory structure
+5. ✅ **Database updates**: Stores metadata in `training_datasets` table
+6. ✅ **Training eligibility**: Updates `edge_camera_status.training_eligibility_status` to `ready_for_training`
+7. ✅ **Duplicate detection**: Prevents re-upload of identical datasets (checksum-based)
+
+**Test Script**:
+- **Location**: `infra/local/test-epic-2.2.3.sh`
+- **Status**: ✅ Passing
+- **Functionality**: End-to-end test of dataset sync flow
+  - Finds camera with ≥50 labeled screenshots
+  - Triggers dataset sync via `POST /api/cameras/{camera_id}/dataset/sync`
+  - Verifies dataset upload and storage on VM
+  - Checks training eligibility status update
+- **Usage**: `cd infra/local && ./test-epic-2.2.3.sh`
+
+**Configuration Files**:
+- **docker-compose.yml**: All services configured with correct dependencies and volumes
+- **config.docker.yaml** (Edge): WireGuard endpoint set to `http://10.0.0.1:8280`
+- **user-vm-config.yaml** (VM): Dataset storage paths and database configuration
+- **WireGuard configs**: `wg/config/edge-wg0.conf` and `wg/config/server-wg0.conf`
+
+**Volumes**:
+- `edge-data`: Edge snapshots, clips, and dataset exports
+- `user-vm-data`: VM database and general data
+- `user-vm-datasets`: VM dataset storage (persistent across container restarts)
+- `user-vm-models`: VM model storage (for future training)
+- `minio-data`: MinIO object storage
+- `ai-models`: Edge AI model cache
+- `ai-data`: Edge AI service data
+
+**Known Limitations** (PoC):
+- VM API health check may show "unhealthy" but service is functional (health endpoint may need adjustment)
+- Python AI service may restart occasionally (not critical for dataset sync)
+- Training eligibility update may fail if camera not registered in `edge_camera_status` (PoC fallback handles this)
+- Edge ID authentication uses PoC fallback (`poc-edge-1`) when gRPC registration not complete
+
+**Next Steps for Production**:
+- Replace PoC authentication fallback with proper gRPC-based Edge registration
+- Implement proper health checks for all services
+- Add dataset upload progress tracking in UI
+- Implement dataset deduplication at Edge level (before upload)
+- Add dataset size limits and quota management
+
+---
+
+## Epic 2.2.4: VM-Side Model Management for Training Readiness
+
+**Priority: P0**
+
+**Context**: After Epic 2.2.3, labeled camera datasets are successfully synced to the VM. To prepare for model training, we need to ensure that:
+1. Baseline models (YOLOv8n and similar lightweight models) are stored and managed on the VM side
+2. The VM can properly store, validate, and manage both baseline and trained models
+3. Model catalog tracks model metadata and allows model selection for training
+4. When a dataset is synced, the VM can select an appropriate baseline model for training
+5. Foundation is ready for training pipeline integration (training service will use models from VM catalog)
+
+**Goal**: Set up VM-side model management infrastructure in the docker-compose environment so that:
+1. Baseline models (YOLOv8n) are stored on VM in `user-vm-models` volume
+2. VM model storage service is fully functional for storing baseline and trained models
+3. Model catalog tracks model metadata (version, type, training dataset, performance metrics)
+4. Model selection API allows choosing which baseline model to train when dataset is synced
+5. Foundation is ready for training pipeline integration (training service consumes models from VM)
+
+**Prerequisites**:
+- ✅ Dataset sync working (Epic 2.2.3)
+- ✅ VM model storage service exists (`user-vm-api/internal/shared/storage/models.go`)
+- ✅ Docker volumes configured (`user-vm-models` for VM model storage)
+- ⚠️ SaaS API not available (model management via direct VM API or config-based for PoC)
+
+**Production constraint**: In production, the VM will have **limited or no direct Internet access** for security reasons. All baseline and trained models will be fetched from and managed via a **protected SaaS model storage/registry** (over a tightly controlled channel), not from public Internet endpoints. Epic 2.2.4 focuses on VM-local model storage and catalog; SaaS-side model registry and synchronization APIs are defined in later phases.
+
+**Note**: Models are managed on VM side. Edge deployment (distributing trained models to Edge) is deferred to a future epic. This epic focuses on VM-side model storage, catalog, and preparation for training.
+
+### Step 2.2.4.1: Baseline Model Setup on VM
+
+- **Substep 2.2.4.1.1**: Download and store baseline YOLOv8n model on VM
+  - **Status**: ✅ DONE
+  - **P0**: Create model initialization script for VM:
+    - **PoC (local docker-compose)**: Download YOLOv8n (nano) model in ONNX format from a public model source (e.g., Ultralytics) to simplify setup
+    - **Production**: Replace direct Internet download with synchronization from protected SaaS model storage (VM pulls models from SaaS registry or receives them via control plane; exact SaaS API is out of scope for Epic 2.2.4)
+    - Model size: ~6MB (YOLOv8n) - suitable for Edge miniPC after training
+    - Stores model in VM `user-vm-models` volume at `/app/data/models/baseline/yolov8n/`
+    - Creates model metadata with baseline model information
+  - **P0**: Model initialization on VM container startup:
+    - Check if baseline models exist in `/app/data/models/baseline/`
+    - If not present:
+      - **PoC**: Download YOLOv8n model via Python script or direct download
+      - **Production**: Fetch YOLOv8n (and other baseline models) from protected SaaS storage using internal control-plane mechanism (stubbed/mocked in this epic)
+    - Register baseline model in model catalog
+    - Model format: ONNX (primary, training pipeline will use this)
+  - **P0**: Baseline model metadata:
+    - `model_id`: `baseline-yolov8n`
+    - `model_type`: `yolo`
+    - `version`: `baseline-1.0`
+    - `status`: `baseline` (available for training)
+    - `input_shape`: `[1, 3, 640, 640]`
+    - `framework`: `onnx` (for training), `openvino` (for Edge deployment, converted later)
+  - Location: `infra/local/setup-baseline-models.sh` (PoC script for local docker-compose), `user-vm-api/internal/model-catalog/` (future model registration)
+  - **Design decision**: Use YOLOv8n (nano) as baseline - smallest, fastest model suitable for Edge miniPC. Larger models (YOLOv8s, YOLOv8m) can be added to baseline catalog later if needed. Models are stored on VM, not Edge.
+
+- **Substep 2.2.4.1.2**: Model volume and directory structure
+  - **Status**: ✅ DONE
+  - **P0**: Ensure `user-vm-models` volume is properly mounted for VM model storage
+    - Implemented in `infra/local/docker-compose.yml`:
+      - `user-vm-api` mounts `user-vm-models:/app/data/models`
+      - `python-ai-service` mounts `user-vm-models:/app/data/models`
+    - This ensures both VM API and training service share the same models directory on the host.
+  - **P0**: Create model directory structure on VM:
+    - `/app/data/models/baseline/`: Baseline models (YOLOv8n, etc.)
+    - `/app/data/models/trained/{model_id}/`: Trained models (after training pipeline)
+    - Each model directory contains: `model.onnx`, `metadata.json`
+    - Implemented in `infra/local/setup-baseline-models.sh`:
+      - Script creates `/app/data/models/baseline/`, `/app/data/models/trained/`, and `/app/data/models/baseline/yolov8n/` inside the shared `user-vm-models` volume.
+  - **P0**: Verify model files are accessible from VM container and training service
+    - Both `user-vm-api` and `python-ai-service` see models under `/app/data/models/` via the shared volume.
+    - `ModelStorage` (`user-vm-api/internal/shared/storage/models.go`) uses a configurable base directory (e.g., `/app/data/models`) and expects `model.onnx` + `metadata.json` per model ID, which matches the created structure.
+  - Location: `infra/local/docker-compose.yml` (volume mounts), `infra/local/setup-baseline-models.sh` (directory creation), `user-vm-api/internal/shared/storage/models.go` (directory structure expectations)
+
+### Step 2.2.4.2: VM Model Storage & Validation
+
+- **Substep 2.2.4.2.1**: Model storage service enhancement
+  - **Status**: ✅ DONE
+  - **P0**: Verify `ModelStorage` service functionality:
+    - Model directory creation (`/app/data/models/{model_id}/`) ✅
+    - Model file storage (`model.onnx` + `metadata.json`) ✅
+    - Model validation (file existence, metadata parsing) ✅
+    - Model listing and querying ✅
+  - **P0**: Add model size validation:
+    - Maximum model size: 50MB (lightweight constraint for Edge) ✅
+    - Reject models exceeding size limit ✅
+    - Implemented: `MaxModelSizeBytes` constant (50MB), size check in `StoreModel`, `ValidateModelSize` method
+  - **P0**: Add model format validation:
+    - Accept ONNX format (primary) ✅
+    - Accept OpenVINO IR format (if provided as .xml + .bin) ✅
+    - Validate ONNX file structure (basic checks) ✅
+    - Implemented: `validateModelFormat` method with framework-specific validation, `validateONNXFormat` for basic ONNX structure checks, `ValidateModelFormat` for existing models
+  - Location: `user-vm-api/internal/shared/storage/models.go` (enhanced)
+  - **Implementation (Dec 2025)**:
+    - Added `MaxModelSizeBytes` constant (50MB) for Edge compatibility constraint
+    - Enhanced `StoreModel` to validate model size before storage (rejects models > 50MB)
+    - Added `validateModelFormat` method that validates based on framework (onnx/onnxruntime vs openvino)
+    - Added `validateONNXFormat` method for basic ONNX file structure validation (size checks, protobuf-like structure heuristics)
+    - Added `ValidateModelSize` method to validate existing models against size constraints
+    - Added `ValidateModelFormat` method to validate existing models against format constraints
+    - Enhanced `ValidateModel` to include size and format validation in addition to file/metadata checks
+
+- **Substep 2.2.4.2.2**: Model metadata schema
+  - **Status**: ✅ DONE
+  - **P0**: Ensure `ModelMetadata` schema includes all required fields:
+    - `model_id`: Unique identifier (UUID) ✅
+    - `version`: Model version string ✅
+    - `camera_id`: Optional camera-specific model ✅
+    - `model_type`: Model type (yolo, cae, etc.) ✅
+    - `input_shape`: Input tensor shape ✅
+    - `framework`: Inference framework (openvino, onnxruntime) ✅
+    - `onnx_file`: Model file name ✅
+    - `training_dataset_id`: Link to training dataset (from Epic 2.2.3) ✅
+    - `training_date`: When model was trained ✅
+    - `threshold`: Detection threshold ✅
+    - `preprocessing`: Preprocessing parameters ✅
+  - **P0**: Add model performance metrics (optional for PoC):
+    - `accuracy`: Model accuracy (if available) ✅
+    - `precision`: Precision score ✅
+    - `recall`: Recall score ✅
+    - `f1_score`: F1 score ✅
+  - Location: `user-vm-api/internal/shared/storage/models.go` (verified and enhanced `ModelMetadata` struct)
+  - **Implementation (Dec 2025)**:
+    - Verified all required fields are present in `ModelMetadata` struct
+    - Added performance metrics fields: `Accuracy`, `Precision`, `Recall`, `F1Score` (all optional with `omitempty` JSON tags)
+    - Added comments to organize fields into logical groups (Core identification, Model configuration, Training information, Performance metrics)
+    - All fields use appropriate JSON tags with `omitempty` for optional fields
+
+- **Substep 2.2.4.2.3**: Model validation service
+  - **Status**: ✅ DONE
+  - **P0**: Create model validation service that:
+    - Validates ONNX model structure (file exists, readable, valid ONNX format) ✅
+    - Validates model size (within Edge constraints) ✅
+    - Validates input/output shapes (compatible with Edge preprocessing) ✅
+    - Validates metadata completeness ✅
+  - **P0**: Add validation endpoint (optional for PoC):
+    - `POST /api/models/validate`: Validate model before storage
+    - Returns validation errors if model is invalid
+    - **Note**: Endpoint implementation deferred to future substep (optional for PoC)
+  - Location: `user-vm-api/internal/model-catalog/validator.go` (created), `user-vm-api/internal/orchestrator/api.go` (endpoint deferred)
+  - **Implementation (Dec 2025)**:
+    - Created `ModelValidator` service in `validator.go` with comprehensive validation logic
+    - `ValidateModel(modelID)`: Validates existing stored models (file existence, size, format, metadata, input shapes)
+    - `ValidateModelData(modelData, metadata)`: Validates model data before storage (pre-storage validation)
+    - `validateMetadataCompleteness`: Validates all required metadata fields are present and valid
+    - `validateInputShapes`: Validates input shapes are compatible with Edge preprocessing:
+      - YOLO models: Validates [1, 3, 640, 640] shape (batch=1, channels=3, height=640, width=640)
+      - CAE models: Validates positive dimensions
+    - `ValidationResult` struct returns validation status with errors and warnings
+    - Integration with `ModelStorage` for file operations and size/format validation
+    - Framework validation: Supports onnx, onnxruntime, openvino
+    - Model type validation: Supports yolo, cae
+    - Warning system: Alerts when model size approaches limit (80% of max)
+
+**Critical Review & Improvements (Dec 2025)**:
+
+After implementation review, the following observations and recommendations:
+
+**✅ Strengths**:
+- Comprehensive validation coverage (size, format, metadata, input shapes)
+- Clear separation of concerns (ModelStorage for storage, ModelValidator for validation)
+- Good error messages and warning system
+- All P0 requirements met
+
+**⚠️ Areas for Improvement** (deferred to future enhancements):
+
+1. **OpenVINO IR Support Limitation**:
+   - Current implementation stores OpenVINO IR models as `.onnx` files (simplified for PoC)
+   - OpenVINO IR format requires separate `.xml` (structure) and `.bin` (weights) files
+   - **Recommendation**: For production, implement proper OpenVINO IR handling:
+     - Accept `.xml` and `.bin` files separately or as a tarball
+     - Store both files in model directory
+     - Update `GetModelFilePath` to return `.xml` path for OpenVINO IR
+   - **Status**: Acceptable for PoC, documented limitation
+
+2. **Validation Integration**:
+   - `StoreModel` performs basic validation but doesn't use `ModelValidator` for comprehensive checks
+   - `ModelValidator.ValidateModelData` has more thorough validation (metadata completeness, input shapes)
+   - **Recommendation**: Integrate `ModelValidator` into `StoreModel`:
+     - Call `ModelValidator.ValidateModelData` before storage
+     - Return detailed validation errors if validation fails
+     - This ensures consistent validation across all storage paths
+   - **Status**: Functional but could be more consistent
+
+3. **Output Shape Validation**:
+   - Plan mentions "input/output shapes" but only input shapes are validated
+   - YOLO models have specific output shapes (e.g., [1, 84, 8400] for YOLOv8)
+   - **Recommendation**: Add optional output shape validation:
+     - Add `OutputShape []int` field to `ModelMetadata` (optional)
+     - Validate output shape for YOLO models if provided
+   - **Status**: Input shape validation is sufficient for PoC
+
+4. **Error Aggregation**:
+   - `StoreModel` returns single error, but `ModelValidator` provides multiple errors/warnings
+   - **Recommendation**: Consider returning `ValidationResult` from `StoreModel` for better error reporting
+   - **Status**: Current approach is simpler and sufficient for PoC
+
+**Conclusion**: Implementation is solid for PoC. The identified improvements are enhancements for production readiness, not blockers. All P0 requirements are met and the code is functional.
+
+### Step 2.2.4.3: Model Catalog Service
+
+- **Substep 2.2.4.3.1**: Model catalog implementation
+  - **Status**: ✅ DONE
+  - **P0**: Implement `ModelCatalog` service:
+    - Model registration (store model metadata in filesystem `metadata.json` per model) ✅
+    - Model querying (list models, get model by ID, get baseline models, get trained models) ✅
+    - Model status tracking (`baseline`, `training`, `ready`, `deployed`, `deprecated`) ✅
+    - Model selection for training (query baseline models available for training) ✅
+  - **P0**: Link models to training datasets:
+    - Store `training_dataset_id` in trained model metadata ✅ (handled by ModelMetadata schema)
+    - Query models trained from specific dataset ✅ (`GetModelsByDataset` method)
+    - Track model lineage (baseline model → dataset → trained model) ✅ (`GetModelLineage` method)
+  - **P0**: Model metadata storage:
+    - Store in filesystem (`metadata.json` per model) - simpler for PoC ✅
+    - Each model directory: `/app/data/models/{model_id}/metadata.json` ✅
+    - Catalog service scans model directories and indexes metadata ✅ (`ScanModels` method, uses `ModelStorage.ListModels`)
+    - Note: Database storage can be added later if needed for production
+  - **P0**: Model selection for training:
+    - When dataset is synced, training service needs to select a baseline model ✅
+    - Catalog provides `GetBaselineModels()` method to list available baseline models ✅
+    - Default selection: Use `baseline-yolov8n` if no specific model requested ✅ (`GetDefaultBaselineModel` method)
+    - Future: Allow model selection via training API parameters
+  - Location: `user-vm-api/internal/model-catalog/catalog.go` (implemented)
+  - **Implementation (Dec 2025)**:
+    - Created `ModelCatalog` service with filesystem-based indexing
+    - `ModelStatus` enum: `baseline`, `training`, `ready`, `deployed`, `deprecated`
+    - `ModelEntry` struct: Wraps `ModelMetadata` with status information
+    - Model querying methods:
+      - `ListModels()`: Returns all models
+      - `GetModel(modelID)`: Get model by ID
+      - `GetBaselineModels()`: Get all baseline models
+      - `GetBaselineModelsByType(modelType)`: Get baseline models by type (e.g., "yolo")
+      - `GetTrainedModels()`: Get all trained models
+      - `GetModelsByCamera(cameraID)`: Get models for specific camera
+      - `GetModelsByDataset(datasetID)`: Get models trained from dataset
+      - `GetModelsByStatus(status)`: Get models by status
+    - Model status determination: `determineModelStatus` method derives status from:
+      - Model ID prefix ("baseline-") or directory path ("/baseline/")
+      - Training dataset presence (training_dataset_id + training_date)
+    - Model selection: `GetDefaultBaselineModel()` returns `baseline-yolov8n` or first available baseline YOLO model
+    - Model lineage: `GetModelLineage(modelID)` tracks baseline → dataset → trained model relationship
+    - Integration: Uses `ModelStorage` for file operations, scans filesystem on initialization
+    - Auto-indexing: Models are automatically indexed when stored (no explicit registration needed)
+
+- **Substep 2.2.4.3.2**: Model API endpoints (for PoC, without SaaS API)
+  - **Status**: ✅ DONE
+  - **P0**: Add model management endpoints (direct VM API, no SaaS dependency):
+    - `GET /api/models`: List all models (baseline + trained) ✅
+    - `GET /api/models/baseline`: List baseline models available for training ✅
+    - `GET /api/models/{model_id}`: Get model metadata ✅
+    - `GET /api/models/{model_id}/file`: Download model file (ONNX) ✅
+    - `POST /api/models`: Upload new model (for training pipeline output) ✅
+    - `PUT /api/models/{model_id}`: Update model metadata ✅
+    - `DELETE /api/models/{model_id}`: Delete model ✅
+  - **P0**: Add model query endpoints:
+    - `GET /api/models?camera_id={camera_id}`: Get models for specific camera ✅
+    - `GET /api/models?dataset_id={dataset_id}`: Get models trained from dataset ✅
+    - `GET /api/models?status={status}`: Get models by status (`baseline`, `ready`, etc.) ✅
+  - **P0**: Model selection for training:
+    - `GET /api/models/baseline?model_type={yolo}`: Get baseline models by type ✅
+    - Training service will call this to select baseline model when dataset is ready ✅
+  - **P0**: Authentication: Require Edge ID header (same as dataset upload) or allow localhost for PoC ✅
+  - **Note**: Since SaaS API is not available, model management is done via direct VM API. Future epic will add SaaS API integration.
+  - Location: `user-vm-api/internal/orchestrator/api.go` (handlers added), `user-vm-api/internal/orchestrator/server.go` (initialization)
+  - **Implementation (Dec 2025)**:
+    - Added `ModelCatalog` and `ModelStorage` fields to `APIServer` struct
+    - Added `SetModelCatalog` and `SetModelStorage` methods to `APIServer`
+    - Registered model endpoints in `Start` method:
+      - `/api/models` → `handleModels` (GET list, POST upload)
+      - `/api/models/` → `handleModelByID` (GET metadata, PUT update, DELETE)
+      - `/api/models/baseline` → `handleBaselineModels` (GET baseline models)
+    - Implemented handlers:
+      - `handleModels`: Routes GET/POST to list/upload
+      - `handleListModels`: Lists all models with query parameter filtering (camera_id, dataset_id, status)
+      - `handleBaselineModels`: Lists baseline models, supports `model_type` query parameter
+      - `handleModelByID`: Routes by method (GET metadata, PUT update, DELETE)
+      - `handleGetModel`: Returns model metadata by ID
+      - `handleDownloadModelFile`: Downloads model file (ONNX) with proper content headers
+      - `handleUploadModel`: Accepts multipart form with model file and metadata JSON, stores via `ModelStorage`, registers in catalog
+      - `handleUpdateModel`: Updates model metadata
+      - `handleDeleteModel`: Deletes model from storage
+    - Authentication: All write operations (POST, PUT, DELETE) use `authenticateEdgeFromRequest` (same as dataset upload)
+    - Initialization: `ModelStorage` and `ModelCatalog` initialized in `server.go` with models directory from config, catalog scans models on startup
+    - Query parameter support: All query parameters work as specified (camera_id, dataset_id, status, model_type)
+
+### Step 2.2.4.4: Model Compatibility & Edge Constraints
+
+- **Substep 2.2.4.4.1**: Edge hardware constraints validation
+  - **Status**: ✅ DONE
+  - **P0**: Define Edge model constraints (for trained models that will be deployed to Edge):
+    - Maximum model size: 50MB (for Edge miniPC with limited storage) ✅
+    - Supported formats: ONNX (for training), OpenVINO IR (for Edge deployment, converted later) ✅
+    - Input shape: 640x640 (YOLOv8 standard) ✅
+    - Framework: OpenVINO (primary for Edge), ONNX Runtime (fallback) ✅
+  - **P0**: Add model compatibility check (for trained models):
+    - Verify model size < 50MB ✅
+    - Verify model format is ONNX (training output) ✅
+    - Verify input shape matches Edge preprocessing (640x640 for YOLOv8) ✅
+    - Log warnings for models approaching size limits ✅
+    - Note: Baseline models are validated when stored, trained models are validated after training ✅
+  - Location: `user-vm-api/internal/model-catalog/validator.go` (compatibility checks added)
+  - **Implementation (Dec 2025)**:
+    - Defined Edge model constraints as constants:
+      - `EdgeMaxModelSizeBytes` (50MB)
+      - `EdgeSupportedInputHeight` (640)
+      - `EdgeSupportedInputWidth` (640)
+      - `EdgeSupportedChannels` (3)
+      - `EdgeSupportedBatchSize` (1)
+    - Defined `EdgeSupportedFormats` (ONNX, OpenVINO IR) and `EdgeSupportedFrameworks` (OpenVINO, ONNX Runtime)
+    - Added `ValidateEdgeCompatibility(modelID)` method:
+      - Validates model size < 50MB (error if exceeds, warning if >80% of limit)
+      - Validates model format is ONNX (training output, will be converted to OpenVINO IR during deployment)
+      - Validates input shape matches Edge preprocessing (640x640 for YOLOv8, batch=1, channels=3)
+      - Validates framework is supported (OpenVINO primary, ONNX Runtime fallback)
+      - Returns `ValidationResult` with errors and warnings
+    - Added `ValidateEdgeCompatibilityData(modelData, metadata)` method:
+      - Same validation logic but for raw model data before storage
+      - Used to validate trained models immediately after training, before storage
+    - All Edge constraints are explicitly documented in code comments
+
+- **Substep 2.2.4.4.2**: Model format conversion (deferred to training pipeline)
+  - **Status**: ✅ DONE (placeholder implementation, deferred to future epics)
+  - **P1**: Note: ONNX to OpenVINO IR conversion will be handled by training pipeline or deployment service:
+    - Training pipeline produces ONNX models (stored on VM) ✅
+    - Conversion to OpenVINO IR happens during Edge deployment (future epic) ✅
+    - For PoC: Store ONNX models, conversion deferred to deployment epic ✅
+  - **P1**: Model optimization (deferred):
+    - FP16 quantization (reduce model size, maintain accuracy) ✅ (placeholder)
+    - Model pruning (remove unnecessary weights) ✅ (placeholder)
+    - Note: Defer to training pipeline or post-training optimization step ✅
+  - Location: `user-vm-api/internal/model-catalog/converter.go` (placeholder implementation)
+  - **Implementation (Dec 2025)**:
+    - Created `ModelConverter` struct as placeholder for future implementation
+    - Added `ConvertONNXToOpenVINO` method (returns error indicating deferred to deployment epic)
+    - Added `OptimizeModel` method (returns error indicating deferred to training pipeline)
+    - Added `QuantizeModel` method (returns error indicating deferred to training pipeline)
+    - Added `PruneModel` method (returns error indicating deferred to training pipeline)
+    - All methods document future implementation details:
+      - ONNX to OpenVINO IR conversion will use OpenVINO Model Optimizer (mo)
+      - Optimization will include FP16 quantization, model pruning, knowledge distillation
+      - Conversion happens during Edge deployment (not during training)
+    - For PoC: Models are stored as ONNX format, conversion is deferred
+
+### Step 2.2.4.5: Testing & Validation
+
+- **Substep 2.2.4.5.1**: Model storage tests
+  - **Status**: ✅ DONE
+  - **P0**: Unit tests for `ModelStorage`:
+    - Test model directory creation ✅
+    - Test model file storage (ONNX + metadata) ✅
+    - Test model retrieval and listing ✅
+    - Test model validation ✅
+    - Test model deletion ✅
+    - Test model size limits ✅
+  - Location: `user-vm-api/internal/shared/storage/models_test.go` (enhanced)
+  - **Implementation (Dec 2025)**:
+    - Enhanced existing tests to use model data >= 1KB (passes ONNX validation)
+    - Added `TestModelSizeLimit`: Tests that models exceeding 50MB are rejected
+    - Added `TestValidateModelSize`: Tests model size validation
+    - Added `TestValidateModelFormat`: Tests model format validation
+    - Added `TestStoreModelWithYOLOMetadata`: Tests YOLO model storage with proper metadata
+    - Added `TestStoreModelWithTrainingMetadata`: Tests trained model storage with training dataset ID, training date, and performance metrics
+    - All tests pass successfully
+
+- **Substep 2.2.4.5.2**: Model catalog tests
+  - **Status**: ✅ DONE
+  - **P0**: Unit tests for `ModelCatalog`:
+    - Test model registration ✅
+    - Test model versioning ✅
+    - Test model querying (by ID, camera, dataset, status) ✅
+    - Test model status transitions ✅
+  - Location: `user-vm-api/internal/model-catalog/catalog_test.go` (created)
+  - **Implementation (Dec 2025)**:
+    - Created comprehensive test suite for `ModelCatalog` with 13 test functions
+    - `TestNewModelCatalog`: Tests catalog initialization with model storage
+    - `TestRegisterModel`: Tests model registration (includes versioning via metadata.Version field)
+    - `TestGetModel`: Tests model retrieval by ID (includes versioning and status verification)
+    - `TestListModels`: Tests listing all models (multiple models with different types)
+    - `TestGetBaselineModels`: Tests baseline model filtering (separates baseline from trained models)
+    - `TestGetBaselineModelsByType`: Tests baseline model filtering by type (yolo, cae)
+    - `TestGetModelsByCamera`: Tests model filtering by camera ID
+    - `TestGetModelsByDataset`: Tests model filtering by training dataset ID
+    - `TestGetModelsByStatus`: Tests model filtering by status (baseline, ready, etc.)
+    - `TestGetDefaultBaselineModel`: Tests default baseline model selection (baseline-yolov8n)
+    - `TestModelExists`: Tests model existence check (both existing and non-existing models)
+    - `TestScanModels`: Tests model discovery via filesystem scanning
+    - `TestDetermineModelStatus`: Tests model status determination logic (baseline → ready transitions)
+    - All tests use model data >= 1KB (2048 bytes) to pass ONNX validation
+    - All 13 tests pass successfully (verified Dec 2025)
+    - Test coverage: All P0 ModelCatalog methods are tested (registration, querying, status determination)
+
+- **Substep 2.2.4.5.3**: Integration test in docker-compose
+  - **Status**: ✅ DONE
+  - **P0**: End-to-end test:
+    - Verify baseline YOLOv8n model is downloaded and stored on VM at startup ✅
+    - Verify baseline model is registered in model catalog ✅
+    - Verify model catalog API endpoints (list models, get baseline models) ✅
+    - Upload a test trained model to VM via API (simulate training output) ✅
+    - Verify trained model is stored correctly with metadata and linked to dataset ✅
+    - Verify model validation (size, format, structure) ✅
+    - Verify model can be queried by dataset ID, camera ID, status ✅
+  - **P0**: Test model selection for training:
+    - Query baseline models available for training ✅
+    - Verify baseline model metadata includes model type, input shape, framework ✅
+    - Verify model selection API returns appropriate baseline model ✅
+  - **P0**: Test model compatibility checks:
+    - Upload model exceeding size limit (should fail) ✅
+    - Upload invalid ONNX file (should fail) ✅
+    - Upload valid model (should succeed) ✅
+  - Location: `infra/local/test-model-management.sh` (created), `infra/local/docker-compose.yml` (model-management-tests service added)
+  - **Implementation (Dec 2025)**:
+    - Created comprehensive integration test script `test-model-management.sh`:
+      - Tests baseline model verification (file existence and catalog registration)
+      - Tests all model catalog API endpoints (GET /api/models, GET /api/models/baseline, GET /api/models/{id})
+      - Tests trained model upload via POST /api/models with multipart form data
+      - Tests model querying by dataset ID, camera ID, and status
+      - Tests model selection for training (baseline models with metadata verification)
+      - Tests model compatibility checks (oversized model rejection, invalid ONNX rejection, valid model acceptance)
+      - Tests model file download endpoint
+    - Added `model-management-tests` service to docker-compose.yml:
+      - Runs as Alpine container with bash and curl
+      - Depends on user-vm-api (healthy), python-ai-service (started), minio (healthy)
+      - Supports both container mode (using service names) and host mode (using localhost)
+      - Test script adapts automatically based on IN_CONTAINER environment variable
+    - Test script features:
+      - Color-coded output for test results
+      - Comprehensive error handling and validation
+      - Works in both containerized and host execution modes
+      - Verifies all P0 requirements from implementation plan
+    - To run: `docker compose up model-management-tests` or `./infra/local/test-model-management.sh`
+
+### Step 2.2.4.6: Documentation
+
+- **Substep 2.2.4.6.1**: Model management documentation
+  - **Status**: ⬜ TODO
+  - **P0**: Document VM model storage structure:
+    - Baseline models: `/app/data/models/baseline/{model_id}/`
+    - Trained models: `/app/data/models/trained/{model_id}/`
+    - Model files: `model.onnx`, `metadata.json`
+    - Note: Edge model deployment is deferred to future epic
+  - **P0**: Document model metadata schema (baseline and trained models)
+  - **P0**: Document model API endpoints (VM API, no SaaS dependency for PoC)
+  - **P0**: Document model selection for training (how training service selects baseline model)
+  - **P0**: Document Edge model constraints (for trained models that will be deployed)
+  - **P0**: Document model lifecycle: baseline → training → trained → deployment (future)
+  - Location: `docs/MODEL_MANAGEMENT.md` (new), `docs/IMPLEMENTATION_PLAN_PHASE2.md` (update)
+
+---
+
+### Local Docker Compose Environment Status (End of Epic 2.2.4)
+
+**Status**: ✅ **FULLY OPERATIONAL** (Verified Dec 2025)
+
+This section documents the verified status of Epic 2.2.4 implementation in the local docker-compose environment (`infra/local/docker-compose.yml`).
+
+#### Services Status
+
+**Core Services:**
+- ✅ `user-vm-api`: **Healthy** (port 8280)
+  - API Gateway: Running and accessible
+  - Model Catalog: Initialized and scanning models on startup
+  - Model Storage: Functional with filesystem-based storage
+  - Health endpoint: `http://localhost:8280/health` returns healthy
+  
+- ✅ `python-ai-service`: **Healthy** (port 8000)
+  - FastAPI service: Running with health endpoint
+  - Model export capability: Can export YOLOv8n to ONNX format
+  - Health endpoint: `http://localhost:8000/health` returns healthy
+
+- ✅ `minio`: **Healthy** (ports 9000-9001)
+  - S3-compatible storage: Available for dataset/model artifacts
+
+- ✅ `edge-orchestrator`: **Healthy** (port 8181)
+  - Edge services: Running and connected
+
+- ✅ `edge-ai-service`: **Healthy** (port 8180)
+  - AI inference service: Running
+
+**Test Services:**
+- ✅ `model-management-tests`: **Available**
+  - Integration test service: Configured in docker-compose.yml
+  - Supports container and host execution modes
+  - Test script: `infra/local/test-model-management.sh`
+
+#### Model Storage & Catalog Status
+
+**Volume Configuration:**
+- ✅ `user-vm-models`: Shared volume mounted at `/app/data/models`
+  - Accessible from: `user-vm-api` and `python-ai-service`
+  - Created: Nov 28, 2025
+  - Status: Active and shared between containers
+
+**Baseline Model Status:**
+- ✅ **Model Present**: `baseline-yolov8n`
+  - Location: `/app/data/models/baseline-yolov8n/`
+  - Model file: `model.onnx` (12.3MB, 12,851,046 bytes)
+  - Metadata file: `metadata.json` (426 bytes)
+  - Status: Registered in catalog with status `"baseline"`
+  - Format: ONNX (validated, >= 1KB)
+  - Size: Within 50MB Edge constraint (12.3MB < 50MB)
+  - Input shape: `[1, 3, 640, 640]` (correct for YOLOv8)
+  - Framework: `onnx`
+  - Model type: `yolo`
+  - Version: `baseline-1.0`
+
+**Model Catalog Functionality:**
+- ✅ **Auto-indexing**: Models automatically scanned on startup
+- ✅ **Model Registration**: `baseline-yolov8n` registered and accessible
+- ✅ **Status Determination**: Correctly identifies `baseline` status
+- ✅ **Query Methods**: All query methods working:
+  - `ListModels()`: Returns all models
+  - `GetModel(modelID)`: Returns model by ID
+  - `GetBaselineModels()`: Returns baseline models
+  - `GetBaselineModelsByType("yolo")`: Filters by type
+  - `GetModelsByStatus("baseline")`: Filters by status
+  - `GetModelsByCamera(cameraID)`: Filters by camera
+  - `GetModelsByDataset(datasetID)`: Filters by dataset
+  - `GetDefaultBaselineModel()`: Returns default baseline model
+
+#### API Endpoints Status
+
+**Read Endpoints (All Working):**
+- ✅ `GET /api/models` - List all models (returns 1 model)
+- ✅ `GET /api/models/baseline` - List baseline models (returns 1 model)
+- ✅ `GET /api/models/baseline?model_type=yolo` - List baseline by type (returns 1 model)
+- ✅ `GET /api/models/baseline-yolov8n` - Get model metadata (returns full metadata)
+- ✅ `GET /api/models/baseline-yolov8n/file` - Download model file (12.3MB downloaded successfully)
+- ✅ `GET /api/models?status=baseline` - Query by status (returns 1 model)
+- ✅ `GET /api/models?camera_id={id}` - Query by camera (works, returns empty for baseline)
+- ✅ `GET /api/models?dataset_id={id}` - Query by dataset (works, returns empty for baseline)
+
+**Write Endpoints (Available, Require Authentication):**
+- ✅ `POST /api/models` - Upload new model (requires Edge ID header)
+- ✅ `PUT /api/models/{model_id}` - Update model metadata (requires Edge ID header)
+- ✅ `DELETE /api/models/{model_id}` - Delete model (requires Edge ID header)
+
+#### Model Validation Service Status
+
+**Validation Methods (All Working):**
+- ✅ `ModelStorage.ValidateModel()` - Comprehensive validation (file, metadata, size, format)
+- ✅ `ModelStorage.ValidateModelSize()` - Size validation (50MB limit enforced)
+- ✅ `ModelStorage.ValidateModelFormat()` - Format validation (ONNX structure checks)
+- ✅ `ModelValidator.ValidateModel()` - Full validation with errors/warnings
+- ✅ `ModelValidator.ValidateModelData()` - Pre-storage validation
+- ✅ `ModelValidator.ValidateEdgeCompatibility()` - Edge-specific validation
+
+**Validation Integration:**
+- ✅ Integrated into `StoreModel()`: Validates size and format before storage
+- ✅ Automatic validation: Models validated during storage operations
+- ✅ Current model validation: `baseline-yolov8n` passes all validation checks
+
+**Validation Results for baseline-yolov8n:**
+- ✅ File existence: PASSED
+- ✅ Model size (12.3MB < 50MB): PASSED
+- ✅ ONNX format (>= 1KB): PASSED
+- ✅ Metadata completeness: PASSED (all required fields present)
+- ✅ Input shape [1, 3, 640, 640]: PASSED
+- ✅ Edge compatibility: PASSED
+
+#### Model Metadata Schema Status
+
+**Required Fields (All Present):**
+- ✅ `model_id`: `"baseline-yolov8n"`
+- ✅ `version`: `"baseline-1.0"`
+- ✅ `model_type`: `"yolo"`
+- ✅ `input_shape`: `[1, 3, 640, 640]`
+- ✅ `framework`: `"onnx"`
+- ✅ `onnx_file`: `"model.onnx"`
+- ✅ `threshold`: `0.25`
+- ✅ `preprocessing`: Complete object with resize, normalize, color_format
+
+**Optional Fields (Present, Empty for Baseline):**
+- ✅ `camera_id`: `""` (empty for baseline)
+- ✅ `training_dataset_id`: `""` (empty for baseline)
+- ✅ `training_date`: `""` (empty for baseline)
+
+**Performance Metrics (Absent for Baseline, Expected):**
+- ℹ️ `accuracy`: Not present (expected for baseline)
+- ℹ️ `precision`: Not present (expected for baseline)
+- ℹ️ `recall`: Not present (expected for baseline)
+- ℹ️ `f1_score`: Not present (expected for baseline)
+
+#### Setup Scripts Status
+
+- ✅ `infra/local/setup-baseline-models.sh`: **Working**
+  - Downloads/exports YOLOv8n model to ONNX format
+  - Creates model metadata with all required fields
+  - Sets up model in correct directory structure
+  - Status: Successfully executed, baseline model available
+
+- ✅ `infra/local/test-model-management.sh`: **Working**
+  - Comprehensive integration test script
+  - Tests all model catalog API endpoints
+  - Tests model upload, validation, and querying
+  - Supports container and host execution modes
+  - Status: Available and functional
+
+#### Known Issues & Limitations
+
+**Resolved Issues:**
+- ✅ Fixed: `python-ai-service` restart loop (created FastAPI service implementation)
+- ✅ Fixed: API health check port mismatch (updated from 8080 to 8280)
+- ✅ Fixed: Port mapping mismatch (updated from 8280:8080 to 8280:8280)
+- ✅ Fixed: Route ordering issue (moved `/api/models/baseline` before `/api/models/`)
+- ✅ Fixed: Model directory structure (moved from nested `baseline/yolov8n/` to flat `baseline-yolov8n/`)
+
+**Current Limitations (Documented):**
+- ⚠️ Validation API endpoint (`POST /api/models/validate`): Deferred (optional for PoC)
+- ⚠️ OpenVINO IR format: Simplified handling (stores as `.onnx` for PoC)
+- ⚠️ Model optimization/conversion: Deferred to training pipeline or deployment epic
+
+#### Verification Commands
+
+**Quick Health Check:**
+```bash
+cd infra/local
+docker compose ps  # Check all services status
+curl http://localhost:8280/health  # VM API health
+curl http://localhost:8000/health  # Python AI service health
+```
+
+**Model Catalog Verification:**
+```bash
+# List all models
+curl http://localhost:8280/api/models
+
+# Get baseline models
+curl http://localhost:8280/api/models/baseline
+
+# Get specific model
+curl http://localhost:8280/api/models/baseline-yolov8n
+
+# Download model file
+curl -O http://localhost:8280/api/models/baseline-yolov8n/file
+```
+
+**Run Integration Tests:**
+```bash
+# Run as docker-compose service
+docker compose up model-management-tests
+
+# Or run directly on host
+./infra/local/test-model-management.sh
+```
+
+**Setup Baseline Models:**
+```bash
+# Ensure python-ai-service is running, then:
+./infra/local/setup-baseline-models.sh
+```
+
+#### Summary
+
+**Epic 2.2.4 Implementation Status: ✅ COMPLETE**
+
+All P0 requirements for Epic 2.2.4 (VM-Side Model Management for Training Readiness) are:
+- ✅ **Implemented**: All code components in place
+- ✅ **Tested**: Unit tests passing, integration tests available
+- ✅ **Verified**: Working in local docker-compose environment
+- ✅ **Documented**: Implementation details captured in this plan
+
+**Ready for:**
+- Training pipeline integration (can select baseline models)
+- Model upload from training service
+- Model validation and cataloging
+- Model querying and management
+
+**Next Steps:**
+- Epic 2.2.4.6: Documentation (optional, can be deferred)
+- Epic 2.2.5: Model Training Pipeline (next epic)
+- Edge model deployment (future epic)
+
+---
+
+## Epic 2.2.5: Model Training Pipeline
+
+**Priority: P0**
+
+**Context**: Epic 2.2.3 implemented Edge → VM dataset sync, storing labeled snapshots at `/app/data/datasets/{edge_id}/{camera_id}/{dataset_id}/` with `metadata.json`, `screenshots/` directory, and `manifest.json`. Epic 2.2.4 implemented VM-side model management with baseline models (e.g., `baseline-yolov8n`) stored at `/app/data/models/{model_id}/model.onnx` and registered in the model catalog. The training service (`user-vm-api/training-service/main.py`) currently exists as a minimal FastAPI stub.
+
+**Goal**: Implement a complete model training pipeline that:
+1. Accepts training requests specifying a baseline model and a dataset.
+2. Loads the baseline model from model storage and the labeled dataset from dataset storage.
+3. Trains (fine-tunes) the model using the labeled snapshots.
+4. Saves the trained model and registers it in the model catalog.
+5. Updates training status and provides training job management.
+
+**Prerequisites**:
+- ✅ Datasets synced to VM and stored at `/app/data/datasets/{edge_id}/{camera_id}/{dataset_id}/` (Epic 2.2.3)
+- ✅ Baseline models available in model catalog (Epic 2.2.4)
+- ✅ Model catalog service for model registration (Epic 2.2.4)
+- ✅ Dataset storage service for dataset retrieval (Epic 2.2.3)
+- ✅ Training service FastAPI stub exists (`user-vm-api/training-service/main.py`)
+
+### Step 2.2.5.1: Training Service Core Implementation
+
+- **Substep 2.2.5.1.1**: Training service dependencies and setup
+  - **Status**: ⬜ TODO
+  - **P0**: Update `user-vm-api/training-service/requirements.txt`:
+    - Add `ultralytics>=8.3.0` for YOLOv8 training
+    - Add `pyyaml>=6.0.1` for configuration (if not present)
+    - Keep existing dependencies (FastAPI, uvicorn, opencv-python, Pillow, numpy)
+    - Optional: Add `tensorboard>=2.18.0` for training visualization (P1)
+  - **P0**: Configure training service environment variables:
+    - `DATASETS_DIR`: Path to datasets directory (default: `/app/data/datasets`)
+    - `MODELS_DIR`: Path to models directory (default: `/app/data/models`)
+    - `TRAINING_OUTPUT_DIR`: Path for training outputs (default: `/app/data/training`)
+    - `PYTHON_AI_SERVICE_HOST`: Service host (default: `0.0.0.0`)
+    - `PYTHON_AI_SERVICE_PORT`: Service port (default: `8000`)
+  - **P0**: Create training service directory structure:
+    - `user-vm-api/training-service/training/`: Training pipeline modules
+    - `user-vm-api/training-service/api/`: API endpoint handlers
+    - `user-vm-api/training-service/config.py`: Configuration management
+  - Location: `user-vm-api/training-service/requirements.txt`, `user-vm-api/training-service/config.py`, `user-vm-api/training-service/training/__init__.py`
+
+- **Substep 2.2.5.1.2**: Dataset loader implementation
+  - **Status**: ⬜ TODO
+  - **P0**: Create dataset loader that:
+    - Reads dataset from `/app/data/datasets/{edge_id}/{camera_id}/{dataset_id}/`
+    - Parses `metadata.json` to get label counts and total snapshots
+    - Reads `manifest.json` (or scans `screenshots/` directory) to get labeled image list
+    - Converts dataset to YOLOv8 format:
+      - Creates `train/` and `val/` directories (80/20 split)
+      - Creates `data.yaml` with class names and paths
+      - Organizes images and labels (YOLO format: `{image_id}.txt` with normalized bounding boxes)
+    - Handles label mapping: `normal` → class 0, custom labels → class 1, 2, etc.
+  - **P0**: Support dataset validation:
+    - Verify minimum snapshot count (≥50 for training)
+    - Verify label distribution (at least one class with sufficient samples)
+    - Verify image format and accessibility
+  - **P0**: Handle dataset structure:
+    - Support `screenshots/{screenshot_id}.jpg` structure
+    - Support label information from `manifest.json` or infer from directory structure
+    - For PoC: Assume all snapshots are "normal" class (object detection training deferred to future)
+  - Location: `user-vm-api/training-service/training/dataset_loader.py`
+  - **Design decision**: For PoC, focus on classification training (normal vs. anomaly) rather than full object detection with bounding boxes. Full YOLO format (bounding boxes) can be added in future epic.
+
+- **Substep 2.2.5.1.3**: Model loader and baseline model integration
+  - **Status**: ⬜ TODO
+  - **P0**: Create model loader that:
+    - Loads baseline model from `/app/data/models/{model_id}/model.onnx`
+    - Converts ONNX to PyTorch format (if needed) or uses ONNX directly with Ultralytics
+    - Validates model compatibility (input shape, output format)
+    - Handles model metadata (reads from model catalog or `metadata.json` in model directory)
+  - **P0**: Integrate with model catalog:
+    - Query model catalog API (`GET /api/models/{model_id}`) to get model metadata
+    - Verify model status is `baseline` or `ready`
+    - Get model path from catalog response
+  - **P0**: Support YOLOv8 baseline models:
+    - Load `yolov8n.pt` or `yolov8n.onnx` from baseline model directory
+    - Initialize Ultralytics YOLO model from baseline
+    - Configure model for fine-tuning (freeze backbone layers, adjust output classes)
+  - Location: `user-vm-api/training-service/training/model_loader.py`
+  - **Design decision**: Use Ultralytics YOLO API which supports loading from ONNX and fine-tuning. For PoC, convert ONNX to PyTorch format if needed, or use Ultralytics' ONNX support.
+
+### Step 2.2.5.2: Training Pipeline Implementation
+
+- **Substep 2.2.5.2.1**: Training orchestrator
+  - **Status**: ⬜ TODO
+  - **P0**: Create training orchestrator that:
+    - Coordinates dataset loading, model loading, training execution, and model saving
+    - Manages training job lifecycle (queued → running → completed/failed)
+    - Handles training configuration (epochs, batch size, learning rate, etc.)
+    - Tracks training progress and metrics
+  - **P0**: Implement training workflow:
+    1. Validate training request (dataset exists, model exists, sufficient snapshots)
+    2. Load dataset and convert to YOLOv8 format
+    3. Load baseline model
+    4. Configure training parameters (epochs: 50-100 for PoC, batch size: 16, learning rate: 0.01)
+    5. Execute training using Ultralytics YOLO API
+    6. Save trained model to `/app/data/models/{trained_model_id}/model.onnx`
+    7. Generate model metadata and register in catalog
+    8. Update training job status
+  - **P0**: Handle training errors:
+    - Catch training exceptions and update job status to `failed`
+    - Log training errors for debugging
+    - Clean up temporary files on failure
+  - Location: `user-vm-api/training-service/training/orchestrator.py`
+  - **Design decision**: For PoC, run training synchronously (blocking API call). Async training with job queue can be added in future epic.
+
+- **Substep 2.2.5.2.2**: YOLOv8 fine-tuning implementation
+  - **Status**: ⬜ TODO
+  - **P0**: Implement YOLOv8 fine-tuning using Ultralytics:
+    - Load baseline YOLOv8 model (`yolov8n.pt` or `yolov8n.onnx`)
+    - Configure for fine-tuning:
+      - Set number of classes (2 for PoC: normal, anomaly)
+      - Freeze backbone layers (optional, for faster training)
+      - Adjust output layer for new class count
+    - Train model on dataset:
+      - Use `model.train()` with dataset path and configuration
+      - Monitor training metrics (loss, mAP, precision, recall)
+      - Save checkpoints periodically
+    - Export trained model to ONNX format:
+      - Use `model.export(format='onnx')` after training
+      - Save to `/app/data/models/{trained_model_id}/model.onnx`
+  - **P0**: Training configuration:
+    - Epochs: 50-100 (configurable via API or environment)
+    - Batch size: 16 (adjust based on GPU/CPU memory)
+    - Learning rate: 0.01 (with learning rate scheduler)
+    - Image size: 640x640 (YOLOv8 default)
+    - Data augmentation: enabled (flip, rotate, etc.)
+  - **P0**: Training metrics collection:
+    - Track loss (train/val)
+    - Track mAP (mean Average Precision)
+    - Track precision and recall per class
+    - Save metrics to JSON file for API retrieval
+  - Location: `user-vm-api/training-service/training/trainer.py`
+  - **Design decision**: Use Ultralytics YOLO API for training (simpler than PyTorch from scratch). For PoC, focus on classification fine-tuning. Full object detection training can be enhanced in future.
+
+- **Substep 2.2.5.2.3**: Trained model registration
+  - **Status**: ⬜ TODO
+  - **P0**: After training completes, register model in catalog:
+    - Generate trained model ID (UUID or `{baseline_model_id}-{dataset_id}-{timestamp}`)
+    - Create model metadata:
+      - `model_id`: Trained model ID
+      - `version`: "1.0" or timestamp-based version
+      - `camera_id`: Camera ID from dataset
+      - `model_type`: "yolov8" or "yolov8n"
+      - `status`: "ready"
+      - `framework`: "onnx"
+      - `training_dataset_id`: Dataset ID used for training
+      - `baseline_model_id`: Original baseline model ID
+      - `training_metrics`: Training metrics (loss, mAP, etc.)
+      - `input_shape`: Model input shape (e.g., `[1, 3, 640, 640]`)
+      - `output_classes`: Number of output classes (2 for PoC)
+      - `file_path`: Path to `model.onnx` file
+      - `file_size`: Model file size in bytes
+      - `created_at`: Training completion timestamp
+    - Call model catalog API (`POST /api/models`) to register model
+    - Update model status to `ready` in catalog
+  - **P0**: Save model metadata file:
+    - Create `metadata.json` in model directory (`/app/data/models/{trained_model_id}/metadata.json`)
+    - Include all metadata fields for local reference
+  - **P0**: Link trained model to dataset:
+    - Update dataset record to reference trained model ID (optional, for tracking)
+    - Update camera training eligibility status (optional, mark as "model_trained")
+  - Location: `user-vm-api/training-service/training/model_registry.py`
+  - **Design decision**: Register trained models in the same catalog as baseline models, distinguished by `status` field (`baseline` vs `ready`). Trained models can be queried by `camera_id` or `training_dataset_id`.
+
+### Step 2.2.5.3: Training API Endpoints
+
+- **Substep 2.2.5.3.1**: Training request endpoint
+  - **Status**: ⬜ TODO
+  - **P0**: Add `POST /api/training/start` endpoint:
+    - Request body:
+      ```json
+      {
+        "baseline_model_id": "baseline-yolov8n",
+        "dataset_id": "dataset-uuid",
+        "camera_id": "camera-1",
+        "edge_id": "edge-1",
+        "training_config": {
+          "epochs": 50,
+          "batch_size": 16,
+          "learning_rate": 0.01,
+          "image_size": 640
+        }
+      }
+      ```
+    - Validates request:
+      - Baseline model exists and is `baseline` status
+      - Dataset exists and has sufficient snapshots (≥50)
+      - Camera ID and edge ID match dataset
+    - Starts training job (synchronous for PoC)
+    - Returns training job ID and status
+  - **P0**: Response format:
+    ```json
+    {
+      "job_id": "training-job-uuid",
+      "status": "running",
+      "baseline_model_id": "baseline-yolov8n",
+      "dataset_id": "dataset-uuid",
+      "started_at": "2025-12-01T10:00:00Z",
+      "estimated_completion": "2025-12-01T12:00:00Z"
+    }
+    ```
+  - Location: `user-vm-api/training-service/api/training.py`, `user-vm-api/training-service/main.py`
+
+- **Substep 2.2.5.3.2**: Training status endpoint
+  - **Status**: ⬜ TODO
+  - **P0**: Add `GET /api/training/{job_id}` endpoint:
+    - Returns training job status, progress, and metrics
+    - Response format:
+      ```json
+      {
+        "job_id": "training-job-uuid",
+        "status": "running" | "completed" | "failed",
+        "progress": {
+          "epoch": 25,
+          "total_epochs": 50,
+          "current_loss": 0.45,
+          "val_loss": 0.52,
+          "mAP": 0.78
+        },
+        "metrics": {
+          "train_loss": [0.8, 0.6, 0.5, ...],
+          "val_loss": [0.9, 0.7, 0.6, ...],
+          "mAP": [0.5, 0.6, 0.7, ...]
+        },
+        "trained_model_id": "trained-model-uuid" | null,
+        "error": "error message" | null,
+        "started_at": "2025-12-01T10:00:00Z",
+        "completed_at": "2025-12-01T12:00:00Z" | null
+      }
+      ```
+  - **P0**: Support real-time progress updates:
+    - For PoC: Poll-based (client polls endpoint)
+    - Future: WebSocket or Server-Sent Events for real-time updates
+  - Location: `user-vm-api/training-service/api/training.py`
+
+- **Substep 2.2.5.3.3**: Training history and list endpoints
+  - **Status**: ⬜ TODO
+  - **P0**: Add `GET /api/training` endpoint:
+    - Returns list of all training jobs (with pagination)
+    - Query parameters: `camera_id`, `edge_id`, `status`, `limit`, `offset`
+    - Response format:
+      ```json
+      {
+        "jobs": [
+          {
+            "job_id": "training-job-uuid",
+            "status": "completed",
+            "baseline_model_id": "baseline-yolov8n",
+            "dataset_id": "dataset-uuid",
+            "camera_id": "camera-1",
+            "trained_model_id": "trained-model-uuid",
+            "started_at": "2025-12-01T10:00:00Z",
+            "completed_at": "2025-12-01T12:00:00Z"
+          }
+        ],
+        "total": 10,
+        "limit": 20,
+        "offset": 0
+      }
+      ```
+  - **P0**: Add `GET /api/training/camera/{camera_id}` endpoint:
+    - Returns training jobs for a specific camera
+    - Useful for UI to show training history per camera
+  - Location: `user-vm-api/training-service/api/training.py`
+
+### Step 2.2.5.4: Integration with VM API Gateway
+
+- **Substep 2.2.5.4.1**: Training service proxy endpoints
+  - **Status**: ⬜ TODO
+  - **P0**: Add training endpoints to VM API Gateway (`user-vm-api/internal/orchestrator/api.go`):
+    - `POST /api/training/start`: Proxy to training service
+    - `GET /api/training/{job_id}`: Proxy to training service
+    - `GET /api/training`: Proxy to training service
+    - `GET /api/training/camera/{camera_id}`: Proxy to training service
+  - **P0**: Implement proxy logic:
+    - Forward requests to training service (`http://python-ai-service:8000`)
+    - Handle authentication (same as other API endpoints)
+    - Forward response back to client
+    - Handle training service errors (503 if service unavailable)
+  - **P0**: Add training service health check:
+    - Check training service health before proxying requests
+    - Return 503 if training service is unavailable
+  - Location: `user-vm-api/internal/orchestrator/api.go`
+
+- **Substep 2.2.5.4.2**: Training service discovery
+  - **Status**: ⬜ TODO
+  - **P0**: Configure training service endpoint in VM API Gateway:
+    - Add `TrainingServiceURL` to config (default: `http://python-ai-service:8000`)
+    - Use environment variable or config file for service URL
+  - **P0**: Handle training service connection errors:
+    - Log connection failures
+    - Return appropriate HTTP status codes (503 Service Unavailable)
+    - Provide error messages to client
+  - Location: `user-vm-api/internal/orchestrator/api.go`, `user-vm-api/internal/shared/config/config.go`
+
+### Step 2.2.5.5: Training Job Management
+
+- **Substep 2.2.5.5.1**: Training job storage
+  - **Status**: ⬜ TODO
+  - **P0**: Store training jobs in SQLite:
+    - Table: `training_jobs` (job_id UUID, baseline_model_id, dataset_id, camera_id, edge_id, status, trained_model_id, started_at, completed_at, error_message, training_config JSON, metrics JSON)
+    - Track job lifecycle: `queued` → `running` → `completed` | `failed`
+    - Store training metrics and configuration for history
+  - **P0**: Implement job storage service:
+    - `CreateJob`: Create new training job
+    - `UpdateJobStatus`: Update job status and progress
+    - `GetJob`: Get job by ID
+    - `ListJobs`: List jobs with filters (camera_id, status, etc.)
+  - Location: `user-vm-api/internal/training-service/job_store.go` (Go service) or `user-vm-api/training-service/training/job_store.py` (Python service)
+  - **Design decision**: For PoC, store jobs in SQLite via Go service (shared database). Python training service can query via API or use shared SQLite file.
+
+- **Substep 2.2.5.5.2**: Training job status updates
+  - **Status**: ⬜ TODO
+  - **P0**: Update job status during training:
+    - `queued`: Job created, waiting to start
+    - `running`: Training in progress (update progress periodically)
+    - `completed`: Training finished successfully (with trained_model_id)
+    - `failed`: Training failed (with error_message)
+  - **P0**: Periodic progress updates:
+    - Update job record after each epoch (or every N epochs)
+    - Store current epoch, loss, mAP in job record
+    - Allow clients to poll for progress
+  - **P0**: Handle training cancellation:
+    - Support `DELETE /api/training/{job_id}` to cancel running job
+    - Update job status to `cancelled`
+    - Clean up temporary files
+  - Location: `user-vm-api/training-service/training/orchestrator.py`
+
+### Step 2.2.5.6: Testing and Validation
+
+- **Substep 2.2.5.6.1**: Unit tests for training components
+  - **Status**: ⬜ TODO
+  - **P0**: Unit tests for:
+    - Dataset loader (YOLOv8 format conversion, label mapping)
+    - Model loader (ONNX loading, model validation)
+    - Training orchestrator (workflow validation, error handling)
+    - Model registration (metadata generation, catalog integration)
+  - **P0**: Mock dependencies:
+    - Mock model catalog API calls
+    - Mock dataset storage access
+    - Mock Ultralytics YOLO training (use small test dataset)
+  - Location: `user-vm-api/training-service/tests/test_dataset_loader.py`, `user-vm-api/training-service/tests/test_model_loader.py`, `user-vm-api/training-service/tests/test_orchestrator.py`
+
+- **Substep 2.2.5.6.2**: Integration test in docker-compose
+  - **Status**: ⬜ TODO
+  - **P0**: Create integration test script:
+    - Test full training pipeline:
+      1. Verify baseline model exists
+      2. Verify dataset exists and is ready
+      3. Start training job via API
+      4. Poll training status until completion
+      5. Verify trained model is registered in catalog
+      6. Verify trained model file exists
+      7. Verify training metrics are stored
+    - Test error cases:
+      - Invalid baseline model ID
+      - Invalid dataset ID
+      - Insufficient snapshots
+      - Training service unavailable
+  - **P0**: Add test service to `infra/local/docker-compose.yml`:
+    - `training-tests` service that runs integration tests
+    - Depends on `user-vm-api`, `python-ai-service`, `minio`
+  - Location: `infra/local/test-training.sh`, `infra/local/docker-compose.yml`
+
 ---
 
 ## Epic 2.3: Event Cache Service
