@@ -105,8 +105,9 @@ type ManagementServerConfig struct {
 
 // APIGatewayConfig contains API Gateway configuration
 type APIGatewayConfig struct {
-	Enabled bool `yaml:"enabled"`
-	Port    int  `yaml:"port"`
+	Enabled           bool   `yaml:"enabled"`
+	Port              int    `yaml:"port"`
+	TrainingServiceURL string `yaml:"training_service_url"` // URL to training service (default: http://python-ai-service:8000)
 }
 
 // LogConfig contains logging configuration
@@ -225,6 +226,16 @@ func setDefaults(cfg *Config) {
 	}
 	if cfg.UserVMAPI.StorageSync.RetentionDays == 0 {
 		cfg.UserVMAPI.StorageSync.RetentionDays = 90
+	}
+
+	// API Gateway defaults
+	if cfg.UserVMAPI.APIGateway.TrainingServiceURL == "" {
+		// Check environment variable first
+		if envURL := os.Getenv("TRAINING_SERVICE_URL"); envURL != "" {
+			cfg.UserVMAPI.APIGateway.TrainingServiceURL = envURL
+		} else {
+			cfg.UserVMAPI.APIGateway.TrainingServiceURL = "http://python-ai-service:8000"
+		}
 	}
 }
 

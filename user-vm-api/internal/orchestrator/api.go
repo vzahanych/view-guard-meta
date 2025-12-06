@@ -84,6 +84,13 @@ func (s *APIServer) Start(ctx context.Context) error {
 	mux.HandleFunc("/api/models", s.handleModels)
 	mux.HandleFunc("/api/models/", s.handleModelByID)
 
+	// Training service proxy endpoints
+	// Register more specific routes first to avoid path matching issues
+	mux.HandleFunc("/api/training/camera/", s.handleTrainingCamera)
+	mux.HandleFunc("/api/training/start", s.handleTrainingStart)
+	mux.HandleFunc("/api/training/", s.handleTrainingByID)
+	mux.HandleFunc("/api/training", s.handleTraining)
+
 	// Health check
 	mux.HandleFunc("/health", s.handleHealth)
 
@@ -773,4 +780,219 @@ func (s *APIServer) handleDeleteModel(w http.ResponseWriter, r *http.Request, mo
 		"status":   "success",
 		"message":  "Model deleted successfully",
 	})
+}
+
+// getTrainingServiceURL returns the training service URL with fallback logic
+func (s *APIServer) getTrainingServiceURL() string {
+	trainingServiceURL := s.config.UserVMAPI.APIGateway.TrainingServiceURL
+	if trainingServiceURL == "" {
+		// Check environment variable
+		if envURL := os.Getenv("TRAINING_SERVICE_URL"); envURL != "" {
+			trainingServiceURL = envURL
+		} else {
+			trainingServiceURL = "http://python-ai-service:8000"
+		}
+	}
+	return trainingServiceURL
+}
+
+// checkTrainingServiceHealth checks if training service is available
+func (s *APIServer) checkTrainingServiceHealth(ctx context.Context) error {
+	trainingServiceURL := s.getTrainingServiceURL()
+
+	healthURL := fmt.Sprintf("%s/health", trainingServiceURL)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, healthURL, nil)
+	if err != nil {
+		s.logger.Error("Failed to create training service health check request",
+			zap.String("url", healthURL),
+			zap.Error(err))
+		return fmt.Errorf("failed to create health check request: %w", err)
+	}
+
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		// Check for specific error types
+		if netErr, ok := err.(net.Error); ok {
+			if netErr.Timeout() {
+				s.logger.Warn("Training service health check timeout",
+					zap.String("url", healthURL),
+					zap.Error(err))
+				return fmt.Errorf("training service health check timeout: %w", err)
+			}
+			if netErr.Temporary() {
+				s.logger.Warn("Training service health check temporary error",
+					zap.String("url", healthURL),
+					zap.Error(err))
+				return fmt.Errorf("training service temporarily unavailable: %w", err)
+			}
+		}
+		// Connection refused, DNS errors, etc.
+		s.logger.Warn("Training service health check connection failed",
+			zap.String("url", healthURL),
+			zap.Error(err))
+		return fmt.Errorf("training service connection failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		s.logger.Warn("Training service health check returned non-OK status",
+			zap.String("url", healthURL),
+			zap.Int("status_code", resp.StatusCode))
+		return fmt.Errorf("training service health check returned status %d", resp.StatusCode)
+	}
+
+	return nil
+}
+
+// proxyTrainingRequest proxies a request to the training service
+func (s *APIServer) proxyTrainingRequest(w http.ResponseWriter, r *http.Request, path string) {
+	// Check training service health
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	if err := s.checkTrainingServiceHealth(ctx); err != nil {
+		s.logger.Warn("Training service health check failed",
+			zap.String("training_service_url", s.getTrainingServiceURL()),
+			zap.Error(err))
+		http.Error(w, fmt.Sprintf("Training service unavailable: %v", err), http.StatusServiceUnavailable)
+		return
+	}
+
+	// Authenticate request (same as other API endpoints)
+	_, err := s.authenticateEdgeFromRequest(r)
+	if err != nil {
+		s.logger.Warn("Training request authentication failed", zap.Error(err))
+		http.Error(w, fmt.Sprintf("Authentication failed: %v", err), http.StatusUnauthorized)
+		return
+	}
+
+	// Build target URL
+	trainingServiceURL := s.getTrainingServiceURL()
+	targetURL := fmt.Sprintf("%s%s", trainingServiceURL, path)
+	if r.URL.RawQuery != "" {
+		targetURL += "?" + r.URL.RawQuery
+	}
+
+	// Create request to training service
+	req, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL, r.Body)
+	if err != nil {
+		s.logger.Error("Failed to create proxy request", zap.Error(err))
+		http.Error(w, "Failed to create proxy request", http.StatusInternalServerError)
+		return
+	}
+
+	// Copy headers (except Host)
+	for key, values := range r.Header {
+		if key != "Host" {
+			for _, value := range values {
+				req.Header.Add(key, value)
+			}
+		}
+	}
+
+	// Set content type if body exists
+	if r.Body != nil {
+		req.Header.Set("Content-Type", r.Header.Get("Content-Type"))
+	}
+
+	// Make request to training service
+	client := &http.Client{
+		Timeout: 300 * time.Second, // Long timeout for training operations
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		// Check for specific error types
+		var statusCode int
+		var errorMsg string
+		
+		if netErr, ok := err.(net.Error); ok {
+			if netErr.Timeout() {
+				s.logger.Error("Training service request timeout",
+					zap.String("url", targetURL),
+					zap.String("method", r.Method),
+					zap.Error(err))
+				statusCode = http.StatusGatewayTimeout
+				errorMsg = "Training service request timeout"
+			} else if netErr.Temporary() {
+				s.logger.Error("Training service temporary error",
+					zap.String("url", targetURL),
+					zap.String("method", r.Method),
+					zap.Error(err))
+				statusCode = http.StatusServiceUnavailable
+				errorMsg = "Training service temporarily unavailable"
+			} else {
+				// Connection refused, DNS errors, etc.
+				s.logger.Error("Training service connection error",
+					zap.String("url", targetURL),
+					zap.String("method", r.Method),
+					zap.String("training_service_url", trainingServiceURL),
+					zap.Error(err))
+				statusCode = http.StatusBadGateway
+				errorMsg = "Training service connection failed"
+			}
+		} else {
+			s.logger.Error("Failed to proxy request to training service",
+				zap.String("url", targetURL),
+				zap.String("method", r.Method),
+				zap.Error(err))
+			statusCode = http.StatusBadGateway
+			errorMsg = "Training service error"
+		}
+		
+		http.Error(w, fmt.Sprintf("%s: %v", errorMsg, err), statusCode)
+		return
+	}
+	defer resp.Body.Close()
+
+	// Copy response headers
+	for key, values := range resp.Header {
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+	}
+
+	// Copy status code
+	w.WriteHeader(resp.StatusCode)
+
+	// Copy response body
+	if _, err := io.Copy(w, resp.Body); err != nil {
+		s.logger.Error("Failed to copy response body", zap.Error(err))
+	}
+}
+
+// handleTraining handles /api/training (list endpoint)
+func (s *APIServer) handleTraining(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	path := r.URL.Path
+	s.proxyTrainingRequest(w, r, path)
+}
+
+// handleTrainingStart handles POST /api/training/start
+func (s *APIServer) handleTrainingStart(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	path := r.URL.Path
+	s.proxyTrainingRequest(w, r, path)
+}
+
+// handleTrainingByID handles /api/training/{job_id}
+func (s *APIServer) handleTrainingByID(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Path
+	s.proxyTrainingRequest(w, r, path)
+}
+
+// handleTrainingCamera handles /api/training/camera/{camera_id}
+func (s *APIServer) handleTrainingCamera(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Path
+	s.proxyTrainingRequest(w, r, path)
 }

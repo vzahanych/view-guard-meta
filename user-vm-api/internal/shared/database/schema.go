@@ -142,6 +142,33 @@ const (
 	CREATE INDEX IF NOT EXISTS idx_edge_camera_status_training_eligibility ON edge_camera_status(training_eligibility_status);
 	CREATE INDEX IF NOT EXISTS idx_edge_camera_status_dataset_id ON edge_camera_status(dataset_id);
 	`
+
+	// TrainingJobsTable stores training job metadata and progress
+	CreateTrainingJobsTable = `
+	CREATE TABLE IF NOT EXISTS training_jobs (
+		job_id TEXT PRIMARY KEY,
+		baseline_model_id TEXT NOT NULL,
+		dataset_id TEXT NOT NULL,
+		camera_id TEXT NOT NULL,
+		edge_id TEXT NOT NULL,
+		status TEXT NOT NULL DEFAULT 'queued', -- queued, running, completed, failed, cancelled
+		trained_model_id TEXT,
+		started_at INTEGER,
+		completed_at INTEGER,
+		error_message TEXT,
+		training_config TEXT, -- JSON: {"epochs": 50, "batch_size": 16, ...}
+		metrics TEXT, -- JSON: {"train_loss": [...], "val_loss": [...], "mAP": [...], ...}
+		created_at INTEGER NOT NULL,
+		updated_at INTEGER NOT NULL,
+		FOREIGN KEY (edge_id) REFERENCES edges(edge_id),
+		FOREIGN KEY (dataset_id) REFERENCES training_datasets(dataset_id)
+	);
+	CREATE INDEX IF NOT EXISTS idx_training_jobs_edge_id ON training_jobs(edge_id);
+	CREATE INDEX IF NOT EXISTS idx_training_jobs_camera_id ON training_jobs(camera_id);
+	CREATE INDEX IF NOT EXISTS idx_training_jobs_status ON training_jobs(status);
+	CREATE INDEX IF NOT EXISTS idx_training_jobs_dataset_id ON training_jobs(dataset_id);
+	CREATE INDEX IF NOT EXISTS idx_training_jobs_created_at ON training_jobs(created_at);
+	`
 )
 
 // AllTables returns all table creation statements in order
@@ -154,5 +181,6 @@ func AllTables() []string {
 		CreateCIDStorageTable,
 		CreateTelemetryBufferTable,
 		CreateEdgeCameraStatusTable,
+		CreateTrainingJobsTable,
 	}
 }

@@ -2,16 +2,17 @@
 Python AI Service - FastAPI service for CAE model training and heavy model inference
 """
 
-import os
 import logging
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 import uvicorn
 
+from config import config
+from api.training import router as training_router
+
 # Configure logging
-log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
-    level=getattr(logging, log_level, logging.INFO),
+    level=getattr(logging, config.LOG_LEVEL, logging.INFO),
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
@@ -23,11 +24,11 @@ app = FastAPI(
     version="0.1.0"
 )
 
-# Get configuration from environment
-HOST = os.getenv("PYTHON_AI_SERVICE_HOST", "0.0.0.0")
-PORT = int(os.getenv("PYTHON_AI_SERVICE_PORT", "8000"))
-DATASETS_DIR = os.getenv("DATASETS_DIR", "/app/data/datasets")
-MODELS_DIR = os.getenv("MODELS_DIR", "/app/data/models")
+# Ensure required directories exist
+config.ensure_directories()
+
+# Register API routers
+app.include_router(training_router)
 
 
 @app.get("/health")
@@ -48,24 +49,25 @@ async def root():
             "service": "python-ai-service",
             "version": "0.1.0",
             "status": "running",
-            "datasets_dir": DATASETS_DIR,
-            "models_dir": MODELS_DIR
+            "config": config.to_dict()
         }
     )
 
 
-# TODO: Implement training endpoints
+# Training endpoints are registered via training_router
 # TODO: Implement inference endpoints
 
 
 if __name__ == "__main__":
-    logger.info(f"Starting Python AI Service on {HOST}:{PORT}")
-    logger.info(f"Datasets directory: {DATASETS_DIR}")
-    logger.info(f"Models directory: {MODELS_DIR}")
+    logger.info(f"Starting Python AI Service on {config.HOST}:{config.PORT}")
+    logger.info(f"Datasets directory: {config.DATASETS_DIR}")
+    logger.info(f"Models directory: {config.MODELS_DIR}")
+    logger.info(f"Training output directory: {config.TRAINING_OUTPUT_DIR}")
+    logger.info(f"Model catalog API URL: {config.MODEL_CATALOG_API_URL}")
     
     uvicorn.run(
         app,
-        host=HOST,
-        port=PORT,
-        log_level=log_level.lower()
+        host=config.HOST,
+        port=config.PORT,
+        log_level=config.LOG_LEVEL.lower()
     )
