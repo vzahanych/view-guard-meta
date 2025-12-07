@@ -3,6 +3,7 @@ package web
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"image"
 	_ "image/jpeg" // Register JPEG decoder
@@ -21,6 +22,7 @@ import (
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/events"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/service"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/state"
+	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/storage"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/web/screenshots"
 	edge "github.com/vzahanych/view-guard-meta/proto/go/generated/edge"
 )
@@ -2458,5 +2460,236 @@ func (s *Server) handleReminderTelemetry(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "Reminder telemetry recorded",
+	})
+}
+
+// handleModelDeploy handles model deployment from VM (Substep 2.2.6.5.1)
+func (s *Server) handleModelDeploy(c *gin.Context) {
+	if s.modelStorage == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"success": false,
+			"error":   "Model storage service not available",
+		})
+		return
+	}
+
+	// Parse multipart form (max 50MB for model file)
+	if err := c.Request.ParseMultipartForm(50 << 20); err != nil {
+		s.logger.Error("Failed to parse multipart form", "error", err)
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error":   fmt.Sprintf("Failed to parse multipart form: %v", err),
+		})
+		return
+	}
+
+	// Get model file
+	file, header, err := c.Request.FormFile("model")
+	if err != nil {
+		s.logger.Error("Failed to get model file from form", "error", err)
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error":   "Model file is required",
+		})
+		return
+	}
+	defer file.Close()
+
+	// Read model file
+	modelData := make([]byte, header.Size)
+	n, err := file.Read(modelData)
+	if err != nil && err != io.EOF {
+		s.logger.Error("Failed to read model file", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error":   fmt.Sprintf("Failed to read model file: %v", err),
+		})
+		return
+	}
+	modelData = modelData[:n]
+
+	// Get metadata
+	metadataJSON := c.PostForm("metadata")
+	if metadataJSON == "" {
+		s.logger.Error("Metadata is required")
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error":   "Metadata is required",
+		})
+		return
+	}
+
+	// Parse metadata
+	var metadata map[string]interface{}
+	if err := json.Unmarshal([]byte(metadataJSON), &metadata); err != nil {
+		s.logger.Error("Failed to parse metadata JSON", "error", err)
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error":   fmt.Sprintf("Invalid metadata JSON: %v", err),
+		})
+		return
+	}
+
+	// Extract required fields
+	modelID, ok := metadata["model_id"].(string)
+	if !ok || modelID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error":   "model_id is required in metadata",
+		})
+		return
+	}
+
+	version, _ := metadata["version"].(string)
+	if version == "" {
+		version = "1.0" // Default version
+	}
+
+	modelType, _ := metadata["model_type"].(string)
+	if modelType == "" {
+		modelType = "yolo" // Default type
+	}
+
+	framework, _ := metadata["framework"].(string)
+	if framework == "" {
+		framework = "onnx" // Default framework
+	}
+
+	var cameraID *string
+	if camID, ok := metadata["camera_id"].(string); ok && camID != "" {
+		cameraID = &camID
+	}
+
+	// Get deployment_id from form (optional)
+	var deploymentID *string
+	if depID := c.PostForm("deployment_id"); depID != "" {
+		deploymentID = &depID
+	}
+
+	// Get edge_id from header or use default
+	edgeID := c.GetHeader("X-Edge-ID")
+	if edgeID == "" {
+		// For PoC, use a default edge ID if not provided
+		edgeID = "poc-edge-1"
+		s.logger.Warn("X-Edge-ID header not provided, using default", "edge_id", edgeID)
+	}
+
+	// Create ModelMetadata struct
+	modelMetadata := &storage.ModelMetadata{
+		ModelID:           modelID,
+		Version:           version,
+		ModelType:         modelType,
+		CameraID:          cameraID,
+		Framework:         framework,
+		InputShape:        []int{},
+		Preprocessing:     make(map[string]interface{}),
+		AdditionalMetadata: make(map[string]interface{}),
+	}
+
+	// Extract optional fields
+	if trainingDatasetID, ok := metadata["training_dataset_id"].(string); ok {
+		modelMetadata.TrainingDatasetID = &trainingDatasetID
+	}
+	if trainingDate, ok := metadata["training_date"].(string); ok {
+		modelMetadata.TrainingDate = &trainingDate
+	}
+	if inputShape, ok := metadata["input_shape"].([]interface{}); ok {
+		modelMetadata.InputShape = make([]int, len(inputShape))
+		for i, v := range inputShape {
+			if num, ok := v.(float64); ok {
+				modelMetadata.InputShape[i] = int(num)
+			}
+		}
+	}
+	if preprocessing, ok := metadata["preprocessing"].(map[string]interface{}); ok {
+		modelMetadata.Preprocessing = preprocessing
+	}
+
+	// Store model
+	ctx := c.Request.Context()
+	deployedModel, err := s.modelStorage.StoreModel(ctx, modelID, deploymentID, edgeID, cameraID, modelData, modelMetadata)
+	if err != nil {
+		s.logger.Error("Failed to store model", "error", err, "model_id", modelID)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error":   fmt.Sprintf("Failed to store model: %v", err),
+		})
+		return
+	}
+
+	// Extract model path from deployed model
+	modelFilePath := deployedModel.ModelPath
+
+	s.logger.Info("Model deployed successfully",
+		"model_id", modelID,
+		"deployment_id", deploymentID,
+		"edge_id", edgeID,
+		"camera_id", cameraID,
+		"model_path", modelFilePath,
+	)
+
+	// Report deployment status to VM (Substep 2.2.6.5.4)
+	// Report "deployed" status after model is received and validated
+	if s.statusReporter != nil && deploymentID != nil {
+		go func() {
+			ctx := c.Request.Context()
+			modelPath := modelFilePath
+			if err := s.statusReporter.ReportStatus(ctx, *deploymentID, "deployed", nil, &modelPath); err != nil {
+				s.logger.Warn("Failed to report deployment status to VM",
+					"deployment_id", *deploymentID,
+					"error", err,
+				)
+			}
+		}()
+	}
+
+	// Load model for inference (Substep 2.2.6.5.3)
+	// This is done asynchronously to avoid blocking the deployment response
+	if s.modelLoader != nil {
+		go func() {
+			ctx := c.Request.Context()
+			activeModel, err := s.modelLoader.LoadModel(ctx, modelID, cameraID)
+			if err != nil {
+				s.logger.Error("Failed to load model for inference",
+					"error", err,
+					"model_id", modelID,
+					"camera_id", cameraID,
+				)
+				// Update model status to failed
+				if s.modelStorage != nil {
+					if err := s.modelStorage.UpdateModelStatus(ctx, modelID, "failed"); err != nil {
+						s.logger.Warn("Failed to update model status to failed",
+							"model_id", modelID,
+							"error", err,
+						)
+					}
+				}
+				// Report failure to VM
+				if s.statusReporter != nil && deploymentID != nil {
+					errorMsg := fmt.Sprintf("Failed to load model for inference: %v", err)
+					_ = s.statusReporter.ReportStatus(ctx, *deploymentID, "failed", &errorMsg, nil)
+				}
+				return
+			}
+
+			s.logger.Info("Model loaded and ready for inference",
+				"model_id", activeModel.ModelID,
+				"version", activeModel.Version,
+				"camera_id", cameraID,
+				"model_type", activeModel.ModelType,
+			)
+
+			// Report "active" status after model is loaded and ready
+			if s.statusReporter != nil && deploymentID != nil {
+				modelPath := modelFilePath
+				_ = s.statusReporter.ReportStatus(ctx, *deploymentID, "active", nil, &modelPath)
+			}
+		}()
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":       true,
+		"model_file_path": modelFilePath,
+		"message":       "Model deployed successfully",
 	})
 }

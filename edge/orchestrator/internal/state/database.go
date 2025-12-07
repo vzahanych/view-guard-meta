@@ -147,6 +147,23 @@ func (d *Database) initSchema() error {
 		FOREIGN KEY (camera_id) REFERENCES cameras(id) ON DELETE CASCADE
 	);
 
+	-- Deployed models table (for trained models from VM)
+	CREATE TABLE IF NOT EXISTS deployed_models (
+		model_id TEXT PRIMARY KEY,
+		deployment_id TEXT, -- From VM deployment tracking
+		model_path TEXT NOT NULL, -- Path to model.onnx
+		metadata_path TEXT NOT NULL, -- Path to metadata.json
+		deployed_at INTEGER NOT NULL, -- Unix timestamp
+		status TEXT NOT NULL DEFAULT 'active', -- 'active', 'inactive', 'failed'
+		edge_id TEXT NOT NULL, -- Edge identifier
+		camera_id TEXT, -- Optional camera assignment
+		version TEXT, -- Model version
+		model_type TEXT, -- Model type (e.g., 'yolo', 'cae')
+		framework TEXT, -- Framework (e.g., 'onnx')
+		created_at INTEGER NOT NULL, -- Unix timestamp
+		updated_at INTEGER NOT NULL -- Unix timestamp
+	);
+
 	-- Indexes for performance
 	CREATE INDEX IF NOT EXISTS idx_events_camera_timestamp ON events(camera_id, timestamp);
 	CREATE INDEX IF NOT EXISTS idx_events_transmitted ON events(transmitted, timestamp);
@@ -157,6 +174,10 @@ func (d *Database) initSchema() error {
 	CREATE INDEX IF NOT EXISTS idx_labeled_screenshots_camera ON labeled_screenshots(camera_id);
 	CREATE INDEX IF NOT EXISTS idx_labeled_screenshots_label ON labeled_screenshots(label);
 	CREATE INDEX IF NOT EXISTS idx_labeled_screenshots_created ON labeled_screenshots(created_at);
+	CREATE INDEX IF NOT EXISTS idx_deployed_models_edge ON deployed_models(edge_id);
+	CREATE INDEX IF NOT EXISTS idx_deployed_models_camera ON deployed_models(camera_id);
+	CREATE INDEX IF NOT EXISTS idx_deployed_models_status ON deployed_models(status);
+	CREATE INDEX IF NOT EXISTS idx_deployed_models_deployment_id ON deployed_models(deployment_id);
 	`
 
 	if _, err := d.db.Exec(schema); err != nil {

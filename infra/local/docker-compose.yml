@@ -320,6 +320,78 @@ services:
       - TRAINING_SERVICE=http://python-ai-service:8000
       - IN_CONTAINER=true
 
+  # Phase 2 comprehensive integration tests (Epic 2.2.5 + 2.2.6)
+  phase2-tests:
+    image: alpine:latest
+    container_name: view-guard-phase2-tests
+    working_dir: /workspace/infra/local
+    depends_on:
+      user-vm-api:
+        condition: service_healthy
+      edge-orchestrator:
+        condition: service_started
+      python-ai-service:
+        condition: service_started
+      minio:
+        condition: service_healthy
+    volumes:
+      - ../..:/workspace
+      - user-vm-models:/app/data/models
+      - user-vm-datasets:/app/data/datasets
+    # Install dependencies and run Phase 2 integration tests
+    command: >
+      sh -c "
+        apk add --no-cache bash curl jq &&
+        chmod +x /workspace/infra/local/test-phase2.sh &&
+        cd /workspace/infra/local &&
+        VM_API=http://user-vm-api:8280 \
+        EDGE_API=http://edge-orchestrator:8081 \
+        TRAINING_SERVICE=http://python-ai-service:8000 \
+        IN_CONTAINER=true \
+        /workspace/infra/local/test-phase2.sh
+      "
+    networks:
+      - view-guard-edge
+    environment:
+      - VM_API=http://user-vm-api:8280
+      - EDGE_API=http://edge-orchestrator:8081
+      - TRAINING_SERVICE=http://python-ai-service:8000
+      - IN_CONTAINER=true
+
+  # Legacy: Individual epic tests (kept for backward compatibility)
+  model-deployment-tests:
+    image: alpine:latest
+    container_name: view-guard-model-deployment-tests
+    working_dir: /workspace/infra/local
+    depends_on:
+      user-vm-api:
+        condition: service_healthy
+      edge-orchestrator:
+        condition: service_started
+      minio:
+        condition: service_healthy
+    volumes:
+      - ../..:/workspace
+      - user-vm-models:/app/data/models
+      - user-vm-datasets:/app/data/datasets
+    # Install dependencies and run model deployment integration tests
+    command: >
+      sh -c "
+        apk add --no-cache bash curl jq &&
+        chmod +x /workspace/infra/local/test-model-deployment.sh &&
+        cd /workspace/infra/local &&
+        VM_API=http://user-vm-api:8280 \
+        EDGE_API=http://edge-orchestrator:8081 \
+        IN_CONTAINER=true \
+        /workspace/infra/local/test-model-deployment.sh
+      "
+    networks:
+      - view-guard-edge
+    environment:
+      - VM_API=http://user-vm-api:8280
+      - EDGE_API=http://edge-orchestrator:8081
+      - IN_CONTAINER=true
+
 networks:
   view-guard-edge:
     driver: bridge

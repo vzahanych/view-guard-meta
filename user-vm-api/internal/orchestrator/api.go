@@ -13,6 +13,7 @@ import (
 	"time"
 
 	modelcatalog "github.com/vzahanych/view-guard-meta/user-vm-api/internal/model-catalog"
+	modeldeployment "github.com/vzahanych/view-guard-meta/user-vm-api/internal/model-deployment"
 	"github.com/vzahanych/view-guard-meta/user-vm-api/internal/shared/config"
 	"github.com/vzahanych/view-guard-meta/user-vm-api/internal/shared/logging"
 	"github.com/vzahanych/view-guard-meta/user-vm-api/internal/shared/storage"
@@ -22,14 +23,29 @@ import (
 
 // APIServer provides HTTP REST API endpoints
 type APIServer struct {
-	config          *config.Config
-	logger          *logging.Logger
-	capStore        *tunnelgateway.CapabilityStore
-	edgeAPIServer   *tunnelgateway.EdgeAPIServer
-	datasetReceiver DatasetReceiver
-	modelCatalog    *modelcatalog.ModelCatalog
-	modelStorage    *storage.ModelStorage
-	server          *http.Server
+	config              *config.Config
+	logger              *logging.Logger
+	capStore            *tunnelgateway.CapabilityStore
+	edgeAPIServer       *tunnelgateway.EdgeAPIServer
+	datasetReceiver     DatasetReceiver
+	modelCatalog        *modelcatalog.ModelCatalog
+	modelStorage        *storage.ModelStorage
+	modelDeploymentService ModelDeploymentService
+	modelDeploymentOrchestrator ModelDeploymentOrchestrator
+	server              *http.Server
+}
+
+// ModelDeploymentService interface for model deployment
+type ModelDeploymentService interface {
+	ManualDeploy(ctx context.Context, modelID string, edgeID string, cameraID *string) (*modeldeployment.DeploymentJob, error)
+}
+
+// ModelDeploymentOrchestrator interface for deployment operations
+type ModelDeploymentOrchestrator interface {
+	GetDeploymentJob(ctx context.Context, deploymentID string) (*modeldeployment.DeploymentJob, error)
+	ListDeploymentJobs(ctx context.Context, filters *modeldeployment.DeploymentFilters) ([]*modeldeployment.DeploymentJob, error)
+	CompleteDeployment(ctx context.Context, deploymentID string, modelFilePath *string) error
+	FailDeployment(ctx context.Context, deploymentID string, errorMessage string) error
 }
 
 // DatasetReceiver interface for receiving dataset uploads
@@ -62,6 +78,11 @@ func (s *APIServer) SetModelStorage(modelStorage *storage.ModelStorage) {
 	s.modelStorage = modelStorage
 }
 
+// SetModelDeploymentOrchestrator sets the model deployment orchestrator
+func (s *APIServer) SetModelDeploymentOrchestrator(orchestrator ModelDeploymentOrchestrator) {
+	s.modelDeploymentOrchestrator = orchestrator
+}
+
 // Name returns the service name
 func (s *APIServer) Name() string {
 	return "api-gateway"
@@ -90,6 +111,11 @@ func (s *APIServer) Start(ctx context.Context) error {
 	mux.HandleFunc("/api/training/start", s.handleTrainingStart)
 	mux.HandleFunc("/api/training/", s.handleTrainingByID)
 	mux.HandleFunc("/api/training", s.handleTraining)
+
+	// Model deployment endpoints
+	mux.HandleFunc("/api/edges/", s.handleEdgeModelsDeploy)
+	mux.HandleFunc("/api/deployments", s.handleDeployments)
+	mux.HandleFunc("/api/deployments/", s.handleDeploymentByID)
 
 	// Health check
 	mux.HandleFunc("/health", s.handleHealth)

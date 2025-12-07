@@ -79,6 +79,9 @@ class TrainingStatusResponse(BaseModel):
     error: Optional[str] = None
     started_at: Optional[str] = None
     completed_at: Optional[str] = None
+    deployment_id: Optional[str] = None
+    deployment_status: Optional[str] = None
+    deployed_at: Optional[str] = None
 
 
 class TrainingJobSummary(BaseModel):
@@ -314,6 +317,30 @@ async def get_training_status(job_id: str = Path(..., description="Training job 
     if job.metrics:
         metrics = job.metrics.to_dict()
     
+    # Query deployment status if trained_model_id exists
+    deployment_id = None
+    deployment_status = None
+    deployed_at = None
+    
+    if job.trained_model_id:
+        # For PoC: Query deployment status from VM API Gateway
+        # Future: Direct database query or deployment service API
+        try:
+            import requests
+            deployment_url = f"{config.MODEL_CATALOG_API_URL}/api/deployments"
+            params = {"model_id": job.trained_model_id, "limit": 1}
+            resp = requests.get(deployment_url, params=params, timeout=2)
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("deployments") and len(data["deployments"]) > 0:
+                    deployment = data["deployments"][0]
+                    deployment_id = deployment.get("deployment_id")
+                    deployment_status = deployment.get("status")
+                    if deployment.get("deployment_completed_at"):
+                        deployed_at = deployment["deployment_completed_at"]
+        except Exception as e:
+            logger.debug(f"Failed to query deployment status: {e}")
+    
     return TrainingStatusResponse(
         job_id=job.job_id,
         status=job.status,
@@ -327,6 +354,9 @@ async def get_training_status(job_id: str = Path(..., description="Training job 
         error=job.error_message,
         started_at=job.started_at.isoformat() if job.started_at else None,
         completed_at=job.completed_at.isoformat() if job.completed_at else None,
+        deployment_id=deployment_id,
+        deployment_status=deployment_status,
+        deployed_at=deployed_at,
     )
 
 

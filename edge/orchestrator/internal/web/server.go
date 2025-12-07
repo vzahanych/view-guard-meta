@@ -17,6 +17,7 @@ import (
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/logger"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/service"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/state"
+	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/storage"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/video"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/web/screenshots"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/web/streaming"
@@ -61,6 +62,9 @@ type Server struct {
 	screenshotSvc      ScreenshotService  // Optional screenshot service for labeled screenshots
 	datasetSvc         DatasetService     // Optional dataset service for packaging and uploading datasets
 	capabilitySync     CapabilitySyncService // Optional capability sync service for VM sync
+	modelStorage       ModelStorageService // Optional model storage service for deployed models
+	modelLoader        ModelLoaderService  // Optional model loader service for inference
+	statusReporter     StatusReporterService // Optional deployment status reporter
 	version            string             // Application version
 	startTime          time.Time          // Server start time for uptime calculation
 }
@@ -181,6 +185,54 @@ func (s *Server) SetDatasetService(svc DatasetService) {
 // SetCapabilitySyncService sets the capability sync service for VM sync
 func (s *Server) SetCapabilitySyncService(capabilitySync CapabilitySyncService) {
 	s.capabilitySync = capabilitySync
+}
+
+// ModelStorageService interface for managing deployed models
+type ModelStorageService interface {
+	StoreModel(ctx context.Context, modelID string, deploymentID *string, edgeID string, cameraID *string, modelData []byte, metadata *storage.ModelMetadata) (*storage.DeployedModel, error)
+	UpdateModelStatus(ctx context.Context, modelID string, status string) error
+	GetModelsDir() string
+}
+
+// SetModelStorageService sets the model storage service
+func (s *Server) SetModelStorageService(storage ModelStorageService) {
+	s.modelStorage = storage
+}
+
+// ModelLoaderService interface for loading models for inference
+type ModelLoaderService interface {
+	LoadModel(ctx context.Context, modelID string, cameraID *string) (*ActiveModelInfo, error)
+	GetActiveModel(cameraID string) (*ActiveModelInfo, bool)
+	IsModelReady(cameraID string) bool
+}
+
+// ActiveModelInfo represents a loaded model (for interface compatibility)
+// This type matches ai.ActiveModelInfo but is defined here to avoid circular dependencies
+type ActiveModelInfo struct {
+	ModelID      string
+	ModelPath    string
+	MetadataPath string
+	Version      string
+	ModelType    string
+	Framework    string
+	CameraID     *string
+	LoadedAt     time.Time
+	Ready        bool
+}
+
+// SetModelLoaderService sets the model loader service
+func (s *Server) SetModelLoaderService(loader ModelLoaderService) {
+	s.modelLoader = loader
+}
+
+// StatusReporterService interface for reporting deployment status to VM
+type StatusReporterService interface {
+	ReportStatus(ctx context.Context, deploymentID string, status string, errorMessage *string, modelPath *string) error
+}
+
+// SetStatusReporterService sets the deployment status reporter service
+func (s *Server) SetStatusReporterService(reporter StatusReporterService) {
+	s.statusReporter = reporter
 }
 
 // Start starts the web server

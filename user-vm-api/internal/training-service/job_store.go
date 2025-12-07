@@ -59,6 +59,9 @@ type TrainingJob struct {
 	ErrorMessage     *string          `json:"error_message,omitempty"`
 	TrainingConfig   *TrainingConfig  `json:"training_config,omitempty"`
 	Metrics          *TrainingMetrics `json:"metrics,omitempty"`
+	DeploymentID     *string          `json:"deployment_id,omitempty"`
+	DeploymentStatus *string          `json:"deployment_status,omitempty"`
+	DeployedAt       *time.Time       `json:"deployed_at,omitempty"`
 	CreatedAt        time.Time        `json:"created_at"`
 	UpdatedAt        time.Time        `json:"updated_at"`
 }
@@ -105,7 +108,7 @@ func (js *JobStore) CreateJob(ctx context.Context, job *TrainingJob) error {
 	}
 
 	// Convert timestamps to Unix seconds (SQLite INTEGER)
-	var startedAt, completedAt *int64
+	var startedAt, completedAt, deployedAt *int64
 	if job.StartedAt != nil {
 		ts := job.StartedAt.Unix()
 		startedAt = &ts
@@ -114,13 +117,26 @@ func (js *JobStore) CreateJob(ctx context.Context, job *TrainingJob) error {
 		ts := job.CompletedAt.Unix()
 		completedAt = &ts
 	}
+	if job.DeployedAt != nil {
+		ts := job.DeployedAt.Unix()
+		deployedAt = &ts
+	}
+
+	var deploymentID, deploymentStatus sql.NullString
+	if job.DeploymentID != nil {
+		deploymentID = sql.NullString{String: *job.DeploymentID, Valid: true}
+	}
+	if job.DeploymentStatus != nil {
+		deploymentStatus = sql.NullString{String: *job.DeploymentStatus, Valid: true}
+	}
 
 	query := `
 		INSERT INTO training_jobs (
 			job_id, baseline_model_id, dataset_id, camera_id, edge_id,
 			status, trained_model_id, started_at, completed_at, error_message,
-			training_config, metrics, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			training_config, metrics, deployment_id, deployment_status, deployed_at,
+			created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
 	_, err = js.db.ExecContext(ctx, query,
@@ -136,6 +152,9 @@ func (js *JobStore) CreateJob(ctx context.Context, job *TrainingJob) error {
 		job.ErrorMessage,
 		string(configJSON),
 		string(metricsJSON),
+		deploymentID,
+		deploymentStatus,
+		deployedAt,
 		job.CreatedAt.Unix(),
 		job.UpdatedAt.Unix(),
 	)
@@ -199,6 +218,22 @@ func (js *JobStore) UpdateJobStatus(ctx context.Context, jobID string, status Jo
 			query += ", metrics = ?"
 			args = append(args, string(metricsJSON))
 		}
+
+		if updates.DeploymentID != nil {
+			query += ", deployment_id = ?"
+			args = append(args, *updates.DeploymentID)
+		}
+
+		if updates.DeploymentStatus != nil {
+			query += ", deployment_status = ?"
+			args = append(args, *updates.DeploymentStatus)
+		}
+
+		if updates.DeployedAt != nil {
+			query += ", deployed_at = ?"
+			ts := updates.DeployedAt.Unix()
+			args = append(args, ts)
+		}
 	}
 
 	query += " WHERE job_id = ?"
@@ -223,12 +258,15 @@ func (js *JobStore) UpdateJobStatus(ctx context.Context, jobID string, status Jo
 
 // JobUpdate contains optional fields to update
 type JobUpdate struct {
-	TrainedModelID  *string          `json:"trained_model_id,omitempty"`
-	StartedAt       *time.Time       `json:"started_at,omitempty"`
-	CompletedAt    *time.Time       `json:"completed_at,omitempty"`
-	ErrorMessage   *string          `json:"error_message,omitempty"`
-	TrainingConfig *TrainingConfig  `json:"training_config,omitempty"`
-	Metrics        *TrainingMetrics `json:"metrics,omitempty"`
+	TrainedModelID   *string          `json:"trained_model_id,omitempty"`
+	StartedAt        *time.Time       `json:"started_at,omitempty"`
+	CompletedAt      *time.Time       `json:"completed_at,omitempty"`
+	ErrorMessage     *string          `json:"error_message,omitempty"`
+	TrainingConfig   *TrainingConfig  `json:"training_config,omitempty"`
+	Metrics          *TrainingMetrics `json:"metrics,omitempty"`
+	DeploymentID     *string          `json:"deployment_id,omitempty"`
+	DeploymentStatus *string          `json:"deployment_status,omitempty"`
+	DeployedAt       *time.Time       `json:"deployed_at,omitempty"`
 }
 
 // GetJob retrieves a training job by ID
@@ -240,14 +278,15 @@ func (js *JobStore) GetJob(ctx context.Context, jobID string) (*TrainingJob, err
 	query := `
 		SELECT job_id, baseline_model_id, dataset_id, camera_id, edge_id,
 		       status, trained_model_id, started_at, completed_at, error_message,
-		       training_config, metrics, created_at, updated_at
+		       training_config, metrics, deployment_id, deployment_status, deployed_at,
+		       created_at, updated_at
 		FROM training_jobs
 		WHERE job_id = ?
 	`
 
 	var job TrainingJob
-	var startedAt, completedAt, createdAt, updatedAt sql.NullInt64
-	var trainedModelID, errorMessage sql.NullString
+	var startedAt, completedAt, deployedAt, createdAt, updatedAt sql.NullInt64
+	var trainedModelID, errorMessage, deploymentID, deploymentStatus sql.NullString
 	var configJSON, metricsJSON sql.NullString
 
 	err := js.db.QueryRowContext(ctx, query, jobID).Scan(
@@ -263,6 +302,9 @@ func (js *JobStore) GetJob(ctx context.Context, jobID string) (*TrainingJob, err
 		&errorMessage,
 		&configJSON,
 		&metricsJSON,
+		&deploymentID,
+		&deploymentStatus,
+		&deployedAt,
 		&createdAt,
 		&updatedAt,
 	)

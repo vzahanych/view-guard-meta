@@ -547,6 +547,13 @@ class TrainingOrchestrator:
         
         if result["registered"]:
             logger.info(f"[Job {job.job_id}] Model {job.trained_model_id} successfully registered in catalog")
+            # Publish model.trained event to trigger deployment
+            # For PoC, we rely on deployment service's periodic catalog scan
+            # Future: Publish event via HTTP to VM API Gateway event bus
+            try:
+                self._publish_model_trained_event(job.trained_model_id, job.edge_id, job.camera_id)
+            except Exception as e:
+                logger.warning(f"[Job {job.job_id}] Failed to publish model.trained event: {e}")
         else:
             logger.warning(
                 f"[Job {job.job_id}] Model {job.trained_model_id} saved locally but "

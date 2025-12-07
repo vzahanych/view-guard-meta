@@ -158,6 +158,9 @@ const (
 		error_message TEXT,
 		training_config TEXT, -- JSON: {"epochs": 50, "batch_size": 16, ...}
 		metrics TEXT, -- JSON: {"train_loss": [...], "val_loss": [...], "mAP": [...], ...}
+		deployment_id TEXT, -- Link to model_deployments.deployment_id (if deployment was triggered)
+		deployment_status TEXT, -- Deployment status (pending, deploying, deployed, failed)
+		deployed_at INTEGER, -- Timestamp when deployment completed
 		created_at INTEGER NOT NULL,
 		updated_at INTEGER NOT NULL,
 		FOREIGN KEY (edge_id) REFERENCES edges(edge_id),
@@ -168,6 +171,31 @@ const (
 	CREATE INDEX IF NOT EXISTS idx_training_jobs_status ON training_jobs(status);
 	CREATE INDEX IF NOT EXISTS idx_training_jobs_dataset_id ON training_jobs(dataset_id);
 	CREATE INDEX IF NOT EXISTS idx_training_jobs_created_at ON training_jobs(created_at);
+	CREATE INDEX IF NOT EXISTS idx_training_jobs_deployment_id ON training_jobs(deployment_id);
+	`
+
+	// ModelDeploymentsTable stores model deployment jobs and status
+	CreateModelDeploymentsTable = `
+	CREATE TABLE IF NOT EXISTS model_deployments (
+		deployment_id TEXT PRIMARY KEY,
+		model_id TEXT NOT NULL,
+		edge_id TEXT NOT NULL,
+		camera_id TEXT,
+		status TEXT NOT NULL DEFAULT 'pending', -- pending, deploying, deployed, failed
+		deployment_started_at INTEGER,
+		deployment_completed_at INTEGER,
+		error_message TEXT,
+		model_file_path TEXT, -- Path to deployed model file on Edge (for tracking)
+		deployment_version TEXT, -- Model version deployed
+		created_at INTEGER NOT NULL,
+		updated_at INTEGER NOT NULL,
+		FOREIGN KEY (edge_id) REFERENCES edges(edge_id),
+		FOREIGN KEY (model_id) REFERENCES ai_models(model_id)
+	);
+	CREATE INDEX IF NOT EXISTS idx_model_deployments_edge_id ON model_deployments(edge_id);
+	CREATE INDEX IF NOT EXISTS idx_model_deployments_model_id ON model_deployments(model_id);
+	CREATE INDEX IF NOT EXISTS idx_model_deployments_status ON model_deployments(status);
+	CREATE INDEX IF NOT EXISTS idx_model_deployments_camera_id ON model_deployments(camera_id);
 	`
 )
 
@@ -182,5 +210,6 @@ func AllTables() []string {
 		CreateTelemetryBufferTable,
 		CreateEdgeCameraStatusTable,
 		CreateTrainingJobsTable,
+		CreateModelDeploymentsTable,
 	}
 }
