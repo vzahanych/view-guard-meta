@@ -184,6 +184,35 @@ func main() {
 		log.Info("Telemetry collector registered")
 	}
 
+	// Initialize telemetry sender (sends telemetry/heartbeat via gRPC)
+	// This triggers edge auto-registration when it sends the first heartbeat
+	var telemetrySender *telemetry.Sender
+	if cfg.Edge.Telemetry.Enabled && grpcClient != nil {
+		// Determine edge ID - use consistent ID for test environments
+		// Priority: 1) EDGE_ID env var, 2) Default "poc-edge-1" for test environments
+		// In production, EDGE_ID should be explicitly set
+		edgeID := "poc-edge-1" // Default for PoC/test environment
+		if envEdgeID := os.Getenv("EDGE_ID"); envEdgeID != "" {
+			edgeID = envEdgeID
+		}
+		// Note: We don't use hostname by default to ensure consistency in test environments
+		// where container hostnames may be Docker container IDs
+
+		// Create gRPC telemetry sender wrapper
+		grpcTelemetrySender := grpcclient.NewTelemetrySender(grpcClient, log)
+
+		// Create telemetry sender service
+		telemetrySender = telemetry.NewSender(
+			telemetryCollector,
+			grpcTelemetrySender,
+			&cfg.Edge.Telemetry,
+			edgeID,
+			log,
+		)
+		svcMgr.Register(telemetrySender)
+		log.Info("Telemetry sender registered", "edge_id", edgeID)
+	}
+
 	// Initialize FFmpeg wrapper (for streaming)
 	var ffmpegWrapper *video.FFmpegWrapper
 	ffmpegWrapper, err = video.NewFFmpegWrapper(log)
@@ -268,14 +297,17 @@ func main() {
 		}
 
 		// Initialize dataset service for packaging and uploading datasets to VM
-		// Use hostname as edge ID (can be configured later)
-		edgeID := "edge-local" // Default for PoC
-		if hostname, err := os.Hostname(); err == nil && hostname != "" {
-			edgeID = hostname
+		// Use same edge ID logic as telemetry sender for consistency
+		// Priority: 1) EDGE_ID env var, 2) Default "poc-edge-1" for test environments
+		datasetEdgeID := "poc-edge-1" // Default for PoC/test environment
+		if envEdgeID := os.Getenv("EDGE_ID"); envEdgeID != "" {
+			datasetEdgeID = envEdgeID
 		}
-		datasetSvc := dataset.NewService(cfg, log, edgeID)
+		// Note: We don't use hostname by default to ensure consistency in test environments
+		// where container hostnames may be Docker container IDs
+		datasetSvc := dataset.NewService(cfg, log, datasetEdgeID)
 		webServer.SetDatasetService(datasetSvc)
-		log.Info("Dataset service initialized", "edge_id", edgeID)
+		log.Info("Dataset service initialized", "edge_id", datasetEdgeID)
 
 		// Set capability sync service on web server for manual sync triggers
 		webServer.SetCapabilitySyncService(capabilitySync)

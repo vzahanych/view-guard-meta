@@ -15,7 +15,21 @@ if ! command -v wg >/dev/null 2>&1; then
     exit 1
 fi
 
-echo "[generate-keys] Generating WireGuard keys..."
+# Check if keys already exist - if so, skip generation (preserve keys across restarts)
+if [ -f "${KEYS_DIR}/server.private" ] && [ -f "${KEYS_DIR}/edge.private" ] && [ -f "${KEYS_DIR}/preshared.key" ] && [ -f "${KEYS_DIR}/edge-id" ]; then
+    echo "[generate-keys] Keys already exist, skipping generation (preserving existing keys)"
+    echo "[generate-keys] To regenerate keys, delete files in ${KEYS_DIR}/ first"
+    # Read existing keys to display
+    server_pub=$(cat "${KEYS_DIR}/server.public")
+    edge_pub=$(cat "${KEYS_DIR}/edge.public")
+    edge_id=$(cat "${KEYS_DIR}/edge-id")
+    echo "[generate-keys] Server public key: ${server_pub}"
+    echo "[generate-keys] Edge public key:   ${edge_pub}"
+    echo "[generate-keys] Edge ID:          ${edge_id}"
+    exit 0
+fi
+
+echo "[generate-keys] Generating WireGuard keys and Edge ID..."
 
 # Generate keys
 server_priv=$(wg genkey)
@@ -24,12 +38,17 @@ server_pub=$(printf '%s' "${server_priv}" | wg pubkey)
 edge_pub=$(printf '%s' "${edge_priv}" | wg pubkey)
 psk=$(wg genpsk)
 
+# Generate Edge ID (for local test environment, use deterministic ID)
+# In production, this should be set by SaaS components
+EDGE_ID="poc-edge-1"
+
 # Store keys in separate files
 echo "${server_priv}" > "${KEYS_DIR}/server.private"
 echo "${server_pub}" > "${KEYS_DIR}/server.public"
 echo "${edge_priv}" > "${KEYS_DIR}/edge.private"
 echo "${edge_pub}" > "${KEYS_DIR}/edge.public"
 echo "${psk}" > "${KEYS_DIR}/preshared.key"
+echo "${EDGE_ID}" > "${KEYS_DIR}/edge-id"
 
 # Set permissions - for local dev, make readable by owner and group
 # In production, these should be more restrictive
@@ -52,4 +71,5 @@ fi
 echo "[generate-keys] Keys generated and stored in ${KEYS_DIR}/"
 echo "[generate-keys] Server public key: ${server_pub}"
 echo "[generate-keys] Edge public key:   ${edge_pub}"
+echo "[generate-keys] Edge ID:           ${EDGE_ID}"
 

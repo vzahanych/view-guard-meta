@@ -41,19 +41,19 @@ type WireGuardServer struct {
 
 // PeerInfo contains information about a WireGuard peer
 type PeerInfo struct {
-	PublicKey      wgtypes.Key
-	AllowedIPs     []net.IPNet
-	Endpoint       *net.UDPAddr
-	LastHandshake  time.Time
-	Connected      bool
-	Latency        time.Duration // Measured latency
-	LastPingTime   time.Time     // Last ping sent
-	LastPongTime   time.Time     // Last pong received
-	PingCount      int64         // Total ping count
-	PongCount      int64         // Total pong count
-	BytesReceived  uint64        // Total bytes received
-	BytesSent      uint64        // Total bytes sent
-	mu             sync.RWMutex
+	PublicKey     wgtypes.Key
+	AllowedIPs    []net.IPNet
+	Endpoint      *net.UDPAddr
+	LastHandshake time.Time
+	Connected     bool
+	Latency       time.Duration // Measured latency
+	LastPingTime  time.Time     // Last ping sent
+	LastPongTime  time.Time     // Last pong received
+	PingCount     int64         // Total ping count
+	PongCount     int64         // Total pong count
+	BytesReceived uint64        // Total bytes received
+	BytesSent     uint64        // Total bytes sent
+	mu            sync.RWMutex
 }
 
 // NewWireGuardServer creates a new WireGuard server instance
@@ -306,15 +306,15 @@ func (w *WireGuardServer) configureInterface() error {
 func parseWireGuardConfig(configData string) (privateKey string, listenPort string, peerPublicKey string, peerAllowedIPs string, peerPresharedKey string, err error) {
 	lines := strings.Split(configData, "\n")
 	var inInterface, inPeer bool
-	
+
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
-		
+
 		// Skip comments and empty lines
 		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
 			continue
 		}
-		
+
 		// Check for section headers
 		if trimmed == "[Interface]" {
 			inInterface = true
@@ -326,7 +326,7 @@ func parseWireGuardConfig(configData string) (privateKey string, listenPort stri
 			inInterface = false
 			continue
 		}
-		
+
 		// Parse Interface section
 		if inInterface {
 			if strings.HasPrefix(trimmed, "PrivateKey") {
@@ -341,7 +341,7 @@ func parseWireGuardConfig(configData string) (privateKey string, listenPort stri
 				}
 			}
 		}
-		
+
 		// Parse Peer section
 		if inPeer {
 			if strings.HasPrefix(trimmed, "PublicKey") {
@@ -362,11 +362,11 @@ func parseWireGuardConfig(configData string) (privateKey string, listenPort stri
 			}
 		}
 	}
-	
+
 	if privateKey == "" {
 		return "", "", "", "", "", fmt.Errorf("PrivateKey not found in config")
 	}
-	
+
 	return privateKey, listenPort, peerPublicKey, peerAllowedIPs, peerPresharedKey, nil
 }
 
@@ -465,9 +465,9 @@ func (w *WireGuardServer) AddPeer(publicKey wgtypes.Key, allowedIPs []net.IPNet)
 
 	// Store peer info
 	w.peers[publicKey.String()] = &PeerInfo{
-		PublicKey:   publicKey,
-		AllowedIPs:  allowedIPs,
-		Connected:   false,
+		PublicKey:  publicKey,
+		AllowedIPs: allowedIPs,
+		Connected:  false,
 	}
 
 	w.logger.Info("Added WireGuard peer", zap.String("public_key", publicKey.String()))
@@ -575,8 +575,22 @@ func (w *WireGuardServer) updatePeerStatus() {
 	for _, peer := range dev.Peers {
 		peerKey := peer.PublicKey.String()
 		peerInfo, exists := w.peers[peerKey]
+
+		// If peer doesn't exist in our map, add it (it might be configured in WireGuard config file)
 		if !exists {
-			continue
+			peerInfo = &PeerInfo{
+				PublicKey:     peer.PublicKey,
+				AllowedIPs:    peer.AllowedIPs,
+				Endpoint:      peer.Endpoint,
+				Connected:     !peer.LastHandshakeTime.IsZero() && time.Since(peer.LastHandshakeTime) < 3*time.Minute,
+				LastHandshake: peer.LastHandshakeTime,
+				BytesReceived: uint64(peer.ReceiveBytes),
+				BytesSent:     uint64(peer.TransmitBytes),
+			}
+			w.peers[peerKey] = peerInfo
+			w.logger.Info("Discovered WireGuard peer from interface",
+				zap.String("public_key", peerKey),
+				zap.Bool("connected", peerInfo.Connected))
 		}
 
 		peerInfo.mu.Lock()
@@ -611,10 +625,10 @@ func (w *WireGuardServer) updatePeerStatus() {
 					Type:      service.EventTypeWireGuardClientConnected,
 					Timestamp: time.Now().Unix(),
 					Data: map[string]interface{}{
-						"public_key":      peerKey,
-						"last_handshake":  peer.LastHandshakeTime.Unix(),
-						"bytes_received":  peer.ReceiveBytes,
-						"bytes_sent":      peer.TransmitBytes,
+						"public_key":     peerKey,
+						"last_handshake": peer.LastHandshakeTime.Unix(),
+						"bytes_received": peer.ReceiveBytes,
+						"bytes_sent":     peer.TransmitBytes,
 					},
 				})
 			} else if wasConnected && !peerInfo.Connected {
@@ -644,9 +658,85 @@ func (w *WireGuardServer) updatePeerStatus() {
 // GetPeerInfo returns connection information for a peer
 func (w *WireGuardServer) GetPeerInfo(publicKey wgtypes.Key) (*PeerInfo, bool) {
 	w.mu.RLock()
-	defer w.mu.RUnlock()
 	peerInfo, exists := w.peers[publicKey.String()]
+	w.mu.RUnlock()
+
+	// If not found in map, try to get from WireGuard interface directly
+	if !exists || peerInfo == nil {
+		dev, err := w.client.Device(w.iface)
+		if err == nil {
+			for _, peer := range dev.Peers {
+				if peer.PublicKey.String() == publicKey.String() {
+					// Found in interface, add to map
+					w.mu.Lock()
+					peerInfo = &PeerInfo{
+						PublicKey:     peer.PublicKey,
+						AllowedIPs:    peer.AllowedIPs,
+						Endpoint:      peer.Endpoint,
+						Connected:     !peer.LastHandshakeTime.IsZero() && time.Since(peer.LastHandshakeTime) < 3*time.Minute,
+						LastHandshake: peer.LastHandshakeTime,
+						BytesReceived: uint64(peer.ReceiveBytes),
+						BytesSent:     uint64(peer.TransmitBytes),
+					}
+					w.peers[publicKey.String()] = peerInfo
+					w.mu.Unlock()
+					w.logger.Debug("Found WireGuard peer from interface",
+						zap.String("public_key", publicKey.String()),
+						zap.Bool("connected", peerInfo.Connected))
+					return peerInfo, true
+				}
+			}
+		}
+	}
+
 	return peerInfo, exists
+}
+
+// FindConnectedPeer finds any connected peer from the WireGuard interface
+// Useful when the database public key doesn't match the actual peer
+func (w *WireGuardServer) FindConnectedPeer() *PeerInfo {
+	dev, err := w.client.Device(w.iface)
+	if err != nil {
+		w.logger.Debug("Failed to get device for peer search", zap.Error(err))
+		return nil
+	}
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	// Find the first peer with a recent handshake (connected)
+	for _, peer := range dev.Peers {
+		if !peer.LastHandshakeTime.IsZero() && time.Since(peer.LastHandshakeTime) < 3*time.Minute {
+			peerKey := peer.PublicKey.String()
+			peerInfo, exists := w.peers[peerKey]
+			if !exists {
+				// Add to map if not exists
+				peerInfo = &PeerInfo{
+					PublicKey:     peer.PublicKey,
+					AllowedIPs:    peer.AllowedIPs,
+					Endpoint:      peer.Endpoint,
+					Connected:     true,
+					LastHandshake: peer.LastHandshakeTime,
+					BytesReceived: uint64(peer.ReceiveBytes),
+					BytesSent:     uint64(peer.TransmitBytes),
+				}
+				w.peers[peerKey] = peerInfo
+				w.logger.Info("Discovered connected WireGuard peer from interface",
+					zap.String("public_key", peerKey))
+			} else {
+				// Update existing peer info
+				peerInfo.mu.Lock()
+				peerInfo.Connected = true
+				peerInfo.LastHandshake = peer.LastHandshakeTime
+				peerInfo.BytesReceived = uint64(peer.ReceiveBytes)
+				peerInfo.BytesSent = uint64(peer.TransmitBytes)
+				peerInfo.mu.Unlock()
+			}
+			return peerInfo
+		}
+	}
+
+	return nil
 }
 
 // GetConnectedPeers returns list of connected peer public keys

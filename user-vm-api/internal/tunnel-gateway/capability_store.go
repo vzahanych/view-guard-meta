@@ -231,6 +231,7 @@ func (s *CapabilityStore) ListCameraStatuses(ctx context.Context, edgeID string)
 		var enabledInt, snapshotRequiredInt int
 		var labelCounts sql.NullString
 		var trainingEligibilityStatus string
+		var datasetID sql.NullString
 		var syncedAt, updatedAt int64
 
 		if err := rows.Scan(
@@ -244,6 +245,7 @@ func (s *CapabilityStore) ListCameraStatuses(ctx context.Context, edgeID string)
 			&status.RequiredSnapshotCount,
 			&snapshotRequiredInt,
 			&trainingEligibilityStatus,
+			&datasetID,
 			&syncedAt,
 			&updatedAt,
 		); err != nil {
@@ -253,6 +255,9 @@ func (s *CapabilityStore) ListCameraStatuses(ctx context.Context, edgeID string)
 		status.Enabled = enabledInt == 1
 		status.SnapshotRequired = snapshotRequiredInt == 1
 		status.TrainingEligibilityStatus = TrainingEligibilityStatus(trainingEligibilityStatus)
+		if datasetID.Valid {
+			status.DatasetID = datasetID.String
+		}
 		status.SyncedAt = time.Unix(syncedAt, 0)
 		status.UpdatedAt = time.Unix(updatedAt, 0)
 

@@ -26,6 +26,7 @@ type EdgeConfig struct {
 	Telemetry    TelemetryConfig    `yaml:"telemetry"`
 	Encryption   EncryptionConfig   `yaml:"encryption"`
 	Web          WebConfig          `yaml:"web"`
+	Processing   ProcessingConfig   `yaml:"processing"`
 }
 
 // OrchestratorConfig contains orchestrator service configuration
@@ -119,6 +120,33 @@ type WebConfig struct {
 	// AuthToken string `yaml:"auth_token"` // Simple token-based auth for PoC
 }
 
+// ProcessingConfig contains event processing configuration
+type ProcessingConfig struct {
+	// Frame processing
+	InferenceInterval time.Duration `yaml:"inference_interval"` // Interval between frames sent to inference (e.g., 1s = 1 FPS)
+	PreBufferDuration time.Duration `yaml:"pre_buffer_duration"` // Duration of pre-event buffer (e.g., 5s)
+	
+	// Inference
+	ConfidenceThreshold float64  `yaml:"confidence_threshold"` // Global confidence threshold (0.0-1.0)
+	PerCameraThresholds map[string]float64 `yaml:"per_camera_thresholds,omitempty"` // Per-camera thresholds (camera_id -> threshold)
+	EnabledClasses      []string `yaml:"enabled_classes,omitempty"` // Optional: filter by class names
+	
+	// Event detection
+	MinEventDuration    time.Duration `yaml:"min_event_duration"` // Minimum event duration for debouncing (e.g., 2s)
+	
+	// Clip recording
+	PostEventDuration   time.Duration `yaml:"post_event_duration"` // Duration to record after event (e.g., 10s)
+	MaxClipLength       time.Duration `yaml:"max_clip_length"` // Maximum clip length (0 = no limit)
+	
+	// Snapshot capture
+	JPEGQuality         int `yaml:"jpeg_quality"` // JPEG quality for snapshots (1-100, default 85)
+	
+	// Retry configuration
+	MaxRetries          int           `yaml:"max_retries"` // Maximum retry attempts for transmission (0 = unlimited)
+	RetryBaseDelay      time.Duration `yaml:"retry_base_delay"` // Base delay for exponential backoff
+	RetryMaxDelay       time.Duration `yaml:"retry_max_delay"` // Maximum delay for exponential backoff
+}
+
 // LogConfig contains logging configuration
 type LogConfig struct {
 	Level  string `yaml:"level"`
@@ -210,6 +238,35 @@ func (c *Config) setDefaults() {
 	}
 	if c.Edge.Storage.MaxDiskUsagePercent == 0 {
 		c.Edge.Storage.MaxDiskUsagePercent = 80
+	}
+
+	// Processing configuration defaults
+	if c.Edge.Processing.InferenceInterval == 0 {
+		c.Edge.Processing.InferenceInterval = 1 * time.Second // Default: 1 FPS
+	}
+	if c.Edge.Processing.PreBufferDuration == 0 {
+		c.Edge.Processing.PreBufferDuration = 5 * time.Second // Default: 5 seconds
+	}
+	if c.Edge.Processing.ConfidenceThreshold == 0 {
+		c.Edge.Processing.ConfidenceThreshold = 0.5 // Default: 50% confidence
+	}
+	if c.Edge.Processing.MinEventDuration == 0 {
+		c.Edge.Processing.MinEventDuration = 2 * time.Second // Default: 2 seconds
+	}
+	if c.Edge.Processing.PostEventDuration == 0 {
+		c.Edge.Processing.PostEventDuration = 10 * time.Second // Default: 10 seconds
+	}
+	if c.Edge.Processing.JPEGQuality == 0 {
+		c.Edge.Processing.JPEGQuality = 85 // Default: 85% quality
+	}
+	if c.Edge.Processing.MaxRetries == 0 {
+		c.Edge.Processing.MaxRetries = 10 // Default: 10 retries
+	}
+	if c.Edge.Processing.RetryBaseDelay == 0 {
+		c.Edge.Processing.RetryBaseDelay = 1 * time.Second // Default: 1 second
+	}
+	if c.Edge.Processing.RetryMaxDelay == 0 {
+		c.Edge.Processing.RetryMaxDelay = 5 * time.Minute // Default: 5 minutes
 	}
 
 	if c.Edge.AI.ServiceURL == "" {

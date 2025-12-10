@@ -218,14 +218,27 @@ func (c *RTSPClient) connect() error {
 		// Update last frame time
 		c.mu.Lock()
 		c.lastFrame = time.Now()
+		timestamp := c.lastFrame
 		c.mu.Unlock()
+
+		// Convert NALUs to frame data
+		frameData := c.nalusToFrame(nalus)
 
 		// Call callback if set
 		if c.onFrame != nil {
-			// Convert NALUs to frame data
-			frameData := c.nalusToFrame(nalus)
 			// Use current time as PTS (in production, extract from RTP packet)
-			c.onFrame(frameData, time.Now())
+			c.onFrame(frameData, timestamp)
+		}
+
+		// Publish frame received event
+		if c.GetEventBus() != nil {
+			// Extract camera ID from URL or use URL as identifier
+			cameraID := c.url // For now, use URL as camera ID (will be improved when camera manager integrates)
+			c.PublishEvent(service.EventTypeFrameReceived, map[string]interface{}{
+				"camera_id":  cameraID,
+				"frame_data": frameData,
+				"timestamp":  timestamp,
+			})
 		}
 	})
 

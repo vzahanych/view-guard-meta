@@ -22,12 +22,12 @@ import (
 // Client manages gRPC connections to KVM VM over WireGuard tunnel
 type Client struct {
 	*service.ServiceBase
-	config        *config.WireGuardConfig
-	wgClient      *wireguard.Client
-	logger        *logger.Logger
-	conn          *grpc.ClientConn
-	mu            sync.RWMutex
-	eventClient   edge.EventServiceClient
+	config          *config.WireGuardConfig
+	wgClient        *wireguard.Client
+	logger          *logger.Logger
+	conn            *grpc.ClientConn
+	mu              sync.RWMutex
+	eventClient     edge.EventServiceClient
 	telemetryClient edge.TelemetryServiceClient
 	controlClient   edge.ControlServiceClient
 	streamingClient edge.StreamingServiceClient
@@ -88,7 +88,7 @@ connected:
 	// KVM VM gRPC server should be accessible via WireGuard interface
 	// For PoC, we'll use localhost or WireGuard interface IP
 	endpoint := c.getEndpoint()
-	
+
 	c.LogInfo("Connecting to KVM VM", "endpoint", endpoint)
 
 	conn, err := c.connect(ctx, endpoint)
@@ -143,8 +143,8 @@ func (c *Client) connect(ctx context.Context, endpoint string) (*grpc.ClientConn
 	opts := []grpc.DialOption{
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
-			Time:                10 * time.Second,
-			Timeout:             3 * time.Second,
+			Time:                30 * time.Second, // Reduced from 10s to avoid "too_many_pings" error
+			Timeout:             5 * time.Second,
 			PermitWithoutStream: true,
 		}),
 		grpc.WithBlock(),
@@ -227,4 +227,3 @@ func (c *Client) Reconnect(ctx context.Context) error {
 	c.LogInfo("gRPC client reconnected", "endpoint", endpoint)
 	return nil
 }
-

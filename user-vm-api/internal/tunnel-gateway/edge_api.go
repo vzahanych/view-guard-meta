@@ -2,6 +2,7 @@ package tunnelgateway
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"net"
 	"sync"
@@ -13,6 +14,7 @@ import (
 	"github.com/vzahanych/view-guard-meta/user-vm-api/internal/shared/logging"
 	"github.com/vzahanych/view-guard-meta/user-vm-api/internal/shared/service"
 	"go.uber.org/zap"
+	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/peer"
@@ -39,6 +41,9 @@ type EdgeAPIServer struct {
 	cancel      context.CancelFunc
 
 	capStore *CapabilityStore
+
+	// Connection monitor for continuous status monitoring
+	connectionMonitor *ConnectionMonitor
 
 	// Service interfaces (will be set when services are available)
 	eventReceiver    EventReceiver
@@ -98,6 +103,9 @@ func NewEdgeAPIServer(cfg *config.Config, log *logging.Logger, db *database.DB, 
 		capStore:    NewCapabilityStore(db),
 	}
 
+	// Create connection monitor
+	server.connectionMonitor = NewConnectionMonitor(cfg, log, db, server, wgServer)
+
 	return server, nil
 }
 
@@ -108,11 +116,30 @@ func (s *EdgeAPIServer) SetEventBus(bus *service.EventBus) {
 	if s.capStore != nil {
 		s.capStore.SetEventBus(bus)
 	}
+	// Set event bus on connection monitor
+	if s.connectionMonitor != nil {
+		s.connectionMonitor.SetEventBus(bus)
+	}
 }
 
 // GetCapabilityStore returns the capability store instance
 func (s *EdgeAPIServer) GetCapabilityStore() *CapabilityStore {
 	return s.capStore
+}
+
+// GetConnectionMonitor returns the connection monitor instance
+func (s *EdgeAPIServer) GetConnectionMonitor() *ConnectionMonitor {
+	return s.connectionMonitor
+}
+
+// GetDB returns the database instance
+func (s *EdgeAPIServer) GetDB() *database.DB {
+	return s.db
+}
+
+// GetWireGuardServer returns the WireGuard server instance
+func (s *EdgeAPIServer) GetWireGuardServer() *WireGuardServer {
+	return s.wgServer
 }
 
 // SetEventReceiver sets the event receiver service
@@ -181,8 +208,16 @@ func (s *EdgeAPIServer) Start(ctx context.Context) error {
 		}
 	}()
 
-	// Start connection monitoring
+	// Start legacy connection monitoring (for backward compatibility)
 	go s.monitorConnections(ctx)
+
+	// Start comprehensive connection monitor service
+	if s.connectionMonitor != nil {
+		if err := s.connectionMonitor.Start(ctx); err != nil {
+			s.logger.Error("Failed to start connection monitor", zap.Error(err))
+			// Don't fail server start if monitor fails
+		}
+	}
 
 	s.logger.Info("Edge API gRPC server started", zap.String("address", listenAddr))
 	return nil
@@ -213,6 +248,13 @@ func (s *EdgeAPIServer) Stop(ctx context.Context) error {
 
 	if s.listener != nil {
 		s.listener.Close()
+	}
+
+	// Stop connection monitor
+	if s.connectionMonitor != nil {
+		if err := s.connectionMonitor.Stop(ctx); err != nil {
+			s.logger.Warn("Error stopping connection monitor", zap.Error(err))
+		}
 	}
 
 	return nil
@@ -300,25 +342,113 @@ func (s *EdgeAPIServer) authenticateConnection(ctx context.Context) (string, err
 		matchedPublicKey).Scan(&edgeID)
 
 	if err != nil {
-		return "", fmt.Errorf("edge not found for WireGuard peer: %w", err)
+		// Edge not found for this WireGuard public key
+		// In production: Edge ID should be pre-registered by SaaS components
+		// For local test: Edge ID should be registered by test script before edge connects
+		if err == sql.ErrNoRows {
+			// Try to find edge by checking if there's a known edge_id that should match this public key
+			// For local test environment, we might need to look up by a default edge_id
+			// But in production, this should never happen - edge must be pre-registered
+			s.logger.Warn("Edge not found for WireGuard public key - edge must be pre-registered",
+				zap.String("public_key", matchedPublicKey))
+			return "", fmt.Errorf("edge not registered: WireGuard public key not found in edge management system. Edge must be pre-registered before connecting")
+		} else {
+			return "", fmt.Errorf("failed to lookup edge for WireGuard peer: %w", err)
+		}
+	}
+
+	// Validate that the edge exists and is active
+	var status string
+	checkErr := s.db.QueryRowContext(ctx,
+		"SELECT status FROM edges WHERE edge_id = ?", edgeID).Scan(&status)
+	if checkErr == sql.ErrNoRows {
+		// Edge ID doesn't exist in database - this should not happen if edge was properly registered
+		s.logger.Error("Edge ID not found in database - registration inconsistency",
+			zap.String("edge_id", edgeID),
+			zap.String("public_key", matchedPublicKey))
+		return "", fmt.Errorf("edge ID %s not found in edge management system - edge must be pre-registered", edgeID)
+	} else if checkErr != nil {
+		return "", fmt.Errorf("failed to validate edge status: %w", checkErr)
+	}
+
+	// Update edge status to active and update WireGuard public key if needed
+	if status != "active" {
+		now := time.Now().Unix()
+		_, updateErr := s.db.ExecContext(ctx,
+			"UPDATE edges SET status = 'active', last_seen = ?, updated_at = ?, wireguard_public_key = ? WHERE edge_id = ?",
+			now, now, matchedPublicKey, edgeID)
+		if updateErr != nil {
+			return "", fmt.Errorf("failed to update edge status: %w", updateErr)
+		}
+		s.logger.Info("Updated edge status to active",
+			zap.String("edge_id", edgeID),
+			zap.String("old_status", status),
+			zap.String("public_key", matchedPublicKey))
+	} else {
+		// Update WireGuard public key if it changed
+		var existingKey string
+		keyErr := s.db.QueryRowContext(ctx,
+			"SELECT wireguard_public_key FROM edges WHERE edge_id = ?", edgeID).Scan(&existingKey)
+		if keyErr == nil && existingKey != matchedPublicKey {
+			now := time.Now().Unix()
+			_, updateErr := s.db.ExecContext(ctx,
+				"UPDATE edges SET wireguard_public_key = ?, updated_at = ? WHERE edge_id = ?",
+				matchedPublicKey, now, edgeID)
+			if updateErr != nil {
+				s.logger.Warn("Failed to update WireGuard public key",
+					zap.String("edge_id", edgeID),
+					zap.Error(updateErr))
+			} else {
+				s.logger.Info("Updated WireGuard public key for edge",
+					zap.String("edge_id", edgeID),
+					zap.String("new_public_key", matchedPublicKey))
+			}
+		}
+	}
+
+	// Ensure peer is in WireGuard server
+	if s.wgServer != nil {
+		publicKey, parseErr := wgtypes.ParseKey(matchedPublicKey)
+		if parseErr == nil {
+			_, exists := s.wgServer.GetPeerInfo(publicKey)
+			if !exists {
+				allowedIP := DeriveAllowedIP(edgeID, 0)
+				allowedIPs := []net.IPNet{allowedIP}
+				if addErr := s.wgServer.AddPeer(publicKey, allowedIPs); addErr != nil {
+					s.logger.Warn("Failed to add peer to WireGuard server",
+						zap.String("edge_id", edgeID),
+						zap.Error(addErr))
+				} else {
+					s.logger.Info("Added peer to WireGuard server",
+						zap.String("edge_id", edgeID),
+						zap.String("public_key", matchedPublicKey),
+						zap.String("allowed_ip", allowedIP.String()))
+				}
+			}
+		}
 	}
 
 	// Update connection tracking
 	s.updateConnection(edgeID, peerAddr)
+
+	// Update connection monitor state
+	if s.connectionMonitor != nil {
+		s.connectionMonitor.UpdateConnectionState(edgeID, time.Now())
+	}
 
 	return edgeID, nil
 }
 
 // updateConnection updates connection tracking for an edge
 func (s *EdgeAPIServer) updateConnection(edgeID, peerAddr string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	now := time.Now()
 
+	s.mu.Lock()
 	conn, exists := s.connections[edgeID]
 	if !exists {
 		conn = &EdgeConnection{
 			EdgeID:      edgeID,
-			ConnectedAt: time.Now(),
+			ConnectedAt: now,
 		}
 		s.connections[edgeID] = conn
 	}
@@ -326,6 +456,12 @@ func (s *EdgeAPIServer) updateConnection(edgeID, peerAddr string) {
 	conn.mu.Lock()
 	conn.ConnectionCount++
 	conn.mu.Unlock()
+	s.mu.Unlock()
+
+	// Update connection monitor state machine
+	if s.connectionMonitor != nil {
+		s.connectionMonitor.UpdateConnectionState(edgeID, now)
+	}
 
 	// Publish connection event
 	if s.eventBus != nil {
@@ -411,11 +547,21 @@ func (s *EdgeAPIServer) handleDisconnection(edgeID string) {
 }
 
 // GetConnection returns connection info for an edge
+// This method maintains backward compatibility while ConnectionMonitor provides comprehensive state tracking
 func (s *EdgeAPIServer) GetConnection(edgeID string) (*EdgeConnection, bool) {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
 	conn, exists := s.connections[edgeID]
-	return conn, exists
+	s.mu.RUnlock()
+
+	// If connection exists in map, return it
+	// ConnectionMonitor tracks more comprehensive state via GetConnectionState()
+	if exists {
+		return conn, true
+	}
+
+	// If not in map but ConnectionMonitor has state info, Edge might be reconnecting
+	// Return nil to indicate not actively connected via gRPC
+	return nil, false
 }
 
 // GetConnectedEdges returns list of connected edge IDs
@@ -444,6 +590,14 @@ func (s *EdgeAPIServer) SendEvents(ctx context.Context, req *edge.SendEventsRequ
 		}, nil
 	}
 
+	// Record gRPC call for metrics
+	success := false
+	defer func() {
+		if s.connectionMonitor != nil {
+			s.connectionMonitor.RecordGRPCCall(edgeID, success)
+		}
+	}()
+
 	// Convert proto events and forward to event receiver
 	eventIDs, err := s.eventReceiver.ReceiveEvents(ctx, edgeID, req.Events)
 	if err != nil {
@@ -460,6 +614,7 @@ func (s *EdgeAPIServer) SendEvents(ctx context.Context, req *edge.SendEventsRequ
 		zap.Int("count", len(req.Events)),
 		zap.Int("received", len(eventIDs)))
 
+	success = true
 	return &edge.SendEventsResponse{
 		Success:       true,
 		ReceivedCount: int32(len(eventIDs)),
@@ -478,6 +633,14 @@ func (s *EdgeAPIServer) SendEvent(ctx context.Context, req *edge.SendEventReques
 		}, nil
 	}
 
+	// Record gRPC call for metrics
+	success := false
+	defer func() {
+		if s.connectionMonitor != nil {
+			s.connectionMonitor.RecordGRPCCall(edgeID, success)
+		}
+	}()
+
 	// Forward to event receiver
 	eventID, err := s.eventReceiver.ReceiveEvent(ctx, edgeID, req.Event)
 	if err != nil {
@@ -487,6 +650,8 @@ func (s *EdgeAPIServer) SendEvent(ctx context.Context, req *edge.SendEventReques
 			ErrorMessage: err.Error(),
 		}, nil
 	}
+
+	success = true
 
 	s.logger.Debug("Received event from Edge",
 		zap.String("edge_id", edgeID),
@@ -540,6 +705,14 @@ func (s *EdgeAPIServer) SendTelemetry(ctx context.Context, req *edge.SendTelemet
 func (s *EdgeAPIServer) Heartbeat(ctx context.Context, req *edge.HeartbeatRequest) (*edge.HeartbeatResponse, error) {
 	edgeID := ctx.Value("edge_id").(string)
 
+	// Record gRPC call for metrics
+	success := false
+	defer func() {
+		if s.connectionMonitor != nil {
+			s.connectionMonitor.RecordGRPCCall(edgeID, success)
+		}
+	}()
+
 	if s.telemetryHandler == nil {
 		return &edge.HeartbeatResponse{
 			Success: false,
@@ -568,6 +741,12 @@ func (s *EdgeAPIServer) Heartbeat(ctx context.Context, req *edge.HeartbeatReques
 	}
 	s.mu.Unlock()
 
+	// Update connection monitor heartbeat
+	if s.connectionMonitor != nil {
+		s.connectionMonitor.UpdateConnectionState(edgeID, time.Now())
+	}
+
+	success = true
 	return &edge.HeartbeatResponse{
 		Success:         true,
 		ServerTimestamp: time.Now().UnixNano(),
@@ -616,6 +795,32 @@ func (s *EdgeAPIServer) RestartService(ctx context.Context, req *edge.RestartSer
 func (s *EdgeAPIServer) SyncCapabilities(ctx context.Context, req *edge.SyncCapabilitiesRequest) (*edge.SyncCapabilitiesResponse, error) {
 	edgeID := ctx.Value("edge_id").(string)
 
+	// Record gRPC call for metrics
+	success := false
+	defer func() {
+		if s.connectionMonitor != nil {
+			s.connectionMonitor.RecordGRPCCall(edgeID, success)
+		}
+	}()
+
+	// Check connection status before processing sync
+	if s.connectionMonitor != nil {
+		stateInfo, exists := s.connectionMonitor.GetConnectionState(edgeID)
+		if exists && stateInfo != nil {
+			state := stateInfo.State
+			if state == StateDisconnected {
+				s.logger.Warn("Edge is disconnected, rejecting capability sync",
+					zap.String("edge_id", edgeID),
+					zap.String("state", string(state)),
+				)
+				return &edge.SyncCapabilitiesResponse{
+					Success:      false,
+					ErrorMessage: "Edge is disconnected",
+				}, nil
+			}
+		}
+	}
+
 	if s.capStore == nil {
 		return &edge.SyncCapabilitiesResponse{
 			Success:      false,
@@ -658,14 +863,15 @@ func (s *EdgeAPIServer) SyncCapabilities(ctx context.Context, req *edge.SyncCapa
 			Type:      "edge.capability_sync",
 			Timestamp: time.Now().Unix(),
 			Data: map[string]interface{}{
-				"edge_id":                    edgeID,
-				"camera_count":               len(req.Cameras),
-				"cameras_needing_snapshots":  camerasNeedingSnapshots,
-				"synced_at":                  syncedAt.Unix(),
+				"edge_id":                   edgeID,
+				"camera_count":              len(req.Cameras),
+				"cameras_needing_snapshots": camerasNeedingSnapshots,
+				"synced_at":                 syncedAt.Unix(),
 			},
 		})
 	}
 
+	success = true
 	return &edge.SyncCapabilitiesResponse{Success: true}, nil
 }
 

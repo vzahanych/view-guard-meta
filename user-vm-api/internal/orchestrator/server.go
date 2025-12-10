@@ -82,6 +82,9 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 		edgeAPIServer.SetEventBus(eventBus)
 		capStore = edgeAPIServer.GetCapabilityStore()
+		// Set up default telemetry handler
+		telemetryHandler := tunnelgateway.NewDefaultTelemetryHandler(s.logger.Logger)
+		edgeAPIServer.SetTelemetryHandler(telemetryHandler)
 		s.manager.Register(edgeAPIServer)
 	}
 

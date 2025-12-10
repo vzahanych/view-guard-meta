@@ -966,6 +966,8 @@ func (s *Server) getConfigSection(cfg *config.Config, section string) interface{
 		return cfg.Edge.Web
 	case "events":
 		return cfg.Edge.Events
+	case "processing":
+		return cfg.Edge.Processing
 	default:
 		return nil
 	}
@@ -1001,6 +1003,8 @@ func (s *Server) updateConfigSection(cfg *config.Config, section string, data ma
 		return s.updateWebConfig(&cfg.Edge.Web, normalizedData)
 	case "events":
 		return s.updateEventsConfig(&cfg.Edge.Events, normalizedData)
+	case "processing":
+		return s.updateProcessingConfig(&cfg.Edge.Processing, normalizedData)
 	default:
 		return fmt.Errorf("unknown section: %s", section)
 	}
@@ -1165,6 +1169,91 @@ func (s *Server) updateEventsConfig(eventsCfg *config.EventsConfig, data map[str
 	return nil
 }
 
+func (s *Server) updateProcessingConfig(procCfg *config.ProcessingConfig, data map[string]interface{}) error {
+	// Frame processing
+	if val, ok := data["InferenceInterval"].(string); ok {
+		if duration, err := time.ParseDuration(val); err == nil {
+			procCfg.InferenceInterval = duration
+		}
+	}
+	if val, ok := data["PreBufferDuration"].(string); ok {
+		if duration, err := time.ParseDuration(val); err == nil {
+			procCfg.PreBufferDuration = duration
+		}
+	}
+
+	// Inference
+	if val, ok := data["ConfidenceThreshold"].(float64); ok {
+		if val >= 0 && val <= 1 {
+			procCfg.ConfidenceThreshold = val
+		}
+	}
+	if val, ok := data["PerCameraThresholds"].(map[string]interface{}); ok {
+		if procCfg.PerCameraThresholds == nil {
+			procCfg.PerCameraThresholds = make(map[string]float64)
+		}
+		for cameraID, thresholdVal := range val {
+			if threshold, ok := thresholdVal.(float64); ok && threshold >= 0 && threshold <= 1 {
+				procCfg.PerCameraThresholds[cameraID] = threshold
+			}
+		}
+	}
+	if val, ok := data["EnabledClasses"].([]interface{}); ok {
+		classes := make([]string, 0, len(val))
+		for _, v := range val {
+			if str, ok := v.(string); ok {
+				classes = append(classes, str)
+			}
+		}
+		procCfg.EnabledClasses = classes
+	}
+
+	// Event detection
+	if val, ok := data["MinEventDuration"].(string); ok {
+		if duration, err := time.ParseDuration(val); err == nil {
+			procCfg.MinEventDuration = duration
+		}
+	}
+
+	// Clip recording
+	if val, ok := data["PostEventDuration"].(string); ok {
+		if duration, err := time.ParseDuration(val); err == nil {
+			procCfg.PostEventDuration = duration
+		}
+	}
+	if val, ok := data["MaxClipLength"].(string); ok {
+		if duration, err := time.ParseDuration(val); err == nil {
+			procCfg.MaxClipLength = duration
+		}
+	}
+
+	// Snapshot capture
+	if val, ok := data["JPEGQuality"].(float64); ok {
+		if val >= 1 && val <= 100 {
+			procCfg.JPEGQuality = int(val)
+		}
+	}
+
+	// Retry configuration
+	if val, ok := data["MaxRetries"].(float64); ok {
+		if val >= 0 {
+			procCfg.MaxRetries = int(val)
+		}
+	}
+	if val, ok := data["RetryBaseDelay"].(string); ok {
+		if duration, err := time.ParseDuration(val); err == nil {
+			procCfg.RetryBaseDelay = duration
+		}
+	}
+	if val, ok := data["RetryMaxDelay"].(string); ok {
+		if duration, err := time.ParseDuration(val); err == nil {
+			procCfg.RetryMaxDelay = duration
+		}
+	}
+
+	return nil
+}
+
 // normalizeKeys converts snake_case keys to struct field names (CamelCase)
 func (s *Server) normalizeKeys(data map[string]interface{}) map[string]interface{} {
 	normalized := make(map[string]interface{})
@@ -1195,6 +1284,15 @@ func (s *Server) normalizeKeys(data map[string]interface{}) map[string]interface
 		"port":                   "Port",
 		"discovery":              "Discovery",
 		"rtsp":                   "RTSP",
+		"pre_buffer_duration":    "PreBufferDuration",
+		"per_camera_thresholds":  "PerCameraThresholds",
+		"min_event_duration":     "MinEventDuration",
+		"post_event_duration":    "PostEventDuration",
+		"max_clip_length":        "MaxClipLength",
+		"jpeg_quality":           "JPEGQuality",
+		"max_retries":            "MaxRetries",
+		"retry_base_delay":       "RetryBaseDelay",
+		"retry_max_delay":        "RetryMaxDelay",
 	}
 
 	for k, v := range data {
@@ -1268,6 +1366,11 @@ func (s *Server) mergeConfig(cfg *config.Config, updateData map[string]interface
 	if eventsData, ok := getMapValue(edgeData, "events", "Events"); ok {
 		if err := s.updateConfigSection(cfg, "events", eventsData); err != nil {
 			return fmt.Errorf("failed to update events section: %w", err)
+		}
+	}
+	if processingData, ok := getMapValue(edgeData, "processing", "Processing"); ok {
+		if err := s.updateConfigSection(cfg, "processing", processingData); err != nil {
+			return fmt.Errorf("failed to update processing section: %w", err)
 		}
 	}
 

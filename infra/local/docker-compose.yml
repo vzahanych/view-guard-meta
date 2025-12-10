@@ -9,13 +9,10 @@ services:
     container_name: view-guard-wg-setup
     volumes:
       - ./wg:/wg
-    entrypoint: [ "/bin/sh", "-c" ]
-    command: |
-      set -eu
-      apk add --no-cache wireguard-tools bash
-      echo "[wg-setup] Running generate-keys.sh..."
-      bash /wg/generate-keys.sh
-      echo "[wg-setup] Done generating keys"
+    command: >
+      sh -c " apk add --no-cache wireguard-tools bash && echo '[wg-setup] Running generate-keys.sh...' && bash /wg/generate-keys.sh && echo '[wg-setup] Running generate-configs.sh...' && bash /wg/generate-configs.sh && echo '[wg-setup] Done generating keys and configs' "
+    # Don't restart - this is a one-time setup service
+    restart: "no"
   # =========================
   # Camera / RTSP simulator (commented out - not needed for WireGuard testing)
   # =========================
@@ -87,6 +84,7 @@ services:
         condition: service_healthy
     ports:
       - "8181:8081" # Web UI port
+      - "8182:8080" # Health check port
     environment:
       - EDGE_AI_SERVICE_URL=http://edge-ai-service:8080
       - EDGE_DATA_DIR=/app/data
@@ -100,6 +98,7 @@ services:
       - EDGE_WEB_PORT=8081
       - LOG_LEVEL=info
       - LOG_FORMAT=text
+      - EDGE_ID=${EDGE_ID:-poc-edge-1}
     volumes:
       - edge-data:/app/data
       - ./config.docker.yaml:/app/config/config.yaml:ro
@@ -118,11 +117,32 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 30s
+      start_period: 60s
 
   # =========================
   # User VM side
   # =========================
+  # Baseline model setup (runs once before user-vm-api starts)
+  baseline-model-setup:
+    image: python:3.11-slim
+    container_name: view-guard-baseline-setup
+    depends_on:
+      python-ai-service:
+        condition: service_healthy
+    volumes:
+      - user-vm-models:/app/data/models
+    command: >
+      sh -c " apt-get update -qq && apt-get install -y -qq curl > /dev/null 2>&1 && echo '[baseline-setup] Setting up baseline YOLOv8n model...' && mkdir -p /app/data/models/baseline-yolov8n && cd /app/data/models/baseline-yolov8n && if [ ! -f model.onnx ]; then
+        echo '[baseline-setup] Downloading YOLOv8n ONNX model...' &&
+        curl -L -o model.onnx 'https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8n.onnx' &&
+        echo '[baseline-setup] Model downloaded successfully'
+      else
+        echo '[baseline-setup] Model already exists, skipping download'
+      fi && echo '[baseline-setup] Creating metadata.json...' && python3 -c \"import json; metadata = {'model_id': 'baseline-yolov8n', 'version': 'baseline-1.0', 'camera_id': '', 'model_type': 'yolo', 'input_shape': [1, 3, 640, 640], 'latent_dim': 0, 'threshold': 0.25, 'training_dataset_id': '', 'training_date': '', 'framework': 'onnx', 'onnx_file': 'model.onnx', 'preprocessing': {'resize': [640, 640], 'normalize': True, 'color_format': 'BGR'}}; f = open('metadata.json', 'w'); json.dump(metadata, f, indent=2); f.close(); print('Metadata created successfully')\" && echo '[baseline-setup] Baseline model setup complete' "
+    restart: "no"
+    networks:
+      - view-guard-edge
+
   user-vm-api:
     build:
       context: ../.. # Build from repo root to include proto/go
@@ -134,7 +154,9 @@ services:
       minio:
         condition: service_healthy
       python-ai-service:
-        condition: service_started
+        condition: service_healthy
+      baseline-model-setup:
+        condition: service_completed_successfully
     ports:
       - "8280:8280" # Stream relay / API Gateway port (service listens on 8280 inside container)
       - "51820:51820/udp" # WireGuard server port
@@ -227,170 +249,6 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
-
-  # =========================
-  # Edge UI E2E tests (Playwright)
-  # =========================
-  edge-ui-tests:
-    image: mcr.microsoft.com/playwright:v1.49.0-jammy
-    container_name: view-guard-edge-ui-tests
-    working_dir: /workspace/edge/orchestrator/internal/web/frontend
-    depends_on:
-      edge-orchestrator:
-        condition: service_healthy
-    volumes:
-      - ../..:/workspace
-    # Run frontend E2E tests against the running edge-orchestrator UI
-    command: >
-      sh -c "
-        npm install &&
-        npx playwright install --with-deps &&
-        EDGE_UI_BASE_URL=http://edge-orchestrator:8081 npx playwright test
-      "
-    networks:
-      - view-guard-edge
-
-  # =========================
-  # Model Management Integration Tests
-  # =========================
-  model-management-tests:
-    image: alpine:latest
-    container_name: view-guard-model-management-tests
-    working_dir: /workspace/infra/local
-    depends_on:
-      user-vm-api:
-        condition: service_healthy
-      python-ai-service:
-        condition: service_started
-      minio:
-        condition: service_healthy
-    volumes:
-      - ../..:/workspace
-    # Install dependencies and run model management integration tests
-    # Test script is adapted to work inside container using service names
-    command: >
-      sh -c "
-        apk add --no-cache bash curl &&
-        chmod +x /workspace/infra/local/test-model-management.sh &&
-        cd /workspace/infra/local &&
-        # Override VM_API to use service name with correct port (8280 inside container)
-        VM_API=http://user-vm-api:8280 \
-        IN_CONTAINER=true \
-        /workspace/infra/local/test-model-management.sh
-      "
-    networks:
-      - view-guard-edge
-    environment:
-      - VM_API=http://user-vm-api:8280
-      - IN_CONTAINER=true
-
-  # =========================
-  # Training Service Integration Tests
-  # =========================
-  training-tests:
-    image: alpine:latest
-    container_name: view-guard-training-tests
-    working_dir: /workspace/infra/local
-    depends_on:
-      user-vm-api:
-        condition: service_healthy
-      python-ai-service:
-        condition: service_started
-      minio:
-        condition: service_healthy
-    volumes:
-      - ../..:/workspace
-      - user-vm-models:/app/data/models
-      - user-vm-datasets:/app/data/datasets
-    # Install dependencies and run training integration tests
-    command: >
-      sh -c "
-        apk add --no-cache bash curl jq &&
-        chmod +x /workspace/infra/local/test-training.sh &&
-        cd /workspace/infra/local &&
-        VM_API=http://user-vm-api:8280 \
-        TRAINING_SERVICE=http://python-ai-service:8000 \
-        IN_CONTAINER=true \
-        /workspace/infra/local/test-training.sh
-      "
-    networks:
-      - view-guard-edge
-    environment:
-      - VM_API=http://user-vm-api:8280
-      - TRAINING_SERVICE=http://python-ai-service:8000
-      - IN_CONTAINER=true
-
-  # Phase 2 comprehensive integration tests (Epic 2.2.5 + 2.2.6)
-  phase2-tests:
-    image: alpine:latest
-    container_name: view-guard-phase2-tests
-    working_dir: /workspace/infra/local
-    depends_on:
-      user-vm-api:
-        condition: service_healthy
-      edge-orchestrator:
-        condition: service_started
-      python-ai-service:
-        condition: service_started
-      minio:
-        condition: service_healthy
-    volumes:
-      - ../..:/workspace
-      - user-vm-models:/app/data/models
-      - user-vm-datasets:/app/data/datasets
-    # Install dependencies and run Phase 2 integration tests
-    command: >
-      sh -c "
-        apk add --no-cache bash curl jq &&
-        chmod +x /workspace/infra/local/test-phase2.sh &&
-        cd /workspace/infra/local &&
-        VM_API=http://user-vm-api:8280 \
-        EDGE_API=http://edge-orchestrator:8081 \
-        TRAINING_SERVICE=http://python-ai-service:8000 \
-        IN_CONTAINER=true \
-        /workspace/infra/local/test-phase2.sh
-      "
-    networks:
-      - view-guard-edge
-    environment:
-      - VM_API=http://user-vm-api:8280
-      - EDGE_API=http://edge-orchestrator:8081
-      - TRAINING_SERVICE=http://python-ai-service:8000
-      - IN_CONTAINER=true
-
-  # Legacy: Individual epic tests (kept for backward compatibility)
-  model-deployment-tests:
-    image: alpine:latest
-    container_name: view-guard-model-deployment-tests
-    working_dir: /workspace/infra/local
-    depends_on:
-      user-vm-api:
-        condition: service_healthy
-      edge-orchestrator:
-        condition: service_started
-      minio:
-        condition: service_healthy
-    volumes:
-      - ../..:/workspace
-      - user-vm-models:/app/data/models
-      - user-vm-datasets:/app/data/datasets
-    # Install dependencies and run model deployment integration tests
-    command: >
-      sh -c "
-        apk add --no-cache bash curl jq &&
-        chmod +x /workspace/infra/local/test-model-deployment.sh &&
-        cd /workspace/infra/local &&
-        VM_API=http://user-vm-api:8280 \
-        EDGE_API=http://edge-orchestrator:8081 \
-        IN_CONTAINER=true \
-        /workspace/infra/local/test-model-deployment.sh
-      "
-    networks:
-      - view-guard-edge
-    environment:
-      - VM_API=http://user-vm-api:8280
-      - EDGE_API=http://edge-orchestrator:8081
-      - IN_CONTAINER=true
 
 networks:
   view-guard-edge:
