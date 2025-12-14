@@ -19,10 +19,12 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	ControlService_GetConfig_FullMethodName        = "/edge.control.ControlService/GetConfig"
-	ControlService_UpdateConfig_FullMethodName     = "/edge.control.ControlService/UpdateConfig"
-	ControlService_RestartService_FullMethodName   = "/edge.control.ControlService/RestartService"
-	ControlService_SyncCapabilities_FullMethodName = "/edge.control.ControlService/SyncCapabilities"
+	ControlService_GetConfig_FullMethodName              = "/edge.control.ControlService/GetConfig"
+	ControlService_UpdateConfig_FullMethodName           = "/edge.control.ControlService/UpdateConfig"
+	ControlService_RestartService_FullMethodName         = "/edge.control.ControlService/RestartService"
+	ControlService_SyncCapabilities_FullMethodName       = "/edge.control.ControlService/SyncCapabilities"
+	ControlService_RequestSnapshotCapture_FullMethodName = "/edge.control.ControlService/RequestSnapshotCapture"
+	ControlService_DeployModel_FullMethodName            = "/edge.control.ControlService/DeployModel"
 )
 
 // ControlServiceClient is the client API for ControlService service.
@@ -39,6 +41,10 @@ type ControlServiceClient interface {
 	RestartService(ctx context.Context, in *RestartServiceRequest, opts ...grpc.CallOption) (*RestartServiceResponse, error)
 	// SyncCapabilities allows an Edge to report camera and dataset readiness
 	SyncCapabilities(ctx context.Context, in *SyncCapabilitiesRequest, opts ...grpc.CallOption) (*SyncCapabilitiesResponse, error)
+	// RequestSnapshotCapture requests Edge to capture labeled snapshots from a camera
+	RequestSnapshotCapture(ctx context.Context, in *RequestSnapshotCaptureRequest, opts ...grpc.CallOption) (*RequestSnapshotCaptureResponse, error)
+	// DeployModel deploys a trained model to Edge (server-side streaming: VM streams model to Edge)
+	DeployModel(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[DeployModelChunk, DeployModelResponse], error)
 }
 
 type controlServiceClient struct {
@@ -89,6 +95,29 @@ func (c *controlServiceClient) SyncCapabilities(ctx context.Context, in *SyncCap
 	return out, nil
 }
 
+func (c *controlServiceClient) RequestSnapshotCapture(ctx context.Context, in *RequestSnapshotCaptureRequest, opts ...grpc.CallOption) (*RequestSnapshotCaptureResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RequestSnapshotCaptureResponse)
+	err := c.cc.Invoke(ctx, ControlService_RequestSnapshotCapture_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *controlServiceClient) DeployModel(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[DeployModelChunk, DeployModelResponse], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &ControlService_ServiceDesc.Streams[0], ControlService_DeployModel_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[DeployModelChunk, DeployModelResponse]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type ControlService_DeployModelClient = grpc.ClientStreamingClient[DeployModelChunk, DeployModelResponse]
+
 // ControlServiceServer is the server API for ControlService service.
 // All implementations must embed UnimplementedControlServiceServer
 // for forward compatibility.
@@ -103,6 +132,10 @@ type ControlServiceServer interface {
 	RestartService(context.Context, *RestartServiceRequest) (*RestartServiceResponse, error)
 	// SyncCapabilities allows an Edge to report camera and dataset readiness
 	SyncCapabilities(context.Context, *SyncCapabilitiesRequest) (*SyncCapabilitiesResponse, error)
+	// RequestSnapshotCapture requests Edge to capture labeled snapshots from a camera
+	RequestSnapshotCapture(context.Context, *RequestSnapshotCaptureRequest) (*RequestSnapshotCaptureResponse, error)
+	// DeployModel deploys a trained model to Edge (server-side streaming: VM streams model to Edge)
+	DeployModel(grpc.ClientStreamingServer[DeployModelChunk, DeployModelResponse]) error
 	mustEmbedUnimplementedControlServiceServer()
 }
 
@@ -124,6 +157,12 @@ func (UnimplementedControlServiceServer) RestartService(context.Context, *Restar
 }
 func (UnimplementedControlServiceServer) SyncCapabilities(context.Context, *SyncCapabilitiesRequest) (*SyncCapabilitiesResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method SyncCapabilities not implemented")
+}
+func (UnimplementedControlServiceServer) RequestSnapshotCapture(context.Context, *RequestSnapshotCaptureRequest) (*RequestSnapshotCaptureResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method RequestSnapshotCapture not implemented")
+}
+func (UnimplementedControlServiceServer) DeployModel(grpc.ClientStreamingServer[DeployModelChunk, DeployModelResponse]) error {
+	return status.Errorf(codes.Unimplemented, "method DeployModel not implemented")
 }
 func (UnimplementedControlServiceServer) mustEmbedUnimplementedControlServiceServer() {}
 func (UnimplementedControlServiceServer) testEmbeddedByValue()                        {}
@@ -218,6 +257,31 @@ func _ControlService_SyncCapabilities_Handler(srv interface{}, ctx context.Conte
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ControlService_RequestSnapshotCapture_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RequestSnapshotCaptureRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlServiceServer).RequestSnapshotCapture(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ControlService_RequestSnapshotCapture_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlServiceServer).RequestSnapshotCapture(ctx, req.(*RequestSnapshotCaptureRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ControlService_DeployModel_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(ControlServiceServer).DeployModel(&grpc.GenericServerStream[DeployModelChunk, DeployModelResponse]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type ControlService_DeployModelServer = grpc.ClientStreamingServer[DeployModelChunk, DeployModelResponse]
+
 // ControlService_ServiceDesc is the grpc.ServiceDesc for ControlService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -241,7 +305,17 @@ var ControlService_ServiceDesc = grpc.ServiceDesc{
 			MethodName: "SyncCapabilities",
 			Handler:    _ControlService_SyncCapabilities_Handler,
 		},
+		{
+			MethodName: "RequestSnapshotCapture",
+			Handler:    _ControlService_RequestSnapshotCapture_Handler,
+		},
 	},
-	Streams:  []grpc.StreamDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "DeployModel",
+			Handler:       _ControlService_DeployModel_Handler,
+			ClientStreams: true,
+		},
+	},
 	Metadata: "edge/control.proto",
 }

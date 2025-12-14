@@ -16,6 +16,7 @@ import (
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/events"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/logger"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/service"
+	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/snapshot_request"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/state"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/storage"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/video"
@@ -51,22 +52,23 @@ type Server struct {
 	logger             *logger.Logger
 	httpServer         *http.Server
 	router             *gin.Engine
-	streamingSvc       *streaming.Service // Optional streaming service
-	cameraMgr          *camera.Manager    // Optional camera manager
-	stateMgr           *state.Manager     // Optional state manager for events
-	storageSvc         StorageService     // Optional storage service for clips/snapshots
-	configSvc          *config.Service    // Optional config service for configuration API
-	telemetryCollector TelemetryCollector // Optional telemetry collector for metrics
-	eventQueue         EventQueue         // Optional event queue for creating events
-	eventStorage       EventStorage       // Optional event storage for saving events
-	screenshotSvc      ScreenshotService  // Optional screenshot service for labeled screenshots
-	datasetSvc         DatasetService     // Optional dataset service for packaging and uploading datasets
-	capabilitySync     CapabilitySyncService // Optional capability sync service for VM sync
-	modelStorage       ModelStorageService // Optional model storage service for deployed models
-	modelLoader        ModelLoaderService  // Optional model loader service for inference
-	statusReporter     StatusReporterService // Optional deployment status reporter
-	version            string             // Application version
-	startTime          time.Time          // Server start time for uptime calculation
+	streamingSvc       *streaming.Service     // Optional streaming service
+	cameraMgr          *camera.Manager        // Optional camera manager
+	stateMgr           *state.Manager         // Optional state manager for events
+	storageSvc         StorageService         // Optional storage service for clips/snapshots
+	configSvc          *config.Service        // Optional config service for configuration API
+	telemetryCollector TelemetryCollector     // Optional telemetry collector for metrics
+	eventQueue         EventQueue             // Optional event queue for creating events
+	eventStorage       EventStorage           // Optional event storage for saving events
+	screenshotSvc      ScreenshotService      // Optional screenshot service for labeled screenshots
+	datasetSvc         DatasetService         // Optional dataset service for packaging and uploading datasets
+	capabilitySync     CapabilitySyncService  // Optional capability sync service for VM sync
+	modelStorage       ModelStorageService    // Optional model storage service for deployed models
+	modelLoader        ModelLoaderService     // Optional model loader service for inference
+	statusReporter     StatusReporterService  // Optional deployment status reporter
+	snapshotRequestSvc SnapshotRequestService // Optional snapshot request service for VM requests
+	version            string                 // Application version
+	startTime          time.Time              // Server start time for uptime calculation
 }
 
 // StorageService interface for serving clips and snapshots
@@ -235,6 +237,18 @@ func (s *Server) SetStatusReporterService(reporter StatusReporterService) {
 	s.statusReporter = reporter
 }
 
+// SnapshotRequestService interface for managing VM snapshot requests
+type SnapshotRequestService interface {
+	GetPendingRequest(cameraID string) *snapshot_request.PendingRequest
+	GetAllPendingRequests() map[string]*snapshot_request.PendingRequest
+	ClearPendingRequest(cameraID string)
+}
+
+// SetSnapshotRequestService sets the snapshot request service
+func (s *Server) SetSnapshotRequestService(svc SnapshotRequestService) {
+	s.snapshotRequestSvc = svc
+}
+
 // Start starts the web server
 func (s *Server) Start(ctx context.Context) error {
 	if !s.config.Enabled {
@@ -346,6 +360,19 @@ func (s *Server) setupRoutes() {
 			screenshots.POST("", s.handleSaveScreenshot)
 			screenshots.PUT("/:id", s.handleUpdateScreenshot)
 			screenshots.DELETE("/:id", s.handleDeleteScreenshot)
+		}
+
+		// Snapshot request endpoints (for VM → Edge snapshot requests)
+		snapshotRequests := api.Group("/snapshot-requests")
+		{
+			snapshotRequests.GET("", s.handleListSnapshotRequests)
+			snapshotRequests.GET("/:camera_id", s.handleGetSnapshotRequest)
+		}
+
+		// Model deployment endpoints (Epic 2.8.5.1)
+		models := api.Group("/models")
+		{
+			models.POST("/deploy", s.handleModelDeploy)
 		}
 
 		// Clip and snapshot endpoints (Step 1.9.3)

@@ -3,10 +3,12 @@ package grpc
 import (
 	"context"
 	"fmt"
+	"net"
 	"sync"
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
 
@@ -31,6 +33,7 @@ type Client struct {
 	telemetryClient edge.TelemetryServiceClient
 	controlClient   edge.ControlServiceClient
 	streamingClient edge.StreamingServiceClient
+	wg              sync.WaitGroup // For monitoring goroutine
 }
 
 // NewClient creates a new gRPC client
@@ -107,6 +110,12 @@ connected:
 	c.GetStatus().SetStatus(service.StatusRunning)
 	c.LogInfo("gRPC client connected", "endpoint", endpoint)
 
+	// Start continuous gRPC health monitoring: Edge monitors VM configuration status through gRPC every 30s
+	// This ensures the bidirectional gRPC connection is alive and ready (security requirement)
+	// All VM-Edge communication is gRPC-only (no HTTP)
+	c.wg.Add(1)
+	go c.monitorVMHealth(ctx)
+
 	return nil
 }
 
@@ -116,6 +125,9 @@ func (c *Client) Stop(ctx context.Context) error {
 	defer c.mu.Unlock()
 
 	c.GetStatus().SetStatus(service.StatusStopping)
+
+	// Wait for monitoring goroutine to finish
+	c.wg.Wait()
 
 	if c.conn != nil {
 		if err := c.conn.Close(); err != nil {
@@ -136,26 +148,125 @@ func (c *Client) Stop(ctx context.Context) error {
 	return nil
 }
 
+// monitorVMHealth continuously monitors VM configuration status through gRPC every 30s
+// This ensures the bidirectional gRPC connection is alive and ready (security requirement)
+// Edge monitors VM configuration status through gRPC (all VM-Edge communication is gRPC-only, no HTTP)
+func (c *Client) monitorVMHealth(ctx context.Context) {
+	defer c.wg.Done()
+
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	// Initial check
+	c.checkVMHealth(ctx)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			c.checkVMHealth(ctx)
+		}
+	}
+}
+
+// checkVMHealth verifies VM is alive and checks configuration status via gRPC
+func (c *Client) checkVMHealth(ctx context.Context) {
+	c.mu.RLock()
+	controlClient := c.controlClient
+	conn := c.conn
+	c.mu.RUnlock()
+
+	if controlClient == nil || conn == nil {
+		c.LogInfo("gRPC client not ready for VM health check")
+		return
+	}
+
+	// Check connection state
+	state := conn.GetState()
+	if state.String() != "READY" && state.String() != "IDLE" {
+		c.LogInfo("gRPC connection not ready for VM health check",
+			"state", state.String(),
+			"note", "Bidirectional gRPC connection health is critical for security")
+		return
+	}
+
+	// Call VM's GetConfig to verify VM is alive and check configuration status
+	healthCtx, healthCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer healthCancel()
+
+	_, err := controlClient.GetConfig(healthCtx, &edge.GetConfigRequest{})
+	if err != nil {
+		c.LogInfo("VM gRPC health check failed",
+			"error", err,
+			"note", "Bidirectional gRPC connection health is critical for security - VM may be unreachable")
+		return
+	}
+
+	c.LogDebug("VM gRPC health check passed - VM is alive and configuration status verified",
+		"note", "Bidirectional gRPC connection is alive and ready")
+}
+
 // connect establishes a gRPC connection
 func (c *Client) connect(ctx context.Context, endpoint string) (*grpc.ClientConn, error) {
-	// Use insecure credentials for PoC (WireGuard provides encryption)
-	// In production, could use TLS over WireGuard for additional security
+	// Load TLS credentials for mTLS (zero-trust security)
+	var creds credentials.TransportCredentials
+	clientCertPath := "/etc/ssl/certs/edge-client.crt"
+	clientKeyPath := "/etc/ssl/private/edge-client.key"
+	caCertPath := "/etc/ssl/certs/ca.crt"
+
+	// Try to load TLS credentials (certificates should be mounted from Epic 2.0)
+	tlsCreds, err := LoadClientCredentials(clientCertPath, clientKeyPath, caCertPath)
+	if err != nil {
+		c.LogError("Failed to load TLS credentials for gRPC client, using insecure (not recommended for production)", err,
+			"client_cert", clientCertPath,
+			"client_key", clientKeyPath,
+			"ca_cert", caCertPath,
+			"note", "TLS certificates should be generated in Epic 2.0 and mounted to containers")
+		// Fall back to insecure for development/testing
+		creds = insecure.NewCredentials()
+	} else {
+		c.LogInfo("Loaded TLS credentials for gRPC client (mTLS enabled)",
+			"client_cert", clientCertPath)
+		creds = tlsCreds
+	}
+
+	// Fail fast if the port isn't reachable to avoid hanging in gRPC dial retries.
+	tcpCtx, tcpCancel := context.WithTimeout(ctx, 5*time.Second)
+	defer tcpCancel()
+	if preflightConn, err := (&net.Dialer{}).DialContext(tcpCtx, "tcp", endpoint); err != nil {
+		c.LogError("TCP preflight to VM failed", err, "endpoint", endpoint)
+		return nil, fmt.Errorf("tcp preflight to %s failed: %w", endpoint, err)
+	} else {
+		_ = preflightConn.Close()
+	}
+
 	opts := []grpc.DialOption{
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithTransportCredentials(creds),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
 			Time:                30 * time.Second, // Reduced from 10s to avoid "too_many_pings" error
 			Timeout:             5 * time.Second,
 			PermitWithoutStream: true,
 		}),
 		grpc.WithBlock(),
-		grpc.WithTimeout(10 * time.Second),
+		grpc.WithReturnConnectionError(), // Surface connection errors immediately instead of waiting for the deadline
+		// Add default call options for better connection handling
+		grpc.WithDefaultCallOptions(grpc.WaitForReady(false)),
 	}
 
-	conn, err := grpc.DialContext(ctx, endpoint, opts...)
+	// Use context with timeout instead of deprecated grpc.WithTimeout
+	// Use a shorter timeout so failures surface quickly during bring-up
+	connectCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+
+	c.LogInfo("Attempting gRPC connection", "endpoint", endpoint, "timeout", "20s")
+	conn, err := grpc.DialContext(connectCtx, endpoint, opts...)
 	if err != nil {
+		c.LogError("gRPC dial failed", err, "endpoint", endpoint)
 		return nil, fmt.Errorf("failed to dial %s: %w", endpoint, err)
 	}
 
+	c.LogInfo("gRPC connection established", "endpoint", endpoint)
 	return conn, nil
 }
 

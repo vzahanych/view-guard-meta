@@ -5,128 +5,145 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
+	modelcatalog "github.com/vzahanych/view-guard-meta/user-vm-api/internal/model-catalog"
 	modeldeployment "github.com/vzahanych/view-guard-meta/user-vm-api/internal/model-deployment"
+	tunnelgateway "github.com/vzahanych/view-guard-meta/user-vm-api/internal/tunnel-gateway"
 	"go.uber.org/zap"
 )
 
-// handleEdgeModelsDeploy handles POST /api/edges/{edge_id}/models/deploy
-func (s *APIServer) handleEdgeModelsDeploy(w http.ResponseWriter, r *http.Request) {
-	// Parse path: /api/edges/{edge_id}/models/deploy
-	path := strings.TrimPrefix(r.URL.Path, "/api/edges/")
-	parts := strings.Split(path, "/")
-	
-	// Check if this is the models/deploy endpoint
-	if len(parts) >= 3 && parts[1] == "models" && parts[2] == "deploy" {
-		// This is the deployment endpoint
-		if r.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-	} else {
-		// Not the deployment endpoint - return 404
-		http.NotFound(w, r)
+// handleEdgeModelsDeploy handles POST /api/edges/{edge_id}/models/deploy?model_id={model_id}
+// Triggers model deployment to a specific Edge
+func (s *APIServer) handleEdgeModelsDeploy(w http.ResponseWriter, r *http.Request, edgeID string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	edgeID := parts[0]
+	w.Header().Set("Content-Type", "application/json")
+
+	// Validate Edge ID
 	if edgeID == "" {
-		http.Error(w, "edge_id is required", http.StatusBadRequest)
+		http.Error(w, "Edge ID is required", http.StatusBadRequest)
 		return
 	}
 
-	// Verify Edge is registered (exists in database)
-	// Connection tracking is for real-time status, but deployment should work
-	// as long as Edge is registered, even if no recent gRPC calls
-	if s.edgeAPIServer != nil {
-		// Check if Edge has active connection (preferred)
-		conn, hasConnection := s.edgeAPIServer.GetConnection(edgeID)
-		if hasConnection && conn != nil {
-			s.logger.Debug("Edge has active connection",
-				zap.String("edge_id", edgeID),
-			)
-		} else {
-			// Edge not in active connections - check if it's registered in database
-			// This allows deployment even if Edge hasn't made recent gRPC calls
-			// The connection will be established when Edge receives the deployment request
-			s.logger.Info("Edge not in active connections, checking database registration",
-				zap.String("edge_id", edgeID),
-			)
-			// For now, allow deployment if Edge ID is provided
-			// In production, we should verify Edge exists in database
-			// TODO: Add database check for Edge registration
+	// Get model_id from query parameter (as per implementation plan)
+	modelID := r.URL.Query().Get("model_id")
+	if modelID == "" {
+		http.Error(w, "model_id query parameter is required", http.StatusBadRequest)
+		return
+	}
+
+	// Optional: Get camera_id from query parameter (for camera-specific deployment)
+	var cameraID *string
+	if cameraIDParam := r.URL.Query().Get("camera_id"); cameraIDParam != "" {
+		cameraID = &cameraIDParam
+	}
+
+	// Validate Edge is connected via WireGuard tunnel
+	if s.edgeAPIServer == nil {
+		s.logger.Error("Edge API server not available")
+		http.Error(w, "Edge API server not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Check Edge connection status using connection monitor
+	connMonitor := s.edgeAPIServer.GetConnectionMonitor()
+	if connMonitor != nil {
+		stateInfo, exists := connMonitor.GetConnectionState(edgeID)
+		if exists && stateInfo != nil {
+			state := stateInfo.State
+			if state == tunnelgateway.StateDisconnected {
+				s.logger.Warn("Edge is disconnected",
+					zap.String("edge_id", edgeID),
+					zap.String("state", string(state)),
+				)
+				http.Error(w, fmt.Sprintf("Edge %s is not connected", edgeID), http.StatusServiceUnavailable)
+				return
+			}
 		}
-	} else {
-		s.logger.Warn("Edge API server not configured - allowing deployment",
+	}
+
+	// Fallback: Check legacy connection map
+	conn, exists := s.edgeAPIServer.GetConnection(edgeID)
+	if !exists || conn == nil {
+		s.logger.Warn("Edge connection not found",
 			zap.String("edge_id", edgeID),
 		)
-	}
-
-	// Parse request body
-	var request struct {
-		ModelID  string  `json:"model_id"`
-		CameraID *string `json:"camera_id,omitempty"`
-	}
-
-	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-		s.logger.Error("Failed to decode request", zap.Error(err))
-		http.Error(w, fmt.Sprintf("Invalid request body: %v", err), http.StatusBadRequest)
-		return
-	}
-
-	if request.ModelID == "" {
-		http.Error(w, "model_id is required", http.StatusBadRequest)
-		return
-	}
-
-	// Verify model exists
-	if s.modelCatalog != nil {
-		_, err := s.modelCatalog.GetModel(request.ModelID)
-		if err != nil {
-			s.logger.Warn("Model not found",
-				zap.String("model_id", request.ModelID),
-				zap.Error(err),
+		// For PoC, allow deployment even without active connection (will connect on request)
+		s.logger.Info("Allowing deployment without active connection (PoC mode)",
+			zap.String("edge_id", edgeID),
+		)
+	} else {
+		// Check if connection is recent (within last 5 minutes)
+		if time.Since(conn.LastHeartbeat) > 5*time.Minute {
+			s.logger.Warn("Edge connection is stale",
+				zap.String("edge_id", edgeID),
+				zap.Duration("age", time.Since(conn.LastHeartbeat)),
 			)
-			http.Error(w, fmt.Sprintf("Model not found: %s", request.ModelID), http.StatusNotFound)
-			return
+			// Still allow deployment (connection might reconnect)
 		}
 	}
 
-	// Check if model deployment service is available
+	// Validate model exists in catalog
+	if s.modelCatalog == nil {
+		s.logger.Error("Model catalog not available")
+		http.Error(w, "Model catalog not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	modelEntry, err := s.modelCatalog.GetModel(modelID)
+	if err != nil {
+		s.logger.Warn("Model not found",
+			zap.String("model_id", modelID),
+			zap.Error(err),
+		)
+		http.Error(w, fmt.Sprintf("Model %s not found", modelID), http.StatusNotFound)
+		return
+	}
+
+	// Validate model is ready for deployment
+	if modelEntry.Status != modelcatalog.ModelStatusReady && modelEntry.Status != modelcatalog.ModelStatusBaseline {
+		s.logger.Warn("Model is not ready for deployment",
+			zap.String("model_id", modelID),
+			zap.String("status", string(modelEntry.Status)),
+		)
+		http.Error(w, fmt.Sprintf("Model %s is not ready for deployment (status: %s)", modelID, modelEntry.Status), http.StatusBadRequest)
+		return
+	}
+
+	// Validate deployment service is available
 	if s.modelDeploymentService == nil {
-		s.logger.Error("Model deployment service not configured")
+		s.logger.Error("Model deployment service not available")
 		http.Error(w, "Model deployment service not available", http.StatusServiceUnavailable)
 		return
 	}
 
-	// Trigger model deployment
-	job, err := s.modelDeploymentService.ManualDeploy(r.Context(), request.ModelID, edgeID, request.CameraID)
+	// Trigger manual deployment
+	ctx := r.Context()
+	job, err := s.modelDeploymentService.ManualDeploy(ctx, modelID, edgeID, cameraID)
 	if err != nil {
-		s.logger.Error("Failed to deploy model",
+		s.logger.Error("Failed to trigger model deployment",
+			zap.String("model_id", modelID),
 			zap.String("edge_id", edgeID),
-			zap.String("model_id", request.ModelID),
 			zap.Error(err),
 		)
 		http.Error(w, fmt.Sprintf("Failed to deploy model: %v", err), http.StatusInternalServerError)
 		return
 	}
 
-	// Return deployment job ID
-	// Type assertion to ensure we're using the correct type
-	var _ *modeldeployment.DeploymentJob = job
-	response := map[string]interface{}{
-		"deployment_id": job.DeploymentID,
-		"model_id":     job.ModelID,
-		"edge_id":      job.EdgeID,
-		"status":       string(job.Status),
-		"created_at":    job.CreatedAt,
-	}
-
-	w.Header().Set("Content-Type", "application/json")
+	// Return deployment job ID and status (202 Accepted)
 	w.WriteHeader(http.StatusAccepted)
-	if err := json.NewEncoder(w).Encode(response); err != nil {
-		s.logger.Error("Failed to encode response", zap.Error(err))
-	}
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"deployment_id": job.DeploymentID,
+		"model_id":      job.ModelID,
+		"edge_id":       job.EdgeID,
+		"camera_id":     job.CameraID,
+		"status":        job.Status,
+		"message":       "Deployment job created and started",
+	})
 }
 
 // handleDeployments handles GET /api/deployments (list deployments with filtering)
@@ -176,16 +193,16 @@ func (s *APIServer) handleDeployments(w http.ResponseWriter, r *http.Request) {
 	deployments := make([]map[string]interface{}, len(jobs))
 	for i, job := range jobs {
 		deployments[i] = map[string]interface{}{
-			"deployment_id":          job.DeploymentID,
-			"model_id":               job.ModelID,
-			"edge_id":                job.EdgeID,
-			"camera_id":              job.CameraID,
-			"status":                 string(job.Status),
-			"deployment_started_at":  job.DeploymentStartedAt,
+			"deployment_id":           job.DeploymentID,
+			"model_id":                job.ModelID,
+			"edge_id":                 job.EdgeID,
+			"camera_id":               job.CameraID,
+			"status":                  string(job.Status),
+			"deployment_started_at":   job.DeploymentStartedAt,
 			"deployment_completed_at": job.DeploymentCompletedAt,
-			"error_message":          job.ErrorMessage,
-			"model_file_path":        job.ModelFilePath,
-			"deployment_version":     job.DeploymentVersion,
+			"error_message":           job.ErrorMessage,
+			"model_file_path":         job.ModelFilePath,
+			"deployment_version":      job.DeploymentVersion,
 			"created_at":              job.CreatedAt,
 			"updated_at":              job.UpdatedAt,
 		}
@@ -238,16 +255,16 @@ func (s *APIServer) handleDeploymentByID(w http.ResponseWriter, r *http.Request)
 		}
 
 		response := map[string]interface{}{
-			"deployment_id":          job.DeploymentID,
-			"model_id":               job.ModelID,
-			"edge_id":                job.EdgeID,
-			"camera_id":              job.CameraID,
-			"status":                 string(job.Status),
-			"deployment_started_at":  job.DeploymentStartedAt,
+			"deployment_id":           job.DeploymentID,
+			"model_id":                job.ModelID,
+			"edge_id":                 job.EdgeID,
+			"camera_id":               job.CameraID,
+			"status":                  string(job.Status),
+			"deployment_started_at":   job.DeploymentStartedAt,
 			"deployment_completed_at": job.DeploymentCompletedAt,
-			"error_message":          job.ErrorMessage,
-			"model_file_path":        job.ModelFilePath,
-			"deployment_version":     job.DeploymentVersion,
+			"error_message":           job.ErrorMessage,
+			"model_file_path":         job.ModelFilePath,
+			"deployment_version":      job.DeploymentVersion,
 			"created_at":              job.CreatedAt,
 			"updated_at":              job.UpdatedAt,
 		}
@@ -295,16 +312,16 @@ func (s *APIServer) handleDeploymentByID(w http.ResponseWriter, r *http.Request)
 		deployments := make([]map[string]interface{}, len(jobs))
 		for i, job := range jobs {
 			deployments[i] = map[string]interface{}{
-				"deployment_id":          job.DeploymentID,
-				"model_id":               job.ModelID,
-				"edge_id":                job.EdgeID,
-				"camera_id":              job.CameraID,
-				"status":                 string(job.Status),
-				"deployment_started_at":  job.DeploymentStartedAt,
+				"deployment_id":           job.DeploymentID,
+				"model_id":                job.ModelID,
+				"edge_id":                 job.EdgeID,
+				"camera_id":               job.CameraID,
+				"status":                  string(job.Status),
+				"deployment_started_at":   job.DeploymentStartedAt,
 				"deployment_completed_at": job.DeploymentCompletedAt,
-				"error_message":          job.ErrorMessage,
-				"model_file_path":        job.ModelFilePath,
-				"deployment_version":     job.DeploymentVersion,
+				"error_message":           job.ErrorMessage,
+				"model_file_path":         job.ModelFilePath,
+				"deployment_version":      job.DeploymentVersion,
 				"created_at":              job.CreatedAt,
 				"updated_at":              job.UpdatedAt,
 			}
@@ -358,16 +375,16 @@ func (s *APIServer) handleDeploymentByID(w http.ResponseWriter, r *http.Request)
 		deployments := make([]map[string]interface{}, len(jobs))
 		for i, job := range jobs {
 			deployments[i] = map[string]interface{}{
-				"deployment_id":          job.DeploymentID,
-				"model_id":               job.ModelID,
-				"edge_id":                job.EdgeID,
-				"camera_id":              job.CameraID,
-				"status":                 string(job.Status),
-				"deployment_started_at":  job.DeploymentStartedAt,
+				"deployment_id":           job.DeploymentID,
+				"model_id":                job.ModelID,
+				"edge_id":                 job.EdgeID,
+				"camera_id":               job.CameraID,
+				"status":                  string(job.Status),
+				"deployment_started_at":   job.DeploymentStartedAt,
 				"deployment_completed_at": job.DeploymentCompletedAt,
-				"error_message":          job.ErrorMessage,
-				"model_file_path":        job.ModelFilePath,
-				"deployment_version":     job.DeploymentVersion,
+				"error_message":           job.ErrorMessage,
+				"model_file_path":         job.ModelFilePath,
+				"deployment_version":      job.DeploymentVersion,
 				"created_at":              job.CreatedAt,
 				"updated_at":              job.UpdatedAt,
 			}
@@ -400,10 +417,10 @@ func (s *APIServer) handleDeploymentByID(w http.ResponseWriter, r *http.Request)
 
 		// Parse request body
 		var request struct {
-			Status     string  `json:"status"`
-			Timestamp  string  `json:"timestamp"`
-			ModelPath  *string `json:"model_path,omitempty"`
-			Error      *string `json:"error,omitempty"`
+			Status    string  `json:"status"`
+			Timestamp string  `json:"timestamp"`
+			ModelPath *string `json:"model_path,omitempty"`
+			Error     *string `json:"error,omitempty"`
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
@@ -425,10 +442,20 @@ func (s *APIServer) handleDeploymentByID(w http.ResponseWriter, r *http.Request)
 		}
 
 		// Update status based on Edge report
-		if request.Status == "deployed" || request.Status == "active" {
+		if request.Status == "deployed" {
 			modelPath := request.ModelPath
 			if err := s.modelDeploymentOrchestrator.CompleteDeployment(r.Context(), deploymentID, modelPath); err != nil {
 				s.logger.Error("Failed to complete deployment",
+					zap.String("deployment_id", deploymentID),
+					zap.Error(err),
+				)
+				http.Error(w, fmt.Sprintf("Failed to update deployment status: %v", err), http.StatusInternalServerError)
+				return
+			}
+		} else if request.Status == "active" {
+			// Edge reports model is loaded and active for inference
+			if err := s.modelDeploymentOrchestrator.ActivateDeployment(r.Context(), deploymentID); err != nil {
+				s.logger.Error("Failed to activate deployment",
 					zap.String("deployment_id", deploymentID),
 					zap.Error(err),
 				)
@@ -472,4 +499,3 @@ func (s *APIServer) handleDeploymentByID(w http.ResponseWriter, r *http.Request)
 	// Invalid path
 	http.Error(w, "Invalid path", http.StatusBadRequest)
 }
-

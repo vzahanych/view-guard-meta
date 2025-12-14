@@ -7,24 +7,25 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"go.uber.org/zap"
-	"github.com/vzahanych/view-guard-meta/user-vm-api/internal/model-catalog"
+	modelcatalog "github.com/vzahanych/view-guard-meta/user-vm-api/internal/model-catalog"
 	"github.com/vzahanych/view-guard-meta/user-vm-api/internal/shared/logging"
 	"github.com/vzahanych/view-guard-meta/user-vm-api/internal/shared/storage"
-	"github.com/vzahanych/view-guard-meta/user-vm-api/internal/tunnel-gateway"
+	tunnelgateway "github.com/vzahanych/view-guard-meta/user-vm-api/internal/tunnel-gateway"
+	"go.uber.org/zap"
 )
 
 // ModelDeploymentOrchestrator coordinates model deployment workflow
 type ModelDeploymentOrchestrator struct {
-	store          *DeploymentStore
-	modelCatalog   *modelcatalog.ModelCatalog
-	modelStorage   *storage.ModelStorage
-	modelConverter *ModelConverter
+	store           *DeploymentStore
+	modelCatalog    *modelcatalog.ModelCatalog
+	modelStorage    *storage.ModelStorage
+	modelConverter  *ModelConverter
 	transferService *ModelTransferService
-	tunnelGateway  *tunnelgateway.EdgeAPIServer
-	logger         *logging.Logger
-	jobs           map[string]*DeploymentJob
-	mu             sync.RWMutex
+	minioStorage    *MinIOModelStorage // MinIO storage for model archiving
+	tunnelGateway   *tunnelgateway.EdgeAPIServer
+	logger          *logging.Logger
+	jobs            map[string]*DeploymentJob
+	mu              sync.RWMutex
 }
 
 // NewModelDeploymentOrchestrator creates a new deployment orchestrator
@@ -34,6 +35,7 @@ func NewModelDeploymentOrchestrator(
 	modelStorage *storage.ModelStorage,
 	modelConverter *ModelConverter,
 	transferService *ModelTransferService,
+	minioStorage *MinIOModelStorage, // Optional: nil if MinIO is not configured
 	tunnelGateway *tunnelgateway.EdgeAPIServer,
 	logger *logging.Logger,
 ) (*ModelDeploymentOrchestrator, error) {
@@ -65,6 +67,7 @@ func NewModelDeploymentOrchestrator(
 		modelStorage:    modelStorage,
 		modelConverter:  modelConverter,
 		transferService: transferService,
+		minioStorage:    minioStorage, // Can be nil if MinIO is not configured
 		tunnelGateway:   tunnelGateway,
 		logger:          logger,
 		jobs:            make(map[string]*DeploymentJob),
@@ -201,6 +204,74 @@ func (o *ModelDeploymentOrchestrator) StartDeployment(ctx context.Context, deplo
 		)
 	}
 
+	// For trained models: Ensure they are stored in MinIO (trained models are stored in MinIO only, not on disk)
+	// For baseline models: Archive to MinIO for backup (baseline models remain on disk)
+	modelEntry, err := o.modelCatalog.GetModel(job.ModelID)
+	if err == nil {
+		isTrainedModel := modelEntry.TrainingDatasetID != "" || (modelEntry.Metadata != nil && modelEntry.Metadata.TrainingDatasetID != "")
+
+		if isTrainedModel {
+			// CRITICAL: Trained models MUST be persisted in MinIO before deployment
+			// This ensures models can be redeployed if Edge restarts or is replaced
+			// without requiring retraining for the same camera
+			if o.minioStorage == nil {
+				return fmt.Errorf("MinIO storage not configured, cannot deploy trained model %s (trained models must be stored in MinIO for persistence)", job.ModelID)
+			}
+
+			o.logger.Info("Verifying trained model is persisted in MinIO before deployment",
+				zap.String("deployment_id", deploymentID),
+				zap.String("model_id", job.ModelID),
+				zap.String("reason", "Model must be in MinIO for redeployment if Edge restarts/replaces"),
+			)
+
+			// Use background context with timeout for MinIO check to avoid cancellation from HTTP request context
+			// This ensures the check completes even if the HTTP handler returns
+			minioCtx, minioCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer minioCancel()
+			exists, err := o.minioStorage.ModelExistsInMinIO(minioCtx, job.ModelID)
+			if err != nil {
+				o.logger.Error("Failed to verify trained model in MinIO - deployment cannot proceed",
+					zap.String("deployment_id", deploymentID),
+					zap.String("model_id", job.ModelID),
+					zap.Error(err),
+				)
+				return fmt.Errorf("failed to verify trained model in MinIO (required for persistence): %w", err)
+			}
+			if !exists {
+				o.logger.Error("Trained model not found in MinIO - model must be persisted before deployment",
+					zap.String("deployment_id", deploymentID),
+					zap.String("model_id", job.ModelID),
+					zap.String("reason", "Model must be in MinIO to allow redeployment without retraining"),
+				)
+				return fmt.Errorf("trained model %s not found in MinIO - model must be persisted to MinIO before deployment (allows redeployment if Edge restarts/replaces)", job.ModelID)
+			}
+
+			o.logger.Info("Confirmed trained model is persisted in MinIO - safe to deploy",
+				zap.String("deployment_id", deploymentID),
+				zap.String("model_id", job.ModelID),
+				zap.String("note", "Model can be redeployed from MinIO if Edge restarts or is replaced"),
+			)
+		} else {
+			// Baseline models: Archive to MinIO for backup (baseline models remain on disk)
+			if o.minioStorage != nil {
+				err = o.minioStorage.ArchiveModel(ctx, job.ModelID)
+				if err != nil {
+					// Log warning but continue with deployment - MinIO is for backup for baseline models
+					o.logger.Warn("Failed to archive baseline model to MinIO, continuing with deployment",
+						zap.String("deployment_id", deploymentID),
+						zap.String("model_id", job.ModelID),
+						zap.Error(err),
+					)
+				} else {
+					o.logger.Info("Archived baseline model to MinIO",
+						zap.String("deployment_id", deploymentID),
+						zap.String("model_id", job.ModelID),
+					)
+				}
+			}
+		}
+	}
+
 	// Update status to deploying
 	now := time.Now()
 	job.Status = DeploymentStatusDeploying
@@ -220,8 +291,13 @@ func (o *ModelDeploymentOrchestrator) StartDeployment(ctx context.Context, deplo
 	)
 
 	// Transfer model to Edge (async)
+	// Use background context with timeout for async transfer to avoid cancellation when StartDeployment returns
+	// This ensures the transfer can complete even if the original request context is canceled
+	transferCtx, transferCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer transferCancel() // Cancel if goroutine exits early
 	go func() {
-		transferResult, err := o.transferService.TransferModel(ctx, deploymentID, job.ModelID, job.EdgeID)
+		defer transferCancel() // Ensure context is canceled when goroutine exits
+		transferResult, err := o.transferService.TransferModel(transferCtx, deploymentID, job.ModelID, job.EdgeID)
 		if err != nil {
 			o.logger.Error("Model transfer failed",
 				zap.String("deployment_id", deploymentID),
@@ -251,7 +327,7 @@ func (o *ModelDeploymentOrchestrator) StartDeployment(ctx context.Context, deplo
 	return nil
 }
 
-// CompleteDeployment marks a deployment as completed
+// CompleteDeployment marks a deployment as completed (deployed to Edge)
 func (o *ModelDeploymentOrchestrator) CompleteDeployment(ctx context.Context, deploymentID string, modelFilePath *string) error {
 	if deploymentID == "" {
 		return fmt.Errorf("deployment ID is required")
@@ -279,6 +355,44 @@ func (o *ModelDeploymentOrchestrator) CompleteDeployment(ctx context.Context, de
 		zap.String("model_id", job.ModelID),
 		zap.String("edge_id", job.EdgeID),
 	)
+
+	return nil
+}
+
+// ActivateDeployment marks a deployment as active (model loaded and active on Edge for inference)
+// This is called when Edge confirms the model is loaded and ready for inference
+func (o *ModelDeploymentOrchestrator) ActivateDeployment(ctx context.Context, deploymentID string) error {
+	if deploymentID == "" {
+		return fmt.Errorf("deployment ID is required")
+	}
+
+	job, err := o.GetDeploymentJob(ctx, deploymentID)
+	if err != nil {
+		return fmt.Errorf("failed to get deployment job: %w", err)
+	}
+
+	// Update status to active
+	job.Status = DeploymentStatusActive
+
+	err = o.store.UpdateDeployment(ctx, job)
+	if err != nil {
+		return fmt.Errorf("failed to update deployment: %w", err)
+	}
+
+	o.logger.Info("Activated deployment",
+		zap.String("deployment_id", deploymentID),
+		zap.String("model_id", job.ModelID),
+		zap.String("edge_id", job.EdgeID),
+		zap.String("camera_id", func() string {
+			if job.CameraID != nil {
+				return *job.CameraID
+			}
+			return ""
+		}()),
+	)
+
+	// Note: Marking previous deployments as superseded is deferred to future enhancement
+	// For PoC, we track active model via GetActiveModelVersion() which returns latest deployed model
 
 	return nil
 }
@@ -338,7 +452,7 @@ func (o *ModelDeploymentOrchestrator) DetermineDeploymentTargets(ctx context.Con
 			// TODO: Query training_datasets table to get edge_id from dataset_id
 			// For now, we'll need to add edge_id to model metadata during training
 			// or query the dataset storage service
-			
+
 			// Check if we can get edge_id from preprocessing metadata (stored by training service)
 			var edgeID string
 			if modelEntry.Metadata.Preprocessing != nil {
@@ -346,7 +460,7 @@ func (o *ModelDeploymentOrchestrator) DetermineDeploymentTargets(ctx context.Con
 					edgeID = edgeIDVal
 				}
 			}
-			
+
 			if edgeID == "" {
 				// Fallback: This is a PoC limitation
 				// In production, edge_id should be stored in model metadata or queried from dataset
@@ -357,7 +471,7 @@ func (o *ModelDeploymentOrchestrator) DetermineDeploymentTargets(ctx context.Con
 				)
 				return nil, fmt.Errorf("edge_id not found in model metadata for model %s (dataset_id: %s)", modelID, modelEntry.Metadata.TrainingDatasetID)
 			}
-			
+
 			var cameraID *string
 			if modelEntry.CameraID != "" {
 				cameraID = &modelEntry.CameraID
@@ -378,13 +492,14 @@ func (o *ModelDeploymentOrchestrator) DetermineDeploymentTargets(ctx context.Con
 }
 
 // GetVersionHistory returns version history for an Edge/camera
+// Returns deployments with status "deployed" or "active" (models that were successfully deployed)
 // For PoC: Basic version history from deployment records
 // Future: Full version tracking with semantic versioning
 func (o *ModelDeploymentOrchestrator) GetVersionHistory(ctx context.Context, edgeID string, cameraID *string) ([]*DeploymentJob, error) {
+	// Get all deployments for Edge/camera (we'll filter by status in application code)
 	filters := &DeploymentFilters{
 		EdgeID:   edgeID,
 		CameraID: "",
-		Status:   DeploymentStatusDeployed, // Only deployed models
 	}
 
 	if cameraID != nil {
@@ -396,11 +511,19 @@ func (o *ModelDeploymentOrchestrator) GetVersionHistory(ctx context.Context, edg
 		return nil, fmt.Errorf("failed to list deployments: %w", err)
 	}
 
-	return deployments, nil
+	// Filter to only deployed/active models (exclude pending, deploying, failed)
+	var successfulDeployments []*DeploymentJob
+	for _, dep := range deployments {
+		if dep.Status == DeploymentStatusDeployed || dep.Status == DeploymentStatusActive {
+			successfulDeployments = append(successfulDeployments, dep)
+		}
+	}
+
+	return successfulDeployments, nil
 }
 
-// GetActiveModelVersion returns the active (latest deployed) model version for Edge/camera
-// For PoC: Returns latest deployed model
+// GetActiveModelVersion returns the active (latest deployed/active) model version for Edge/camera
+// For PoC: Returns latest deployed or active model
 // Future: Full active version tracking with rollback support
 func (o *ModelDeploymentOrchestrator) GetActiveModelVersion(ctx context.Context, edgeID string, cameraID *string) (*DeploymentJob, error) {
 	history, err := o.GetVersionHistory(ctx, edgeID, cameraID)
@@ -409,9 +532,29 @@ func (o *ModelDeploymentOrchestrator) GetActiveModelVersion(ctx context.Context,
 	}
 
 	if len(history) == 0 {
-		return nil, fmt.Errorf("no deployed models found for Edge %s", edgeID)
+		cameraStr := ""
+		if cameraID != nil {
+			cameraStr = fmt.Sprintf(" and camera %s", *cameraID)
+		}
+		return nil, fmt.Errorf("no deployed models found for Edge %s%s", edgeID, cameraStr)
 	}
 
+	// Prefer active models over deployed models
+	// If multiple active models exist, return the most recent one
+	var activeModel *DeploymentJob
+	for _, dep := range history {
+		if dep.Status == DeploymentStatusActive {
+			if activeModel == nil || (dep.CreatedAt.After(activeModel.CreatedAt)) {
+				activeModel = dep
+			}
+		}
+	}
+
+	if activeModel != nil {
+		return activeModel, nil
+	}
+
+	// No active model found, return the most recent deployed model
 	// Return the most recent deployment (first in list, as it's sorted by created_at DESC)
 	return history[0], nil
 }
@@ -433,4 +576,3 @@ type DeploymentTarget struct {
 	EdgeID   string
 	CameraID *string
 }
-

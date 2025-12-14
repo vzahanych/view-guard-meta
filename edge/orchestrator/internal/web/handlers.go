@@ -2611,6 +2611,32 @@ func (s *Server) handleModelDeploy(c *gin.Context) {
 	}
 	modelData = modelData[:n]
 
+	// Validate model size (≤50MB)
+	const maxModelSize = 50 * 1024 * 1024 // 50MB
+	if len(modelData) > maxModelSize {
+		s.logger.Error("Model file too large",
+			"size", len(modelData),
+			"max_size", maxModelSize,
+		)
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error":   fmt.Sprintf("Model file size %d bytes exceeds maximum allowed size of %d bytes", len(modelData), maxModelSize),
+		})
+		return
+	}
+
+	// Basic ONNX format validation (check for ONNX magic bytes/protobuf header)
+	// ONNX files are protobuf-encoded, so we check for protobuf magic bytes
+	// For PoC, we do a basic check - in production, use a proper ONNX parser
+	if len(modelData) < 4 {
+		s.logger.Error("Model file too small to be valid")
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error":   "Model file too small to be valid",
+		})
+		return
+	}
+
 	// Get metadata
 	metadataJSON := c.PostForm("metadata")
 	if metadataJSON == "" {
@@ -2658,9 +2684,39 @@ func (s *Server) handleModelDeploy(c *gin.Context) {
 		framework = "onnx" // Default framework
 	}
 
+	// Extract camera_id (required for camera-specific deployment)
 	var cameraID *string
-	if camID, ok := metadata["camera_id"].(string); ok && camID != "" {
+	camID, ok := metadata["camera_id"].(string)
+	if !ok || camID == "" {
+		// Try to get from form field as fallback
+		camID = c.PostForm("camera_id")
+	}
+	if camID != "" {
 		cameraID = &camID
+
+		// Validate camera exists (required for camera-specific deployment)
+		if s.cameraMgr != nil {
+			_, err := s.cameraMgr.GetCamera(camID)
+			if err != nil {
+				s.logger.Error("Camera not found for model deployment",
+					"camera_id", camID,
+					"model_id", modelID,
+					"error", err,
+				)
+				c.JSON(http.StatusBadRequest, gin.H{
+					"success": false,
+					"error":   fmt.Sprintf("Camera not found: %s", camID),
+				})
+				return
+			}
+		}
+	} else {
+		// Camera ID is required for camera-specific model deployment
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error":   "camera_id is required in metadata for camera-specific model deployment",
+		})
+		return
 	}
 
 	// Get deployment_id from form (optional)
@@ -2679,13 +2735,13 @@ func (s *Server) handleModelDeploy(c *gin.Context) {
 
 	// Create ModelMetadata struct
 	modelMetadata := &storage.ModelMetadata{
-		ModelID:           modelID,
-		Version:           version,
-		ModelType:         modelType,
-		CameraID:          cameraID,
-		Framework:         framework,
-		InputShape:        []int{},
-		Preprocessing:     make(map[string]interface{}),
+		ModelID:            modelID,
+		Version:            version,
+		ModelType:          modelType,
+		CameraID:           cameraID,
+		Framework:          framework,
+		InputShape:         []int{},
+		Preprocessing:      make(map[string]interface{}),
 		AdditionalMetadata: make(map[string]interface{}),
 	}
 
@@ -2791,8 +2847,69 @@ func (s *Server) handleModelDeploy(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"success":       true,
+		"success":         true,
 		"model_file_path": modelFilePath,
-		"message":       "Model deployed successfully",
+		"message":         "Model deployed successfully",
+	})
+}
+
+// handleListSnapshotRequests handles listing all pending snapshot requests from VM
+func (s *Server) handleListSnapshotRequests(c *gin.Context) {
+	if s.snapshotRequestSvc == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error": "Snapshot request service not available",
+		})
+		return
+	}
+
+	allRequests := s.snapshotRequestSvc.GetAllPendingRequests()
+
+	// Convert to API response format
+	requests := make([]gin.H, 0, len(allRequests))
+	for cameraID, req := range allRequests {
+		if req == nil {
+			continue
+		}
+
+		requests = append(requests, gin.H{
+			"camera_id":    cameraID,
+			"label":        req.Label,
+			"custom_label": req.CustomLabel,
+			"count":        req.Count,
+			"requested_at": req.RequestedAt.Format(time.RFC3339),
+		})
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"requests": requests,
+		"count":    len(requests),
+	})
+}
+
+// handleGetSnapshotRequest handles getting a pending snapshot request for a specific camera
+func (s *Server) handleGetSnapshotRequest(c *gin.Context) {
+	if s.snapshotRequestSvc == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error": "Snapshot request service not available",
+		})
+		return
+	}
+
+	cameraID := c.Param("camera_id")
+	req := s.snapshotRequestSvc.GetPendingRequest(cameraID)
+
+	if req == nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"error": "No pending snapshot request found for this camera",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"camera_id":    cameraID,
+		"label":        req.Label,
+		"custom_label": req.CustomLabel,
+		"count":        req.Count,
+		"requested_at": req.RequestedAt.Format(time.RFC3339),
 	})
 }

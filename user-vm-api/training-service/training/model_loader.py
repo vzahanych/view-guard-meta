@@ -196,35 +196,69 @@ class ModelLoader:
                     pytorch_path = model_dir / pytorch_model_name
                     
                     # Try to download PyTorch model using Ultralytics
+                    # Note: model_dir might be read-only, so we'll try to download to a writable location first
                     if not pytorch_path.exists():
                         logger.info(f"ONNX model found but PyTorch model needed for training. Downloading {pytorch_model_name}...")
                         try:
                             from ultralytics import YOLO
-                            # Ultralytics will download the model automatically
-                            temp_model = YOLO(pytorch_model_name)
-                            # Move downloaded model to our model directory
                             import shutil
-                            downloaded_path = Path(pytorch_model_name)
-                            if downloaded_path.exists():
-                                shutil.move(str(downloaded_path), str(pytorch_path))
-                                logger.info(f"Downloaded PyTorch model to {pytorch_path}")
-                            else:
-                                # Model might be in Ultralytics cache, try to find it
-                                from pathlib import Path as PathLib
-                                ultralytics_home = PathLib.home() / ".ultralytics"
-                                cached_models = list(ultralytics_home.glob(f"**/{pytorch_model_name}"))
-                                if cached_models:
-                                    shutil.copy(str(cached_models[0]), str(pytorch_path))
-                                    logger.info(f"Copied PyTorch model from cache to {pytorch_path}")
+                            import tempfile
+                            
+                            # Try to download to a temporary writable location first
+                            temp_dir = Path(config.TRAINING_OUTPUT_DIR) / ".pytorch_models"
+                            temp_dir.mkdir(parents=True, exist_ok=True)
+                            temp_pytorch_path = temp_dir / pytorch_model_name
+                            
+                            if not temp_pytorch_path.exists():
+                                # Ultralytics will download the model automatically
+                                temp_model = YOLO(pytorch_model_name)
+                                # Get the actual path from the model
+                                model_weights_path = getattr(temp_model.model, 'weights', None) or getattr(temp_model, 'ckpt_path', None)
+                                if model_weights_path and os.path.exists(model_weights_path):
+                                    shutil.copy(model_weights_path, str(temp_pytorch_path))
+                                    logger.info(f"Downloaded PyTorch model to {temp_pytorch_path}")
+                                else:
+                                    # Try to find in Ultralytics cache
+                                    from pathlib import Path as PathLib
+                                    ultralytics_home = PathLib(os.path.expanduser("~")) / ".ultralytics"
+                                    cached_models = list(ultralytics_home.rglob(pytorch_model_name))
+                                    if cached_models:
+                                        shutil.copy(str(cached_models[0]), str(temp_pytorch_path))
+                                        logger.info(f"Copied PyTorch model from cache to {temp_pytorch_path}")
+                                    else:
+                                        # As last resort, download directly
+                                        logger.info(f"Downloading {pytorch_model_name} directly from GitHub...")
+                                        import urllib.request
+                                        download_url = f"https://github.com/ultralytics/assets/releases/download/v8.3.0/{pytorch_model_name}"
+                                        urllib.request.urlretrieve(download_url, str(temp_pytorch_path))
+                                        logger.info(f"Downloaded PyTorch model to {temp_pytorch_path}")
+                            
+                            # Try to copy to model_dir (might fail if read-only, that's OK)
+                            try:
+                                if temp_pytorch_path.exists():
+                                    shutil.copy(str(temp_pytorch_path), str(pytorch_path))
+                                    logger.info(f"Copied PyTorch model to model directory: {pytorch_path}")
+                            except (OSError, PermissionError) as e:
+                                logger.info(f"Could not copy to model directory (read-only): {e}. Using temp location.")
+                                pytorch_path = temp_pytorch_path
+                                
                         except Exception as e:
-                            logger.warning(f"Failed to download PyTorch model: {e}")
+                            logger.error(f"Failed to download PyTorch model: {e}")
+                            raise
                     
                     if pytorch_path.exists():
                         self.model_path = str(pytorch_path)
                         logger.info(f"Using PyTorch model for training: {self.model_path}")
                         return self.model_path
+                    
+                    # If we require PyTorch but couldn't get it, raise error
+                    if require_pytorch:
+                        raise FileNotFoundError(
+                            f"PyTorch model required for training but not found: {pytorch_path}. "
+                            f"ONNX models cannot be used for training. Please ensure a PyTorch (.pt) model is available."
+                        )
         
-        # Try to find model file (for inference, ONNX is fine)
+        # Try to find model file (for inference, ONNX is fine - only if require_pytorch=False)
         # Priority: 1. metadata.onnx_file, 2. model.onnx, 3. yolov8n.pt, 4. yolov8n.onnx
         candidates = []
         

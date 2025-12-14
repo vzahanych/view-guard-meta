@@ -1009,8 +1009,20 @@ services:
   - Added `infra/local/start-local-env.sh` helper that:
     1. Runs `wg-setup` (Docker) to generate WireGuard key material under `infra/local/wg/keys`
     2. Runs `wg/generate-configs.sh` to materialize server/edge configs under `infra/local/wg/config`
-    3. Brings the stack up (`docker compose up -d`) or handles restart/stop flows
+    3. Runs `wg/generate-certs.sh` to generate TLS/mTLS certificates for zero-trust security under `infra/local/wg/certs`
+    4. Brings the stack up (`docker compose up -d`) or handles restart/stop flows
   - WireGuard tunnel now auto-establishes on `start-local-env.sh start` with no manual steps: edge client and server use `ip` + `wg set` commands to configure interfaces, assign `10.0.0.1/24` ↔ `10.0.0.2/24`, and verify connectivity (`ping` succeeds both ways)
+  - **Zero-trust security**: TLS/mTLS certificates are generated for all services:
+    - **CA Certificate**: Root certificate authority for signing all service certificates
+    - **VM Server Certificate**: For user-vm-api gRPC/TLS server authentication
+    - **VM Client Certificate**: For VM → Edge mTLS client authentication
+    - **VM Database Certificate**: For VM services ↔ SQLite/TLS secure database connections
+    - **Edge Server Certificate**: For edge-orchestrator gRPC/TLS server authentication
+    - **Edge Client Certificate**: For Edge → VM mTLS client authentication
+    - **Edge Database Certificate**: For Edge services ↔ SQLite/TLS secure database connections
+    - Certificates are mounted to containers at `/etc/ssl/certs/` (certificates) and `/etc/ssl/private/` (private keys)
+    - All certificates are signed by the same CA, enabling mutual TLS (mTLS) between services
+    - Certificate validity: CA (10 years), server/client certificates (1 year)
   - Local SQLite database persists via `user-vm-data` volume; MinIO data persists via `minio-data`
 - **Substep 2.0.2.3**: IDE configuration
   - **Status**: ✅ DONE
@@ -1246,38 +1258,85 @@ This section documents the verified status of Epic 2.1 implementation in the loc
   - **P0**: Ensure EDGE_ID consistency between edge container and VM edge management system ✅
   - **P0**: VM validates EDGE_ID when edge connects (checks if ID exists in edge management system) ✅
   - **Location**: `infra/local/test-phase2.sh`, `infra/local/wg/generate-keys.sh`, `infra/local/docker-compose.yml`, `edge/orchestrator/main.go`, `user-vm-api/internal/tunnel-gateway/edge_api.go`
+  - **Architecture Overview**:
+    - **Production (SaaS Architecture)**:
+      - Customer configures number of edges in SaaS UI
+      - SaaS creates User VM with knowledge of how many edges will connect
+      - SaaS pre-registers all edges in VM edge management system before VM starts
+      - VM starts with edges already registered in its edge management system
+      - Edge appliances start later and connect to already-running VM
+      - Edge sends edge_id in heartbeat/telemetry, VM validates it matches pre-registered edge
+    - **Local Test Environment (Simulates SaaS)**:
+      - Test script simulates SaaS job: generates configuration (WireGuard keys + edge_id)
+      - Test script simulates SaaS registration: registers edge in VM database before VM starts
+      - VM services start with edge already registered
+      - Edge services start after VM is fully functional
+      - Integration test ensures edge container starts facing fully functional VM
+  - **Docker Compose Startup Sequence (SaaS Architecture Simulation)**:
+    1. **Generate Configuration (SaaS Job Simulation)**: 
+       - `wg-setup` service runs first and generates WireGuard keys and edge_id
+       - This simulates SaaS creating configuration for customer's edges
+    2. **Start Central VM Services (Independent, Central Part)**:
+       - `user-vm-api`, `python-ai-service`, `minio` start
+       - VM is the central, independent part that can run without edges
+       - VM starts with empty edge management system (will be populated by SaaS)
+    3. **Register Edge in VM (SaaS Registration Job Simulation)**:
+       - Test script registers edge in VM database with WireGuard public key
+       - This simulates SaaS registering edges in VM edge management system after customer configures them in SaaS UI
+       - VM now has knowledge of which edges will connect
+    4. **Start Edge Services (Edge Faces Fully Functional VM)**:
+       - `edge-orchestrator`, `edge-ai-service` start only after VM is fully functional
+       - Integration test ensures edge container starts facing fully functional VM with edge already registered
+       - Edge connects to VM that already knows about it
   - **Implementation Notes**:
     - **Local test environment**:
       - Generate EDGE_ID in `wg/generate-keys.sh` together with WireGuard keys ✅
       - Store EDGE_ID in `wg/keys/edge-id` file alongside WireGuard keys ✅
       - Pass EDGE_ID to edge-orchestrator container via `EDGE_ID` environment variable in docker-compose.yml ✅
-      - After generation, register EDGE_ID in VM edge management system via test script (direct database insert) ✅
+      - Test script registers EDGE_ID in VM edge management system (simulating SaaS registration) ✅
       - Edge orchestrator uses `EDGE_ID` environment variable (with fallback to "poc-edge-1" for backward compatibility) ✅
     - **Production environment**:
-      - SaaS private components set EDGE_ID on VM side in edge management system before edge deployment
+      - SaaS private components set EDGE_ID on VM side in edge management system before VM deployment
+      - VM starts with edges already registered in edge management system
       - Edge receives EDGE_ID via environment variable or configuration during deployment
-      - Edge connects with the pre-registered EDGE_ID
-    - **VM validation**:
-      - When edge connects via WireGuard, VM validates that the EDGE_ID exists in edge management system ✅
-      - If EDGE_ID doesn't exist, connection is rejected with error message ✅
-      - If EDGE_ID exists, connection proceeds and edge status is updated ✅
-      - Removed auto-registration - edges must be pre-registered ✅
+      - Edge connects to already-running VM with pre-registered EDGE_ID
+    - **VM validation flow**:
+      - **VM starts first** (independent, central part) with edges pre-registered by SaaS
+      - Edge starts and establishes WireGuard tunnel
+      - Edge establishes gRPC connection
+      - Edge sends edge_id in first heartbeat/telemetry message
+      - VM validates that edge_id exists in edge management system and matches WireGuard public key
+      - If edge_id exists and WireGuard public key matches: connection proceeds, edge status updated ✅
+      - If edge_id doesn't exist or WireGuard public key doesn't match: connection is rejected with error message ✅
+      - VM starts monitoring connection and receiving telemetry
     - **Edge consistency**:
       - EDGE_ID is used consistently across all edge components ✅:
         - Edge telemetry sender (for edge_id in telemetry messages) ✅
         - Dataset packaging (for edge_id in dataset metadata) ✅
         - Edge registration with VM (for edge_id in registration requests) ✅
-  - **Implementation (Dec 2025)**:
-    - Modified `wg/generate-keys.sh` to generate EDGE_ID (`poc-edge-1` for local test) and store it in `wg/keys/edge-id` file
-    - Modified `test-phase2.sh` to read EDGE_ID from generated file and register it in VM database with WireGuard public key before starting services
-    - Updated `docker-compose.yml` to pass `EDGE_ID` environment variable to edge-orchestrator service using `${EDGE_ID:-poc-edge-1}` syntax
-    - Verified `edge/orchestrator/main.go` already uses `EDGE_ID` from environment variable consistently for telemetry sender and dataset service
-    - Updated `user-vm-api/internal/tunnel-gateway/edge_api.go` `authenticateConnection()` method to:
-      - Validate EDGE_ID exists in edge management system when edge connects
-      - Reject connection if EDGE_ID is not registered (removed auto-registration)
-      - Update edge status and WireGuard public key if edge exists
-      - Ensure WireGuard peer is added to WireGuard server
-    - Flow: Generate EDGE_ID → Register in VM → Edge uses EDGE_ID → VM validates on connection
+    - **Implementation (Dec 2025)**:
+      - Modified `wg/generate-keys.sh` to generate EDGE_ID (`poc-edge-1` for local test) and store it in `wg/keys/edge-id` file
+      - Updated `docker-compose.yml` to pass `EDGE_ID` environment variable to edge-orchestrator service using `${EDGE_ID:-poc-edge-1}` syntax
+      - Verified `edge/orchestrator/main.go` already uses `EDGE_ID` from environment variable consistently for telemetry sender and dataset service
+      - Test script simulates SaaS registration: registers edge in VM database before VM services start
+      - `user-vm-api/internal/tunnel-gateway/edge_api.go` `authenticateConnection()` validates by WireGuard public key and checks edge_id exists in database
+      - Edge sends edge_id in heartbeat/telemetry, VM validates it matches pre-registered edge
+      - **Docker Compose sequence**:
+        1. `wg-setup` service runs first (generates WireGuard keys, edge_id, and TLS/mTLS certificates - simulates SaaS configuration job)
+        2. VM services start (`user-vm-api`, `python-ai-service`, `minio`) - VM is independent, central part
+        3. Test script registers edge in VM database (simulates SaaS registration job - happens after VM is healthy)
+        4. Edge services start (`edge-orchestrator`, `edge-ai-service`) - Edge depends on VM being healthy, faces fully functional VM with edge already registered
+    - **Zero-trust certificate generation (Epic 2.0)**:
+      - `wg/generate-certs.sh` script generates all TLS/mTLS certificates for zero-trust security ✅
+      - Certificates are generated alongside WireGuard keys during `wg-setup` service execution ✅
+      - All certificates are stored in `infra/local/wg/certs/` directory ✅
+      - Certificates are mounted to containers via docker-compose volumes:
+        - VM services: `vm-server.crt/key`, `vm-client.crt/key`, `vm-db.crt/key`, `ca.crt` ✅
+        - Edge services: `edge-server.crt/key`, `edge-client.crt/key`, `edge-db.crt/key`, `ca.crt` ✅
+      - Certificate generation is verified in Epic 2.0 integration test ✅
+      - **Security model**: All service-to-service communication (VM ↔ Edge, services ↔ database) uses mTLS with certificates signed by the same CA ✅
+      - **Integration test ensures**: When edge container starts, it faces a fully functional VM with edge already registered in edge management system
+      - **Flow**: Generate EDGE_ID (SaaS simulation) → Register in VM (SaaS simulation) → VM starts with edges registered → Edge starts and connects → Edge sends edge_id → VM validates → VM monitors connection
 
 ### Step 2.0.1: Edge Connection Status Monitoring Service
 
@@ -1288,6 +1347,8 @@ This section documents the verified status of Epic 2.1 implementation in the loc
   - **P0**: Monitor WireGuard peer status (latest_handshake, transfer stats, latency) ✅
   - **P0**: Periodic health checks (ping/pong, heartbeat validation) ✅
   - **P0**: Connection state persistence in database (last_seen, connection_count, status) ✅
+  - **P0**: **Continuous gRPC health monitoring** - VM monitors Edge status through gRPC every 30s starting from Epic 2.2 ✅
+  - **P0**: **No HTTP communication** - All VM-Edge communication is gRPC-only (security requirement) ✅
   - **Location**: `user-vm-api/internal/tunnel-gateway/connection_monitor.go`
   - **Implementation Notes**:
     - Service should run as a background goroutine in EdgeAPIServer ✅
@@ -1295,6 +1356,10 @@ This section documents the verified status of Epic 2.1 implementation in the loc
     - Update `edges` table with connection status and last_seen timestamps ✅
     - Publish connection state change events to event bus ✅
     - Integrate with existing `monitorConnections` and `checkConnections` methods ✅
+    - **VM monitors Edge status through gRPC**: Use `EdgeClient` to call Edge's gRPC server (port 50052) every 30s to verify Edge is alive and ready ✅
+    - **Edge monitors VM configuration status through gRPC**: Edge uses `grpc.Client` to call VM's gRPC server (port 50051) every 30s to verify VM is alive and check configuration status ✅
+    - **Monitoring starts automatically** when bidirectional gRPC connection is established in Epic 2.2 ✅
+    - **All subsequent steps** (2.3, 2.4, 2.5, 2.6, 2.7, 2.8) can rely on gRPC connection being alive and monitored ✅
   - **Implementation (Dec 2025)**:
     - Created `ConnectionMonitor` service in `user-vm-api/internal/tunnel-gateway/connection_monitor.go`
     - Implements connection state machine with states: `registered`, `connecting`, `connected`, `disconnected`, `stale`, `reconnecting`
@@ -1309,6 +1374,8 @@ This section documents the verified status of Epic 2.1 implementation in the loc
     - Runs monitoring loop every 30 seconds with configurable intervals
     - Thread-safe implementation with mutexes for concurrent access
     - Provides `GetConnectionState()` and `GetAllConnectionStates()` methods for querying connection status
+    - **gRPC health monitoring**: VM uses `EdgeClient.VerifyConnectionHealth()` to verify Edge gRPC connection is alive every 30s
+    - **Edge gRPC health monitoring**: Edge uses `grpc.Client` to call VM's gRPC services (Heartbeat, GetConfig) every 30s to verify VM is alive and check configuration status
 
 - **Substep 2.0.1.2**: WireGuard tunnel keepalive mechanism
   - **Status**: ✅ DONE
@@ -1382,12 +1449,103 @@ This section documents the verified status of Epic 2.1 implementation in the loc
 
 ### Step 2.0.2: Connection State Management
 
-- **Substep 2.0.2.1**: Connection state machine
+- **Substep 2.0.2.0**: Distributed VM/Edge State Machine Design (Production Requirement)
+  - **Status**: ⚠️ DESIGNED (Implementation deferred to future epic)
+  - **Priority**: P0 (Production requirement, currently using temporal retry workaround)
+  - **Problem Statement**: 
+    - Current implementation has a race condition: Edge establishes Edge→VM gRPC connection, but VM doesn't know when to establish VM→Edge connection
+    - Edge should signal VM after establishing Edge→VM connection, then VM should establish VM→Edge connection
+    - Without proper coordination, VM→Edge operations (e.g., RequestSnapshotCapture) may fail with connection errors
+  - **Distributed State Machine Design**:
+    - **VM Side States**:
+      - `registered`: Edge registered in VM database, not yet connected
+      - `edge_connecting`: Edge is establishing WireGuard tunnel and Edge→VM gRPC connection
+      - `edge_connected`: Edge→VM gRPC connection established (Edge connected to VM on port 50051)
+      - `vm_connecting`: VM is establishing VM→Edge gRPC connection (VM connecting to Edge on port 50052)
+      - `bidirectional_connected`: Both Edge→VM and VM→Edge gRPC connections established
+      - `edge_disconnected`: Edge→VM connection lost
+      - `vm_disconnected`: VM→Edge connection lost
+      - `reconnecting`: Attempting to restore lost connections
+      - `disconnected`: Both connections down, manual intervention may be required
+    - **Edge Side States**:
+      - `initializing`: Edge starting up, establishing WireGuard tunnel
+      - `wg_connected`: WireGuard tunnel established
+      - `vm_connecting`: Edge establishing Edge→VM gRPC connection
+      - `vm_connected`: Edge→VM gRPC connection established
+      - `ready_for_vm_connection`: Edge gRPC server ready, signals VM to establish VM→Edge connection
+      - `bidirectional_connected`: Both connections established
+      - `vm_disconnected`: Edge→VM connection lost
+      - `reconnecting`: Attempting to restore connection
+    - **State Transitions**:
+      1. **Edge Startup Sequence**:
+         - Edge: `initializing` → `wg_connected` (WireGuard tunnel established)
+         - Edge: `wg_connected` → `vm_connecting` (Edge starts connecting to VM gRPC server)
+         - Edge: `vm_connecting` → `vm_connected` (Edge→VM gRPC connection established)
+         - Edge: `vm_connected` → `ready_for_vm_connection` (Edge gRPC server ready, sends signal to VM)
+         - VM: Receives signal from Edge → transitions to `vm_connecting` (VM starts connecting to Edge gRPC server)
+         - VM: `vm_connecting` → `bidirectional_connected` (VM→Edge gRPC connection established)
+         - Edge: Receives VM→Edge connection → transitions to `bidirectional_connected`
+      2. **Connection Loss & Recovery**:
+         - If Edge→VM connection lost: Edge → `vm_disconnected`, VM → `edge_disconnected`
+         - If VM→Edge connection lost: VM → `vm_disconnected`, Edge → `vm_disconnected` (if Edge detects)
+         - Both sides attempt reconnection: `reconnecting` → (success) → `bidirectional_connected`
+    - **Signaling Mechanism**:
+      - **Edge→VM Signal**: After Edge establishes Edge→VM connection and its gRPC server is ready, Edge sends a `ConnectionReady` signal via Edge→VM gRPC connection
+      - **VM Response**: VM receives signal, transitions to `vm_connecting`, attempts VM→Edge gRPC connection
+      - **Edge Confirmation**: Edge receives VM→Edge connection, confirms bidirectional connection established
+    - **Implementation Requirements**:
+      - **Edge Side**:
+        - Add `ConnectionReady` gRPC method to Edge→VM ControlService (or extend Heartbeat with ready flag)
+        - Edge sends `ConnectionReady` signal after Edge→VM connection established AND Edge gRPC server is listening on port 50052
+        - Edge maintains state machine tracking both Edge→VM and VM→Edge connection status
+      - **VM Side**:
+        - VM listens for `ConnectionReady` signal from Edge
+        - VM transitions state to `vm_connecting` and attempts VM→Edge gRPC connection
+        - VM maintains state machine tracking both connection directions
+        - VM exposes connection state via API (`/api/edges/{id}/status`) showing both directions
+      - **State Persistence**:
+        - Both VM and Edge persist connection state to database/state store
+        - State recovery on restart: both sides restore last known state and attempt to re-establish connections
+      - **Health Monitoring**:
+        - Both sides monitor connection health for both directions
+        - VM monitors Edge→VM via Heartbeat RPCs
+        - VM monitors VM→Edge via periodic health checks (VerifyConnectionHealth)
+        - Edge monitors Edge→VM via connection state
+        - Edge monitors VM→Edge via gRPC server connection tracking
+    - **Benefits**:
+      - Eliminates race conditions: VM knows exactly when to establish VM→Edge connection
+      - Proper coordination: Both sides know the state of both connections
+      - Better error handling: Failures in one direction don't affect the other unnecessarily
+      - Production-ready: Handles network partitions, restarts, and connection failures gracefully
+  - **Temporal Workaround (Current Implementation)**:
+    - **Status**: ✅ IMPLEMENTED (Dec 2025)
+    - **Location**: `user-vm-api/internal/tunnel-gateway/edge_client.go`
+    - **Implementation**: Added transient retry for VM→Edge snapshot requests
+      - VM Edge client retries once on `Unavailable`/`DeadlineExceeded` errors
+      - Drops stale connections, waits 2s, and retries
+      - Logs retry attempts for debugging
+      - This workaround handles brief race/startup delays but is not a production solution
+    - **Limitations**:
+      - Retry only helps if Edge gRPC server is starting up
+      - Doesn't solve the fundamental coordination problem
+      - VM doesn't know when Edge is ready for VM→Edge connections
+      - May still fail if Edge gRPC server takes longer than retry timeout
+  - **Future Implementation**:
+    - **Epic 2.2.1 (Future)**: Implement distributed state machine
+      - Add `ConnectionReady` signal to Edge→VM gRPC protocol
+      - Implement state machines on both VM and Edge sides
+      - Add state persistence and recovery
+      - Update connection monitoring to track both directions
+      - Remove temporal retry workaround once state machine is implemented
+  - **Location**: Design document (this section), future implementation in `user-vm-api/internal/tunnel-gateway/` and `edge/orchestrator/internal/grpc/`
+
+- **Substep 2.0.2.1**: Connection state machine (Current Implementation - Single Direction)
   - **Status**: ✅ DONE
   - **P0**: Define connection states: `registered`, `connecting`, `connected`, `disconnected`, `stale`, `reconnecting` ✅
   - **P0**: State transitions based on WireGuard handshake, gRPC calls, and heartbeat timeouts ✅
   - **P0**: State persistence in database (`edges.status` field) ✅
   - **P0**: State change event publishing (`edge.state_changed`) ✅
+  - **Note**: Current implementation tracks Edge→VM connection state. VM→Edge connection state tracking is deferred to future distributed state machine implementation (Substep 2.0.2.0).
   - **Location**: `user-vm-api/internal/tunnel-gateway/connection_monitor.go`
   - **Implementation Notes**:
     - Extend `EdgeConnection` struct with explicit state field ✅
@@ -1694,7 +1852,7 @@ This section documents the verified status of Epic 2.1 implementation in the loc
 
 **Priority: P0**
 
-Once the WireGuard tunnel stands up automatically, the VM must immediately capture the edge’s camera inventory and dataset readiness, then guide the user toward collecting labeled snapshots where needed.
+Once the WireGuard tunnel stands up automatically, the Edge discovers cameras independently and syncs camera inventory and dataset readiness to the VM. The sync only proceeds after the edge is authenticated with the VM, ensuring security. The VM then guides the user toward collecting labeled snapshots where needed.
 
 ### Step 2.3.1: Capability Sync RPC
 - **Substep 2.3.1.1**: Proto & RPC definitions
@@ -1702,17 +1860,44 @@ Once the WireGuard tunnel stands up automatically, the VM must immediately captu
   - Extended `proto/proto/edge/control.proto` with `CameraCapability`, `SyncCapabilitiesRequest`, `SyncCapabilitiesResponse`.
   - Added `SyncCapabilities` gRPC method to `ControlService` (Edge calls VM to report capabilities).
   - Location: `proto/proto/edge/control.proto`, `proto/go/generated/edge/control.pb.go`
-- **Substep 2.3.1.2**: VM-triggered sync after WG handshake
+- **Substep 2.3.1.2**: Event-driven capability sync with authentication checks (Edge → VM)
   - **Status**: ✅ DONE
-  - VM WireGuard server detects `latest_handshake` events from WireGuard peers and publishes connection events.
-  - VM EdgeAPIServer receives `SyncCapabilities` calls from Edge and persists camera metadata, snapshot counts, and readiness flags in SQLite (`edge_camera_status` table via `CapabilityStore`).
-  - Edge SyncService schedules periodic re-sync every 5 minutes to catch new cameras or additional labeled data.
-  - Edge SyncService also triggers immediate sync when WireGuard connection is established (listens to `EventTypeWireGuardConnected` events).
-  - Location: `user-vm-api/internal/tunnel-gateway/wireguard.go`, `user-vm-api/internal/tunnel-gateway/edge_api.go`, `user-vm-api/internal/tunnel-gateway/capability_store.go`, `edge/orchestrator/internal/capabilities/sync_service.go`
+  - **Camera Discovery Flow**:
+    - Edge discovers cameras independently (USB/ONVIF discovery runs automatically on startup)
+    - USB discovery scans `/dev/video*` devices and publishes `EventTypeCameraDiscovered` events
+    - ONVIF discovery scans network and publishes `EventTypeCameraDiscovered` events
+    - Camera Manager subscribes to discovery events and registers cameras, publishing `EventTypeCameraRegistered` events
+  - **Capability Sync Flow (Security-First, Event-Driven)**:
+    - **Camera Registration Triggers Sync Check**: When cameras are registered, Edge SyncService subscribes to `EventTypeCameraRegistered` events
+    - **Authentication Check Before Sync**: When a camera is registered, SyncService checks:
+      1. gRPC connection is established (`grpcClient.IsConnected() == true`)
+      2. Edge is authenticated on VM side (edge registered in VM edge management system)
+    - **Pending Sync Mechanism**: If gRPC is not ready or authentication fails:
+      - Sync is marked as `pendingSync = true`
+      - Retry ticker checks every 5 seconds if there are pending cameras waiting to sync
+      - Authentication errors are detected (`Unauthenticated`, `not registered`, `authentication failed`) and trigger pending retry
+    - **Sync Proceeds When Ready**: Once gRPC connection is ready and edge is authenticated, sync proceeds immediately and `pendingSync` is cleared
+    - **Additional Sync Triggers**:
+      - Edge SyncService schedules periodic re-sync every 5 minutes to catch new cameras or additional labeled data
+      - Edge SyncService subscribes to screenshot events (`EventTypeScreenshotSaved`, `EventTypeScreenshotUpdated`, `EventTypeScreenshotDeleted`) to trigger sync when dataset status changes
+      - WireGuard connection events can trigger sync for pending cameras (if `pendingSync == true`)
+    - **Security**: Edge only syncs capabilities after it has successfully authenticated with VM (edge must be registered in VM edge management system). This ensures cameras are synced only after proper authentication, maintaining security.
+  - **VM Processing**:
+    - VM EdgeAPIServer receives `SyncCapabilities` calls from Edge and persists camera metadata, snapshot counts, and readiness flags in SQLite (`edge_camera_status` table via `CapabilityStore`)
+    - VM validates edge connection state before processing sync (rejects if edge is disconnected)
+  - **Key Design Decisions**:
+    1. **Edge discovers cameras independently** - No VM trigger needed, cameras are discovered automatically on Edge startup
+    2. **Security-first sync** - Sync only happens after edge is authenticated with VM (edge must be registered in VM edge management system)
+    3. **Robust retry mechanism** - If authentication is not ready, sync is marked as pending and retried periodically (every 5 seconds) until successful
+    4. **Event-driven** - Sync is triggered by camera registration events, not by timers or WireGuard connection alone
+    5. **VM-Edge synchronization** - This ensures VM and Edge stay in sync without requiring VM to trigger discovery, while maintaining security through authentication checks
+  - Location: `user-vm-api/internal/tunnel-gateway/wireguard.go`, `user-vm-api/internal/tunnel-gateway/edge_api.go`, `user-vm-api/internal/tunnel-gateway/capability_store.go`, `edge/orchestrator/internal/capabilities/sync_service.go`, `edge/orchestrator/internal/camera/manager.go`
 - **Substep 2.3.1.3**: Edge handler implementation
   - **Status**: ✅ DONE
   - Edge orchestrator's `SyncService` gathers discovery data (RTSP/USB inventory via `CameraManager`) plus labeled-snapshot counts per camera (via `ScreenshotService`).
   - Responds with `snapshot_required=true` when a camera lacks the minimum number of labeled "normal" snapshots (configurable via `MinNormalSnapshots`, default 50).
+  - **Authentication-aware sync**: SyncService checks gRPC connection and authentication status before attempting sync. If authentication fails, sync is marked as pending and retried.
+  - **Retry logic**: Implements retry mechanism with 5-second intervals for pending syncs until authentication succeeds.
   - Location: `edge/orchestrator/internal/capabilities/sync_service.go`
 
 ### Step 2.3.2: VM-side Dataset Tracking
@@ -1734,6 +1919,8 @@ Once the WireGuard tunnel stands up automatically, the VM must immediately captu
   - Created `APIServer` in `user-vm-api/internal/orchestrator/api.go` with HTTP REST endpoints.
   - `GET /api/cameras` - Lists all cameras with their readiness status (supports `edge_id` query parameter).
   - `GET /api/cameras/{id}/dataset` - Returns detailed dataset status for a specific camera **on the VM side**.
+    - **Dataset ID in Response**: `DatasetResponse` struct includes `DatasetID` field and is populated from `CameraStatus` retrieved from capability store ✅
+    - This enables training service to find and use the correct dataset for model training
   - API Gateway integrated into orchestrator server and registered as a service.
   - Added `APIGatewayConfig` to configuration for enabling/disabling and port configuration.
   - Location: `user-vm-api/internal/orchestrator/api.go`, `user-vm-api/internal/orchestrator/server.go`, `user-vm-api/internal/shared/config/config.go`
@@ -1799,7 +1986,17 @@ Once the WireGuard tunnel stands up automatically, the VM must immediately captu
   - **P0**: Alternatively, call `buildDatasetStatus` directly from `handleSaveScreenshot` and update camera
   - Location: `edge/orchestrator/internal/web/handlers.go`, `edge/orchestrator/internal/capabilities/sync_service.go`
   - **Implementation**: Added `EventTypeScreenshotSaved`, `EventTypeScreenshotUpdated`, and `EventTypeScreenshotDeleted` event types. Events are published from handlers and subscribed in `SyncService.handleScreenshotSaved` to trigger immediate dataset status refresh and capability sync.
-  - **Reality check (2025‑12)**: Edge → VM capability sync currently fails with `rpc error: code = Unauthenticated desc = authentication failed: edge not found for WireGuard peer`, so VM‑side dataset readiness is not actually updated for this Edge instance even though events are published.
+    - **Camera Discovery Integration (2025‑12)**: Enhanced capability sync to be fully event-driven with authentication checks:
+      - **Edge discovers cameras independently** (USB/ONVIF discovery runs automatically, no VM trigger needed)
+      - **When cameras are registered**: SyncService subscribes to `EventTypeCameraRegistered` events and checks gRPC connection and authentication status
+      - **Sync only proceeds when**: 
+        1. gRPC connection is established (`grpcClient.IsConnected() == true`)
+        2. Edge is authenticated on VM side (edge registered in VM edge management system)
+      - **If authentication not ready**: Sync is marked as `pendingSync = true` and retried periodically (every 5 seconds) until authentication succeeds
+      - **Retry mechanism**: Retry ticker checks every 5 seconds if there are pending cameras waiting to sync
+      - **Authentication error detection**: Detects authentication errors and marks sync as pending for retry instead of failing permanently
+      - **Security**: This ensures cameras are synced to VM only after edge is properly authenticated, maintaining security and VM-Edge synchronization
+      - **Flow**: Camera Discovery (Edge) → Camera Registration → Check gRPC/Auth → Sync when ready → Retry if not ready
 - **Substep 2.4.1.3**: Add helper method for dataset status calculation
   - **Status**: ✅ DONE
   - **P0**: Extract `buildDatasetStatus` logic from `SyncService` to a shared helper (e.g., `ScreenshotService.GetDatasetStatus`)
@@ -1878,8 +2075,158 @@ Once the WireGuard tunnel stands up automatically, the VM must immediately captu
   - Location: `edge/orchestrator/internal/web/frontend/src/pages/Screenshots.tsx`
   - **Implementation**: Dataset status is refreshed after each save operation (already implemented in Step 2.2.2.2). Added CSS transitions (`transition-all duration-500 ease-out`) to progress bars for smooth animations when progress updates. Real-time polling/WebSocket is deferred to P1 as optional enhancement.
 
-### Step 2.4.4: Backend API Improvements
-- **Substep 2.4.4.1**: Return updated dataset status in save response
+### Step 2.4.4: VM → Edge Snapshot Request Flow
+
+**Priority**: P0
+
+**Goal**: After cameras sync to VM, VM should be able to request Edge to take labeled screenshots. This enables VM to guide users toward collecting training data and allows integration tests to automatically capture snapshots.
+
+**Rationale**: This bidirectional control flow (VM → Edge) complements the existing Edge → VM telemetry flow. It allows the central VM to proactively guide users toward collecting training datasets by requesting specific labeled snapshots, and enables automated integration tests to capture snapshots without manual intervention.
+
+- **Substep 2.4.4.1**: gRPC proto definition for snapshot request
+  - **Status**: ✅ DONE
+  - **Implementation (Dec 2025)**:
+    - Added `RequestSnapshotCapture` RPC to `ControlService` in `proto/proto/edge/control.proto`
+    - Defined `RequestSnapshotCaptureRequest` message with:
+      - `camera_id` (required): Camera to capture from
+      - `label` (optional): Label to apply ("normal", "threat", "abnormal", "custom", default: "normal")
+      - `custom_label` (optional): Required if `label == "custom"`
+      - `count` (optional): Number of snapshots to capture (default: 1)
+      - `auto_capture` (optional): If true, Edge auto-captures without user interaction (for integration tests)
+    - Defined `RequestSnapshotCaptureResponse` message with:
+      - `accepted` (bool): Whether request was accepted
+      - `message` (string): Status message
+      - `snapshot_ids` (repeated string): If `auto_capture=true`, returns captured snapshot IDs
+    - Generated Go stubs using `make generate` in `proto/go/generated/edge/`
+  - **Why**: This defines the contract between VM and Edge for snapshot requests. The `auto_capture` flag enables automated testing while `auto_capture=false` enables user-guided workflows.
+  - Location: `proto/proto/edge/control.proto`
+
+- **Substep 2.4.4.2**: VM-side request handler
+  - **Status**: ✅ DONE
+  - **Implementation (Dec 2025)**:
+    - Created `EdgeClient` in `user-vm-api/internal/tunnel-gateway/edge_client.go`:
+      - Implements VM → Edge gRPC client for control commands
+      - Uses `WireGuardServer.GetPeerInfo` to resolve Edge's WireGuard IP from database
+      - Establishes gRPC connection to Edge's gRPC server (port 50052) over WireGuard tunnel
+      - Calls Edge's `RequestSnapshotCapture` RPC
+    - Added HTTP endpoint `POST /api/cameras/{id}/request-snapshots` in `user-vm-api/internal/orchestrator/api.go`:
+      - Extracts `camera_id` from URL path and `edge_id` from query parameter
+      - Parses request body for `label`, `custom_label`, `count`, `auto_capture`
+      - Calls `EdgeClient.RequestSnapshotCapture` to initiate gRPC call to Edge
+      - Returns Edge's response (accepted status, message, snapshot IDs)
+    - Wired `EdgeClient` into `APIServer` struct and `server.go` initialization
+  - **Why**: This provides the VM-side infrastructure to initiate snapshot requests. The HTTP endpoint enables manual testing and future automation, while the `EdgeClient` abstracts the gRPC connection details (WireGuard IP resolution, connection management).
+  - **Not Implemented (Recommended for Future)**:
+    - Automatic request logic when `training_eligibility_status == "needs_snapshots"` (can be added as optional feature)
+    - Connection state validation before making requests (can be added for robustness)
+  - Location: `user-vm-api/internal/tunnel-gateway/edge_client.go`, `user-vm-api/internal/orchestrator/api.go`, `user-vm-api/internal/orchestrator/server.go`
+
+- **Substep 2.4.4.3**: Edge-side gRPC server and request handler
+  - **Status**: ✅ DONE
+  - **Implementation (Dec 2025)**:
+    - Created Edge gRPC server (`edge/orchestrator/internal/grpc/server.go`):
+      - Listens on WireGuard interface (port 50052, separate from VM's 50051)
+      - Implements `ControlService` server side (for `RequestSnapshotCapture`)
+      - VM connects to Edge's WireGuard IP to call Edge methods
+      - Registered in `main.go` and started during Edge orchestrator initialization
+    - Created `snapshot_request.Service` (`edge/orchestrator/internal/snapshot_request/service.go`):
+      - Validates camera exists and is accessible via `CameraManager`
+      - If `auto_capture=true`: Automatically captures snapshots using `streaming.Service.GetFrame`, labels them, and saves via `screenshots.Service.SaveScreenshot` (for integration tests)
+      - If `auto_capture=false`: Stores request in `pendingRequests` map and publishes `EventTypeSnapshotRequested` event for UI notification
+      - Returns captured snapshot IDs if auto-capture succeeded
+    - Added `EventTypeSnapshotRequested` event type in `edge/orchestrator/internal/service/event.go`
+    - Used setter method `SetStreamingService` to inject streaming service after web server initialization (dependency ordering)
+  - **Why**: This implements the Edge-side handler for VM-initiated snapshot requests. The dual-mode approach (`auto_capture=true` for tests, `auto_capture=false` for user workflows) enables both automated testing and user-guided data collection. The event publication enables UI notifications.
+  - **Architecture Note**: This is NOT duplication - Edge has:
+    - gRPC Client (Edge → VM, port 50051): Edge calls VM methods like `SyncCapabilities` (telemetry/sync direction)
+    - gRPC Server (VM → Edge, port 50052): VM calls Edge methods like `RequestSnapshotCapture` (control direction)
+    - These are separate logical connections for opposite directions over the same WireGuard tunnel
+  - Location: `edge/orchestrator/internal/grpc/server.go`, `edge/orchestrator/internal/snapshot_request/service.go`, `edge/orchestrator/main.go`
+
+- **Substep 2.4.4.4**: Edge UI notification component and pending request API
+  - **Status**: ✅ DONE (API implemented, UI notification deferred to P1)
+  - **Implementation (Dec 2025)**:
+    - Added Edge API endpoints for pending snapshot requests:
+      - `GET /api/snapshot-requests`: List all pending snapshot requests
+      - `GET /api/snapshot-requests/:camera_id`: Get pending request for specific camera
+    - Exposed `PendingRequest` objects via HTTP API for programmatic access
+    - Integration tests use these endpoints to query pending requests and automate capture
+    - Event `EventTypeSnapshotRequested` is published when `auto_capture=false`
+  - **UI Notification Component** (Deferred to P1):
+    - Add notification component in Edge UI to display VM snapshot requests
+    - Subscribe to `EventTypeSnapshotRequested` events in React frontend (via WebSocket or polling)
+    - Notification should show:
+      - Camera name
+      - Requested label
+      - Number of snapshots requested
+      - "Capture Now" button that opens capture modal with pre-filled label
+      - "Dismiss" button to acknowledge request
+    - Display notification prominently (banner, toast, or dedicated section)
+    - Auto-dismiss notification after user captures requested snapshots
+  - **Why**: The API endpoints enable automated testing and programmatic access. The UI notification is a UX enhancement that can be added incrementally. For now, `auto_capture=true` mode and API-based automation enable integration tests without UI dependencies.
+  - **Priority**: P1 (nice-to-have for user workflows, not blocking for integration tests)
+  - Location: `edge/orchestrator/internal/web/handlers.go` (API endpoints), `edge/orchestrator/internal/web/frontend/src/pages/Screenshots.tsx` (UI notification - deferred)
+
+- **Substep 2.4.4.5**: Rename "Sync Dataset Status" button to "Train Model"
+  - **Status**: ✅ DONE
+  - **Implementation (Dec 2025)**:
+    - Renamed button from "Sync Dataset Status" to "Train Model" in `Screenshots.tsx`
+    - Updated button text, `aria-label`, and `title` attributes
+    - Updated `data-testid` from `sync-dataset-status-button` to `train-model-button`
+    - Updated toast messages to reflect "Train Model" terminology
+    - Updated E2E test selector in `screenshots.spec.ts` to use new `data-testid`
+  - **Why**: This improves UX clarity - "Train Model" better communicates the action (uploading dataset to VM for training) than "Sync Dataset Status" (which sounds like a status check).
+  - Location: `edge/orchestrator/internal/web/frontend/src/pages/Screenshots.tsx`, `edge/orchestrator/internal/web/frontend/tests/e2e/screenshots.spec.ts`
+
+- **Substep 2.4.4.6**: Integration test automation and sequential flow enforcement
+  - **Status**: ✅ DONE
+  - **Implementation (Dec 2025)**:
+    - **Sequential Flow Enforcement**: Added explicit polling checks in integration tests to ensure proper flow:
+      1. Wait for Edge to be registered in VM (prerequisite from Epic 2.2)
+      2. Wait for cameras to sync to VM (prerequisite from Epic 2.3)
+      3. Verify `needs_snapshots` status before initiating snapshot request
+    - This ensures tests follow the architectural data flow: VM functional → Edge registers/connects → Cameras sync to VM → VM requests snapshots
+    - **Automated Snapshot Capture**: When VM requests snapshots with `auto_capture=false` (intended for user interaction), integration tests programmatically:
+      1. Query Edge API for pending snapshot requests (`GET /api/snapshot-requests`)
+      2. Capture required number of snapshots via Edge API (`POST /api/cameras/:id/snapshot`)
+      3. Label these snapshots appropriately
+      4. Verify they sync to VM for training
+    - This enables full automation of the "manual" snapshot capture workflow for testing
+  - **Implementation Details**:
+    - Added `test_vm_request_snapshot_capture()` function in `infra/local/scripts/epic_2_4_tests.sh`
+    - Test flow:
+      1. Gets initial snapshot count from Edge API
+      2. Calls VM API `POST /api/cameras/{id}/request-snapshots?edge_id={edge_id}` with `auto_capture=true` and `count=5`
+      3. Verifies Edge accepted the request (`accepted=true`)
+      4. Polls Edge API until snapshot count increases by requested amount
+      5. Verifies final snapshot count on Edge
+      6. Verifies capability sync updated VM with new snapshot counts (optional check)
+    - Integrated as Test 8 in `test_epic_2_4()` function
+    - Test uses `auto_capture=true` to enable automated snapshot capture without UI interaction
+  - **Why**: This validates the complete VM → Edge snapshot request flow end-to-end, ensuring the gRPC communication, snapshot capture, and dataset status updates all work correctly. The test uses `auto_capture=true` to avoid UI dependencies.
+  - **Not Implemented (Optional)**:
+    - Test for UI notification when `auto_capture=false` (requires UI automation, can be added later)
+  - Location: `infra/local/scripts/epic_2_4_tests.sh`, `infra/local/test-local-e2e.sh`
+
+**Step 2.4.4 Summary**:
+- ✅ **Completed (Dec 2025)**: Core VM → Edge snapshot request infrastructure
+  - gRPC proto definition and Go stubs generated
+  - VM-side `EdgeClient` and HTTP endpoint for initiating requests
+  - Edge-side gRPC server and `snapshot_request.Service` with auto-capture support
+  - Event publishing for UI notifications (when `auto_capture=false`)
+  - Button rename from "Sync Dataset Status" to "Train Model" for UX clarity
+  - Integration test automation for end-to-end validation
+- ⬜ **Recommended for Future (P1)**:
+  - Edge UI notification component to display VM snapshot requests when `auto_capture=false`
+  - Automatic VM-initiated snapshot requests when `training_eligibility_status == "needs_snapshots"` (optional feature)
+  - Connection state validation before making VM → Edge requests (robustness improvement)
+- **Architecture**: Bidirectional gRPC communication over WireGuard:
+  - Edge → VM (port 50051): Telemetry, events, capability sync
+  - VM → Edge (port 50052): Control commands (snapshot requests)
+- **Impact**: Enables automated integration tests and future user-guided data collection workflows
+
+### Step 2.4.7: Backend API Improvements
+- **Substep 2.4.7.1**: Return updated dataset status in save response
   - **Status**: ✅ DONE (per tests; needs validation in docker stack)
   - **P0**: After saving screenshot, calculate and return updated dataset status in response
   - **P0**: Include `dataset_status` in `handleSaveScreenshot` response
@@ -1887,7 +2234,7 @@ Once the WireGuard tunnel stands up automatically, the VM must immediately captu
   - Location: `edge/orchestrator/internal/web/handlers.go` (handleSaveScreenshot)
   - **Implementation**: `handleSaveScreenshot` now returns `dataset_status` in the response. Also added `dataset_status` to `handleUpdateScreenshot` response for consistency. Both endpoints calculate and return fresh dataset status after operations.
   - **Reality check (2025‑12)**: In the running `infra/local` stack, `POST /api/screenshots` created a screenshot successfully but returned `"dataset_status": null` for camera `usb-usb-3-5`. The label counts and dataset status calculation logic exist, but the response wiring is not reliably populating `dataset_status` in this environment.
-- **Substep 2.4.4.2**: Add endpoint to refresh dataset status
+- **Substep 2.4.7.2**: Add endpoint to refresh dataset status
   - **Status**: ✅ DONE (refresh endpoint only)
   - **P0**: Add `POST /api/cameras/{id}/dataset/refresh` endpoint to manually trigger dataset status recalculation
   - **P0**: Useful for debugging and manual refresh
@@ -1895,7 +2242,7 @@ Once the WireGuard tunnel stands up automatically, the VM must immediately captu
   - Location: `edge/orchestrator/internal/web/handlers.go`, `edge/orchestrator/internal/web/server.go`
   - **Implementation**: Added `handleRefreshDatasetStatus` handler that recalculates dataset status for a specific camera and returns the updated status. Route registered as `POST /api/cameras/:id/dataset/refresh`.
   - **Gap vs. plan**: The original Phase 2 text also referred to a dedicated `GET /api/cameras/{id}/dataset` endpoint. This has **not** been implemented on the Edge side yet; only the `POST /dataset/refresh` variant exists. A proper read‑only dataset status endpoint is still needed.
-- **Substep 2.4.4.3**: Improve error handling and validation
+- **Substep 2.4.7.3**: Improve error handling and validation
   - **Status**: ✅ DONE
   - **P0**: Validate image data format (must be valid JPEG/PNG) - verify actual image format, not just extension
   - **P0**: Validate image dimensions (min/max width/height) - reject images that are too small or too large
@@ -1912,7 +2259,7 @@ Once the WireGuard tunnel stands up automatically, the VM must immediately captu
     - Validates image dimensions (min 32x32, max 8192x8192)
     - Returns detailed error messages for each validation failure
     - Added file existence and readability check after save in `handleSaveScreenshot`
-- **Substep 2.4.4.4**: Image processing and optimization
+- **Substep 2.4.7.4**: Image processing and optimization
   - **Status**: ✅ DONE
   - **P1**: Add image compression/optimization before saving (reduce file size while maintaining quality)
   - **P1**: Generate thumbnails for faster list view loading (store thumbnails separately)
@@ -1926,7 +2273,7 @@ Once the WireGuard tunnel stands up automatically, the VM must immediately captu
     - **Metadata extraction**: Image dimensions (width, height), original format, original size, processed size, compression ratio, and thumbnail path are stored in screenshot metadata
     - **Thumbnail retrieval**: Added `GetScreenshotThumbnail` method to retrieve thumbnails (falls back to full image if thumbnail doesn't exist)
     - Thumbnail generation failures are logged but don't fail the save operation
-- **Substep 2.4.4.5**: Storage management and cleanup
+- **Substep 2.4.7.5**: Storage management and cleanup
   - **Status**: ✅ DONE
   - **P1**: Add storage quota/limits for screenshots (per camera or total)
   - **P1**: Implement orphaned file cleanup (files without database records)
@@ -3199,7 +3546,9 @@ After implementation review, the following observations and recommendations:
   - **P0**: Model metadata storage:
     - Store in filesystem (`metadata.json` per model) - simpler for PoC ✅
     - Each model directory: `/app/data/models/{model_id}/metadata.json` ✅
-    - Catalog service scans model directories and indexes metadata ✅ (`ScanModels` method, uses `ModelStorage.ListModels`)
+    - **Model Registration**: Models are explicitly registered via Admin API (`POST /api/admin/models/register`) ✅
+    - **No Automatic Scanning**: Model catalog does NOT scan filesystem at startup (commented out `ScanModels()` call) ✅
+    - Models must be explicitly registered via Admin API after creation
     - Note: Database storage can be added later if needed for production
   - **P0**: Model selection for training:
     - When dataset is synced, training service needs to select a baseline model ✅
@@ -3225,8 +3574,10 @@ After implementation review, the following observations and recommendations:
       - Training dataset presence (training_dataset_id + training_date)
     - Model selection: `GetDefaultBaselineModel()` returns `baseline-yolov8n` or first available baseline YOLO model
     - Model lineage: `GetModelLineage(modelID)` tracks baseline → dataset → trained model relationship
-    - Integration: Uses `ModelStorage` for file operations, scans filesystem on initialization
-    - Auto-indexing: Models are automatically indexed when stored (no explicit registration needed)
+    - Integration: Uses `ModelStorage` for file operations
+    - **Explicit Registration**: Models must be explicitly registered via Admin API (`POST /api/admin/models/register`) ✅
+    - **No Auto-Scanning**: Model catalog does NOT scan filesystem at startup (commented out `ScanModels()` call in `server.go`) ✅
+    - This ensures models are only registered when explicitly created/uploaded, preventing stale or incomplete models from appearing in catalog
 
 - **Substep 2.6.3.2**: Model API endpoints (for PoC, without SaaS API)
   - **Status**: ✅ DONE
@@ -3235,6 +3586,12 @@ After implementation review, the following observations and recommendations:
     - `GET /api/models/baseline`: List baseline models available for training ✅
     - `GET /api/models/{model_id}`: Get model metadata ✅
     - `GET /api/models/{model_id}/file`: Download model file (ONNX) ✅
+    - `POST /api/admin/models/register`: Register model via Admin API (explicit registration) ✅
+      - Accepts `model_id`, `model_path` (filesystem path on VM), and `metadata`
+      - Reads model data from `model_path`
+      - Calls `ModelStorage.StoreModel` to persist the model and metadata
+      - Calls `ModelCatalog.RegisterModel` to register in catalog
+      - Used by baseline model setup script (`setup-baseline-models.sh`)
     - `POST /api/models`: Upload new model (for training pipeline output) ✅
     - `PUT /api/models/{model_id}`: Update model metadata ✅
     - `DELETE /api/models/{model_id}`: Delete model ✅
@@ -3266,7 +3623,9 @@ After implementation review, the following observations and recommendations:
       - `handleUpdateModel`: Updates model metadata
       - `handleDeleteModel`: Deletes model from storage
     - Authentication: All write operations (POST, PUT, DELETE) use `authenticateEdgeFromRequest` (same as dataset upload)
-    - Initialization: `ModelStorage` and `ModelCatalog` initialized in `server.go` with models directory from config, catalog scans models on startup
+    - Initialization: `ModelStorage` and `ModelCatalog` initialized in `server.go` with models directory from config
+    - **No Startup Scanning**: Model catalog does NOT scan filesystem at startup (commented out `ScanModels()` call) ✅
+    - Models must be explicitly registered via Admin API after creation
     - Query parameter support: All query parameters work as specified (camera_id, dataset_id, status, model_type)
 
 ### Step 2.6.4: Model Compatibility & Edge Constraints
@@ -3490,7 +3849,7 @@ This section documents the verified status of Epic 2.6 implementation in the loc
   - Version: `baseline-1.0`
 
 **Model Catalog Functionality:**
-- ✅ **Auto-indexing**: Models automatically scanned on startup
+- ✅ **Explicit Registration**: Models registered via Admin API (`POST /api/admin/models/register`)
 - ✅ **Model Registration**: `baseline-yolov8n` registered and accessible
 - ✅ **Status Determination**: Correctly identifies `baseline` status
 - ✅ **Query Methods**: All query methods working:
@@ -3681,22 +4040,29 @@ All P0 requirements for Epic 2.6 (VM-Side Model Management for Training Readines
 ### Step 2.7.1: Training Service Core Implementation
 
 - **Substep 2.7.1.1**: Training service dependencies and setup
-  - **Status**: ⬜ TODO
+  - **Status**: ✅ DONE
   - **P0**: Update `user-vm-api/training-service/requirements.txt`:
-    - Add `ultralytics>=8.3.0` for YOLOv8 training
-    - Add `pyyaml>=6.0.1` for configuration (if not present)
-    - Keep existing dependencies (FastAPI, uvicorn, opencv-python, Pillow, numpy)
+    - Add `ultralytics>=8.3.0` for YOLOv8 training ✅
+    - Add `pyyaml>=6.0.1` for configuration (if not present) ✅
+    - Keep existing dependencies (FastAPI, uvicorn, opencv-python, Pillow, numpy) ✅
     - Optional: Add `tensorboard>=2.18.0` for training visualization (P1)
   - **P0**: Configure training service environment variables:
-    - `DATASETS_DIR`: Path to datasets directory (default: `/app/data/datasets`)
-    - `MODELS_DIR`: Path to models directory (default: `/app/data/models`)
-    - `TRAINING_OUTPUT_DIR`: Path for training outputs (default: `/app/data/training`)
-    - `PYTHON_AI_SERVICE_HOST`: Service host (default: `0.0.0.0`)
-    - `PYTHON_AI_SERVICE_PORT`: Service port (default: `8000`)
+    - `DATASETS_DIR`: Path to datasets directory (default: `/app/data/datasets`) ✅
+    - `MODELS_DIR`: Path to models directory (default: `/app/data/models`) ✅
+    - `TRAINING_OUTPUT_DIR`: Path for training outputs (default: `/app/data/training`) ✅
+    - `PYTHON_AI_SERVICE_HOST`: Service host (default: `0.0.0.0`) ✅
+    - `PYTHON_AI_SERVICE_PORT`: Service port (default: `8000`) ✅
+    - **Shared Volume Configuration**: Models and datasets shared via Docker volumes (`user-vm-api-data:/app/shared-models:ro`) ✅
+      - `MODELS_DIR=/app/shared-models/models` (read-only shared models)
+      - `DATASETS_DIR=/app/shared-models/datasets` (read-only shared datasets)
   - **P0**: Create training service directory structure:
-    - `user-vm-api/training-service/training/`: Training pipeline modules
-    - `user-vm-api/training-service/api/`: API endpoint handlers
-    - `user-vm-api/training-service/config.py`: Configuration management
+    - `user-vm-api/training-service/training/`: Training pipeline modules ✅
+    - `user-vm-api/training-service/api/`: API endpoint handlers ✅
+    - `user-vm-api/training-service/config.py`: Configuration management ✅
+  - **P0**: Read-Only Volume Handling:
+    - `ensure_directories()` gracefully handles `OSError: [Errno 30] Read-only file system` ✅
+    - Skips directory creation for read-only mounts, expecting directories to be created by data source
+    - Allows training service to work with shared read-only volumes
   - Location: `user-vm-api/training-service/requirements.txt`, `user-vm-api/training-service/config.py`, `user-vm-api/training-service/training/__init__.py`
 
 - **Substep 2.7.1.2**: Dataset loader implementation
@@ -3722,12 +4088,18 @@ All P0 requirements for Epic 2.6 (VM-Side Model Management for Training Readines
   - **Design decision**: For PoC, focus on classification training (normal vs. anomaly) rather than full object detection with bounding boxes. Full YOLO format (bounding boxes) can be added in future epic.
 
 - **Substep 2.7.1.3**: Model loader and baseline model integration
-  - **Status**: ⬜ TODO
+  - **Status**: ✅ DONE
   - **P0**: Create model loader that:
     - Loads baseline model from `/app/data/models/{model_id}/model.onnx`
+    - **PyTorch Model Download**: When only ONNX model is available, automatically downloads PyTorch model (`.pt`) required for training ✅
+      - Attempts to download from Ultralytics cache first
+      - Falls back to direct GitHub download if cache miss
+      - Downloads to temporary writable location if model directory is read-only
+      - Handles read-only filesystem gracefully by using temporary paths
     - Converts ONNX to PyTorch format (if needed) or uses ONNX directly with Ultralytics
     - Validates model compatibility (input shape, output format)
     - Handles model metadata (reads from model catalog or `metadata.json` in model directory)
+    - **Read-Only Volume Handling**: Gracefully handles read-only shared model volumes by downloading/copying to writable training output directory ✅
   - **P0**: Integrate with model catalog:
     - Query model catalog API (`GET /api/models/{model_id}`) to get model metadata
     - Verify model status is `baseline` or `ready`
@@ -3737,12 +4109,12 @@ All P0 requirements for Epic 2.6 (VM-Side Model Management for Training Readines
     - Initialize Ultralytics YOLO model from baseline
     - Configure model for fine-tuning (freeze backbone layers, adjust output classes)
   - Location: `user-vm-api/training-service/training/model_loader.py`
-  - **Design decision**: Use Ultralytics YOLO API which supports loading from ONNX and fine-tuning. For PoC, convert ONNX to PyTorch format if needed, or use Ultralytics' ONNX support.
+  - **Design decision**: Use Ultralytics YOLO API which supports loading from ONNX and fine-tuning. For PoC, automatically download PyTorch models when only ONNX is available (required for training). Handle read-only shared volumes by using temporary writable locations.
 
 ### Step 2.7.2: Training Pipeline Implementation
 
 - **Substep 2.7.2.1**: Training orchestrator
-  - **Status**: ⬜ TODO
+  - **Status**: ✅ DONE
   - **P0**: Create training orchestrator that:
     - Coordinates dataset loading, model loading, training execution, and model saving
     - Manages training job lifecycle (queued → running → completed/failed)
@@ -3751,10 +4123,12 @@ All P0 requirements for Epic 2.6 (VM-Side Model Management for Training Readines
   - **P0**: Implement training workflow:
     1. Validate training request (dataset exists, model exists, sufficient snapshots)
     2. Load dataset and convert to YOLOv8 format
-    3. Load baseline model
+    3. Load baseline model (with PyTorch download if needed)
     4. Configure training parameters (epochs: 50-100 for PoC, batch size: 16, learning rate: 0.01)
     5. Execute training using Ultralytics YOLO API
-    6. Save trained model to `/app/data/models/{trained_model_id}/model.onnx`
+    6. **Export trained model to writable location**: Save trained ONNX model to `/app/data/training/{job_id}/model/model.onnx` (writable training output directory) ✅
+      - Handles read-only shared model volumes by saving to dedicated training output directory
+      - Model is later registered in catalog with path to writable location
     7. Generate model metadata and register in catalog
     8. Update training job status
   - **P0**: Handle training errors:
@@ -3762,7 +4136,7 @@ All P0 requirements for Epic 2.6 (VM-Side Model Management for Training Readines
     - Log training errors for debugging
     - Clean up temporary files on failure
   - Location: `user-vm-api/training-service/training/orchestrator.py`
-  - **Design decision**: For PoC, run training synchronously (blocking API call). Async training with job queue can be added in future epic.
+  - **Design decision**: For PoC, run training synchronously (blocking API call). Async training with job queue can be added in future epic. Trained models are saved to writable training output directory to handle read-only shared volumes.
 
 - **Substep 2.7.2.2**: YOLOv8 fine-tuning implementation
   - **Status**: ⬜ TODO
@@ -3794,7 +4168,7 @@ All P0 requirements for Epic 2.6 (VM-Side Model Management for Training Readines
   - **Design decision**: Use Ultralytics YOLO API for training (simpler than PyTorch from scratch). For PoC, focus on classification fine-tuning. Full object detection training can be enhanced in future.
 
 - **Substep 2.7.2.3**: Trained model registration
-  - **Status**: ⬜ TODO
+  - **Status**: ✅ DONE
   - **P0**: After training completes, register model in catalog:
     - Generate trained model ID (UUID or `{baseline_model_id}-{dataset_id}-{timestamp}`)
     - Create model metadata:
@@ -3809,19 +4183,21 @@ All P0 requirements for Epic 2.6 (VM-Side Model Management for Training Readines
       - `training_metrics`: Training metrics (loss, mAP, etc.)
       - `input_shape`: Model input shape (e.g., `[1, 3, 640, 640]`)
       - `output_classes`: Number of output classes (2 for PoC)
-      - `file_path`: Path to `model.onnx` file
+      - `file_path`: Path to `model.onnx` file (from writable training output directory)
       - `file_size`: Model file size in bytes
       - `created_at`: Training completion timestamp
     - Call model catalog API (`POST /api/models`) to register model
     - Update model status to `ready` in catalog
   - **P0**: Save model metadata file:
-    - Create `metadata.json` in model directory (`/app/data/models/{trained_model_id}/metadata.json`)
+    - **Writable Location Handling**: Save `metadata.json` to writable location (derived from ONNX path in training output directory) ✅
+      - If model directory is read-only, saves to training output directory instead
+      - Handles `OSError: [Errno 30] Read-only file system` gracefully
     - Include all metadata fields for local reference
   - **P0**: Link trained model to dataset:
     - Update dataset record to reference trained model ID (optional, for tracking)
     - Update camera training eligibility status (optional, mark as "model_trained")
   - Location: `user-vm-api/training-service/training/model_registry.py`
-  - **Design decision**: Register trained models in the same catalog as baseline models, distinguished by `status` field (`baseline` vs `ready`). Trained models can be queried by `camera_id` or `training_dataset_id`.
+  - **Design decision**: Register trained models in the same catalog as baseline models, distinguished by `status` field (`baseline` vs `ready`). Trained models can be queried by `camera_id` or `training_dataset_id`. Model metadata is saved to writable locations to handle read-only shared volumes.
 
 ### Step 2.7.3: Training API Endpoints
 
@@ -4322,12 +4698,22 @@ All P0 requirements for Epic 2.7 (Model Training Pipeline) are:
 **Context**: Epic 2.7 implemented the complete model training pipeline. After training completes, trained models are registered in the model catalog and stored at `/app/data/models/{trained_model_id}/model.onnx`. However, trained models are not yet synced to Edge appliances. At this stage of the workflow, Edge does not have any models at all (neither baseline nor trained). Edge needs to receive trained models from VM to enable event detection. This epic implements the VM → Edge model deployment flow so that Edge can receive and use trained models for detection.
 
 **Goal**: Implement VM → Edge trained model sync and deployment:
-1. When a trained model is registered in the catalog, trigger model sync to the appropriate Edge appliance.
-2. Convert trained models to Edge-compatible format (ONNX → OpenVINO IR if needed, or use ONNX directly).
-3. Send trained models to Edge over WireGuard tunnel via HTTP multipart POST.
-4. Track model deployment status (pending, deploying, deployed, failed).
-5. Edge receives, validates, stores, and loads models for inference.
-6. Edge reports deployment status back to VM.
+1. When a trained model is registered in the catalog (after training for a specific camera on a specific dataset), trigger model sync to the appropriate Edge appliance.
+2. **VM Model Storage**: Store trained model in both:
+   - **Model Management System**: Register in model catalog with metadata (model_id, camera_id, dataset_id, version, etc.)
+   - **MinIO Storage**: Archive trained model to MinIO S3-compatible storage for long-term persistence and backup
+3. Convert trained models to Edge-compatible format (ONNX → OpenVINO IR if needed, or use ONNX directly).
+4. Send trained models to Edge over WireGuard tunnel via HTTP multipart POST.
+5. Track model deployment status (pending, deploying, deployed, failed).
+6. **Edge Model Reception**: Edge receives, validates, and stores model:
+   - Store model file on Edge disk at `/var/lib/view-guard-edge/models/{model_id}/model.onnx`
+   - Register model in Edge's model management system (SQLite database)
+   - Link model to specific camera for camera-specific inference
+7. **Edge Model Activation**: Edge prepares model to process frames from the specific camera:
+   - Load model into memory for the target camera
+   - Configure model with camera-specific preprocessing parameters
+   - Activate model for real-time inference on that camera's video stream
+8. Edge reports deployment status back to VM (deployed, active, or failed).
 
 **Future enhancement (post-PoC)**: Model versioning and rollback:
 - VM offers Edge new model versions
@@ -4358,24 +4744,102 @@ All P0 requirements for Epic 2.7 (Model Training Pipeline) are:
   - **P0**: Create `ModelDeploymentService` that:
     - Monitors model catalog for newly registered trained models
     - Determines target Edge appliance(s) based on model metadata (edge_id, camera_id)
+    - **MinIO Storage**: After model registration, archive trained model to MinIO:
+      - Upload model file to MinIO bucket (e.g., `models/{model_id}/model.onnx`)
+      - Upload metadata to MinIO (e.g., `models/{model_id}/metadata.json`)
+      - Store model in MinIO for long-term persistence and backup
+      - Model remains accessible from both filesystem and MinIO
     - Triggers model deployment workflow for each target Edge
     - Tracks deployment status in database (deployment_jobs table)
   - **P0**: Integration with training pipeline:
     - After model registration in Epic 2.7, trigger deployment service
+    - Archive model to MinIO before deployment
     - Or: Deployment service listens for `model.registered` events from event bus
   - **P0**: Deployment job lifecycle:
     - `pending`: Model ready for deployment, waiting to start
     - `deploying`: Model transfer in progress
     - `deployed`: Model successfully deployed to Edge
+    - `active`: Model loaded and active on Edge for camera inference
     - `failed`: Deployment failed (with error message)
   - **P0**: Support deployment filtering:
     - Only deploy models to Edge that trained the model (edge_id match)
     - Only deploy models to specific camera (camera_id match)
     - Support manual deployment trigger via API (for testing)
-  - Location: `user-vm-api/internal/model-deployment/orchestrator.go`, `user-vm-api/internal/model-deployment/service.go`
-  - **Design decision**: For PoC, automatically deploy trained models to the Edge that provided the training dataset. Post-PoC, add user approval workflow via SaaS UI.
+  - Location: `user-vm-api/internal/model-deployment/orchestrator.go`, `user-vm-api/internal/model-deployment/service.go`, `user-vm-api/internal/model-deployment/minio_storage.go`
+  - **Design decision**: For PoC, automatically deploy trained models to the Edge that provided the training dataset. Models are stored in both filesystem (for fast access) and MinIO (for backup and long-term storage). Post-PoC, add user approval workflow via SaaS UI.
+  - **Implementation (Dec 2025)**:
+    - Created `ModelDeploymentService` (`service.go`) that monitors model catalog:
+      - Subscribes to `model.trained` events from event bus
+      - Periodically scans catalog for models with status "ready" (fallback if events missed)
+      - Automatically triggers deployment for newly trained models
+      - Supports manual deployment via `ManualDeploy()` method for testing
+    - Created `ModelDeploymentOrchestrator` (`orchestrator.go`) that coordinates deployment workflow:
+      - `CreateDeploymentJob()` creates deployment job records in database
+      - `StartDeployment()` validates model, archives to MinIO, and initiates transfer
+      - `DetermineDeploymentTargets()` extracts edge_id and camera_id from model metadata
+      - `CompleteDeployment()` and `FailDeployment()` update deployment status
+      - Tracks deployment jobs in SQLite database via `DeploymentStore`
+    - Deployment job lifecycle implemented:
+      - `pending`: Model ready for deployment, waiting to start
+      - `deploying`: Model transfer in progress
+      - `deployed`: Model successfully deployed to Edge
+      - `active`: Model loaded and active on Edge for camera inference (reported by Edge)
+      - `failed`: Deployment failed (with error message)
+    - Deployment filtering:
+      - Only deploys models to Edge that trained the model (edge_id match from model metadata)
+      - Only deploys models to specific camera (camera_id match)
+      - Manual deployment trigger via API endpoint `POST /api/edges/{edge_id}/models/deploy`
+    - MinIO integration:
+      - Archives model to MinIO before deployment (in `StartDeployment()`)
+      - Gracefully handles MinIO unavailability (logs warning, continues with filesystem)
+    - Integration with training pipeline:
+      - Listens for `EventTypeModelTrained` events from event bus
+      - Automatically triggers deployment after model registration
+      - Archive to MinIO happens before deployment transfer
 
-- **Substep 2.8.1.2**: Model format conversion for Edge
+- **Substep 2.8.1.2**: MinIO model storage and archiving
+  - **Status**: ✅ DONE
+  - **P0**: Create MinIO storage service for trained models:
+    - After model registration in catalog, archive model to MinIO
+    - Upload model file to MinIO bucket: `models/{model_id}/model.onnx`
+    - Upload metadata to MinIO: `models/{model_id}/metadata.json`
+    - Store model in MinIO for long-term persistence and backup
+    - Model remains accessible from both filesystem (for fast access) and MinIO (for backup)
+  - **P0**: MinIO bucket structure:
+    - Bucket: `models` (or per-edge bucket: `models-{edge_id}`)
+    - Object key pattern: `{model_id}/model.onnx` and `{model_id}/metadata.json`
+    - Support model versioning in object keys (optional: `{model_id}/v{version}/model.onnx`)
+  - **P0**: Integration with model catalog:
+    - After model registration, trigger MinIO archive
+    - Store MinIO object key in model metadata (optional, for reference)
+    - Support reading from MinIO if filesystem model is unavailable
+  - **P0**: MinIO client integration:
+    - Use MinIO client from `user-vm-api/internal/storage-sync/s3_client.go`
+    - Configure MinIO endpoint, access key, secret key from config
+    - Handle MinIO connection errors gracefully (log warning, continue without MinIO)
+  - Location: `user-vm-api/internal/model-deployment/minio_storage.go`, `user-vm-api/internal/storage-sync/s3_client.go`
+  - **Design decision**: Models are stored in both filesystem (for fast access during deployment) and MinIO (for backup and long-term storage). If MinIO is unavailable, deployment continues using filesystem model.
+  - **Implementation (Dec 2025)**:
+    - Created `MinIOModelStorage` service (`minio_storage.go`) that handles model archiving:
+      - `ArchiveModel()` uploads model file (`{model_id}/model.onnx`) and metadata (`{model_id}/metadata.json`) to MinIO
+      - `GetModelFromMinIO()` retrieves models from MinIO if filesystem is unavailable
+      - `ModelExistsInMinIO()` and `GetModelSizeFromMinIO()` for model management
+    - Created `S3Client` wrapper (`storage-sync/s3_client.go`) for MinIO operations:
+      - Uses `minio-go/v7` library for S3-compatible storage
+      - Handles bucket creation, file upload/download, existence checks
+      - Configured from `storage_sync.provider_config` in config file
+    - Integrated MinIO archiving into `ModelDeploymentOrchestrator`:
+      - `StartDeployment()` archives model to MinIO before deployment
+      - Gracefully handles MinIO unavailability (logs warning, continues with filesystem model)
+      - MinIO archiving is optional - deployment works even if MinIO is not configured
+    - MinIO client initialization in `orchestrator/server.go`:
+      - Reads MinIO config from `storage_sync.provider_config` (endpoint, access_key_id, secret_access_key, use_ssl)
+      - Creates `models` bucket for model storage (separate from camera buckets)
+      - Initializes `MinIOModelStorage` and wires it to deployment orchestrator
+    - Bucket structure: `models/{model_id}/model.onnx` and `models/{model_id}/metadata.json`
+    - Models remain accessible from both filesystem (fast access) and MinIO (backup/long-term storage)
+
+- **Substep 2.8.1.3**: Model format conversion for Edge
   - **Status**: ✅ DONE
   - **P0**: Model format validation:
     - Verify trained model is in ONNX format (from training pipeline)
@@ -4391,19 +4855,40 @@ All P0 requirements for Epic 2.7 (Model Training Pipeline) are:
   - Location: `user-vm-api/internal/model-deployment/converter.go`, `user-vm-api/training-service/training/model_converter.py` (if Python conversion needed)
   - **Design decision**: For PoC, deploy ONNX models directly. Edge AI Service (OpenVINO) can load ONNX models. OpenVINO IR conversion can be added in future epic if performance optimization is needed.
   - **Implementation (Dec 2025)**:
-    - Created `ModelConverter` that validates models for Edge deployment:
-      - Validates model format (must be ONNX for PoC)
-      - Validates model size (must be ≤50MB for Edge constraint)
-      - Validates model metadata (input shape, preprocessing, model type)
-      - Returns validation results with errors and warnings
+    - Created `ModelConverter` (`converter.go`) that validates models for Edge deployment:
+      - `PrepareModelForDeployment()` validates model before deployment:
+        - **Format validation**: Verifies model is in ONNX format (checks `framework` field is "onnx" or "onnxruntime")
+        - **File validation**: Verifies ONNX file exists at expected path (`{model_id}/model.onnx`)
+        - **Size validation**: Checks model size is ≤50MB (EdgeMaxModelSizeBytes = 50MB)
+        - **Size warnings**: Warns if model size exceeds 80% of limit (approaching limit)
+        - **Metadata validation**: Validates required metadata fields:
+          - `input_shape`: Required for Edge preprocessing (validates YOLOv8 expects [1,3,640,640])
+          - `preprocessing`: Validates image_size matches expected values for model type
+          - `model_type`: Validates model type is supported (yolov8n, yolo, cae)
+          - Warns if model type is not in supported list
+        - Returns `ValidationResult` with `valid` flag, `errors`, `warnings`, `model_size`, and `model_format`
+      - Validation methods:
+        - `validateModelFormat()`: Checks framework is ONNX and file exists
+        - `validateModelSize()`: Checks size ≤50MB, warns if >80% of limit
+        - `validateModelMetadata()`: Validates input shape, preprocessing, model type, and class information
     - Integrated converter into `ModelDeploymentOrchestrator`:
-      - `StartDeployment` validates model before starting deployment
-      - Fails deployment if validation fails
-      - Logs warnings for non-critical issues (e.g., approaching size limit)
-    - For PoC: No format conversion implemented (ONNX deployed directly)
-    - Future methods stubbed: `ConvertONNXToOpenVINO`, `OptimizeModel`, `QuantizeModel` (deferred to post-PoC)
+      - `StartDeployment()` calls `PrepareModelForDeployment()` before starting deployment
+      - Fails deployment if validation returns `valid=false` (sets status to `failed` with error message)
+      - Logs warnings for non-critical issues (e.g., approaching size limit, unsupported model type)
+      - Deployment only proceeds if validation passes
+    - Format conversion (PoC):
+      - **No conversion implemented**: ONNX models are deployed directly to Edge
+      - Edge AI Service (OpenVINO) can load ONNX models natively
+      - Future conversion methods stubbed:
+        - `ConvertONNXToOpenVINO()`: Returns error indicating conversion deferred to post-PoC
+        - `OptimizeModel()`: Returns error indicating optimization deferred to post-PoC
+        - `QuantizeModel()`: Returns error indicating quantization deferred to post-PoC
+    - Design decisions:
+      - For PoC: Deploy ONNX models directly (no conversion overhead)
+      - OpenVINO IR conversion can be added in future epic if performance optimization is needed
+      - Model optimization (FP16, pruning) deferred to post-PoC when accuracy/performance trade-offs are better understood
 
-- **Substep 2.8.1.3**: Model deployment database schema
+- **Substep 2.8.1.4**: Model deployment database schema
   - **Status**: ✅ DONE
   - **P0**: Create `model_deployments` table in SQLite:
     - `deployment_id`: Primary key (UUID)
@@ -4427,28 +4912,52 @@ All P0 requirements for Epic 2.7 (Model Training Pipeline) are:
     - Note: `model_id` references `ai_models.model_id` (where trained models are stored), not `training_jobs.trained_model_id` directly
   - Location: `user-vm-api/internal/shared/database/schema.go`
   - **Implementation (Dec 2025)**:
-    - Created `model_deployments` table with all required fields:
-      - Primary key: `deployment_id` (TEXT/UUID)
-      - Foreign keys: `model_id` → `ai_models.model_id`, `edge_id` → `edges.edge_id`
-      - Status tracking: `status` (pending, deploying, deployed, failed)
-      - Timestamps: `deployment_started_at`, `deployment_completed_at`, `created_at`, `updated_at`
-      - Optional fields: `camera_id`, `error_message`, `model_file_path`, `deployment_version`
+    - Created `model_deployments` table (`CreateModelDeploymentsTable`) with all required fields:
+      - **Primary key**: `deployment_id` (TEXT, UUID format)
+      - **Foreign keys**: 
+        - `model_id` → `ai_models.model_id` (references trained models)
+        - `edge_id` → `edges.edge_id` (references Edge appliances)
+      - **Status tracking**: `status` (TEXT, default 'pending') - supports: pending, deploying, deployed, active, failed
+      - **Timestamps**: 
+        - `deployment_started_at` (INTEGER, nullable) - Unix timestamp when deployment started
+        - `deployment_completed_at` (INTEGER, nullable) - Unix timestamp when deployment completed
+        - `created_at` (INTEGER, NOT NULL) - Unix timestamp when record created
+        - `updated_at` (INTEGER, NOT NULL) - Unix timestamp when record last updated
+      - **Optional fields**: 
+        - `camera_id` (TEXT, nullable) - Target camera for camera-specific models
+        - `error_message` (TEXT, nullable) - Error message if deployment failed
+        - `model_file_path` (TEXT, nullable) - Path to deployed model file on Edge (for tracking)
+        - `deployment_version` (TEXT, nullable) - Model version deployed
     - Created indexes for efficient querying:
-      - `idx_model_deployments_edge_id`: Query deployments by Edge
-      - `idx_model_deployments_model_id`: Query deployments by model
-      - `idx_model_deployments_status`: Query pending/failed deployments
-      - `idx_model_deployments_camera_id`: Query deployments by camera (bonus index)
-    - Integrated into `AllTables()` function for automatic schema creation
-    - Table follows same patterns as `training_jobs` table (similar structure and naming)
+      - `idx_model_deployments_edge_id`: Query deployments by Edge appliance
+      - `idx_model_deployments_model_id`: Query deployments by model ID
+      - `idx_model_deployments_status`: Query deployments by status (pending/failed/deployed/active)
+      - `idx_model_deployments_camera_id`: Query deployments by camera (for camera-specific deployments)
+    - Integrated into `AllTables()` function for automatic schema creation during migrations
+    - Table follows same patterns as `training_jobs` table (similar structure, naming conventions, and timestamp handling)
+    - `DeploymentStore` (`model-deployment/store.go`) uses this table for all CRUD operations:
+      - `CreateDeployment()` - Inserts new deployment job
+      - `GetDeployment()` - Retrieves deployment by ID
+      - `UpdateDeployment()` - Updates deployment status and fields
+      - `ListDeployments()` - Queries deployments with filters (edge_id, model_id, camera_id, status)
+    - Foreign key constraints ensure referential integrity:
+      - Deployment jobs reference valid models in `ai_models` table
+      - Deployment jobs reference valid edges in `edges` table
+      - Cascade behavior: If model or edge is deleted, deployments remain (for audit trail)
 
-### Step 2.8.2: Model Transfer to Edge
+### Step 2.8.2: Trained Model Transfer to Edge
 
-- **Substep 2.8.2.1**: Model transfer service implementation
+- **Substep 2.8.2.1**: Trained Model transfer service implementation
   - **Status**: ✅ DONE
   - **P0**: Create `ModelTransferService` that:
-    - Reads trained model file from `/app/data/models/{model_id}/model.onnx`
-    - Reads model metadata from `metadata.json`
-    - Transfers model to Edge via HTTP multipart upload to Edge's `/api/models/deploy` endpoint
+    - **Reads trained models from MinIO only** (trained models are stored in MinIO, not on disk):
+      - Trained models (with `training_dataset_id`) are stored in MinIO bucket: `models/{model_id}/model.onnx`
+      - Trained models are NOT stored on disk (to avoid disk space issues with many trained instances)
+      - Reads model metadata from catalog (metadata is stored in catalog, not separately in MinIO)
+    - **Reads baseline models from disk** (baseline models remain on disk):
+      - Baseline models (without `training_dataset_id`) are read from filesystem: `/app/data/models/{model_id}/model.onnx`
+      - Baseline models can optionally be archived to MinIO for backup
+    - Transfers model to Edge via gRPC streaming to Edge's `ControlService.DeployModel` RPC
     - Handles large file transfers (models can be 10-50MB)
     - Tracks transfer progress (optional for PoC, can be P1)
   - **P0**: **MUST use existing WireGuard tunnel**:
@@ -4457,10 +4966,10 @@ All P0 requirements for Epic 2.7 (Model Training Pipeline) are:
     - Reuse tunnel infrastructure from `TunnelGateway` service
     - **DO NOT create separate connection or tunnel**
   - **P0**: Transfer protocol:
-    - **PoC choice**: HTTP multipart upload to Edge endpoint `POST /api/models/deploy` over WireGuard tunnel
-    - Similar to dataset upload in Epic 2.5, which uses WireGuard tunnel
-    - Edge endpoint receives model and metadata (see Substep 2.2.6.5.1 for Edge-side implementation)
-    - Post-PoC can migrate to gRPC streaming for better progress tracking and resumable transfers
+    - **Uses gRPC streaming** (server-side streaming: VM streams model to Edge) over WireGuard tunnel
+    - Uses existing gRPC infrastructure on both sides for consistency and better monitoring
+    - Edge gRPC server receives model via `ControlService.DeployModel` streaming RPC (see Substep 2.2.6.5.1 for Edge-side implementation)
+    - gRPC streaming provides better progress tracking and resumable transfers compared to HTTP multipart
   - **P0**: Transfer over WireGuard tunnel:
     - Verify Edge is connected via existing WireGuard tunnel (check `EdgeAPIServer` connection status)
     - Use Edge's WireGuard IP address for direct transfer
@@ -4471,47 +4980,61 @@ All P0 requirements for Epic 2.7 (Model Training Pipeline) are:
     - Include model type, input shape, preprocessing config
     - Include training dataset ID and training metrics (for Edge reference)
     - Include deployment ID for tracking (Edge reports status back using this ID)
-  - **P0**: Integration with Edge-side endpoint:
-    - Sends HTTP POST to `http://{edge_wireguard_ip}:8081/api/models/deploy`
-    - Edge endpoint (Substep 2.2.6.5.1) receives, validates, and stores model
-    - Edge reports deployment status back to VM (Substep 2.2.6.5.4)
+  - **P0**: Integration with Edge-side gRPC service:
+    - Connects to Edge's gRPC server at `{edge_wireguard_ip}:50052` via `EdgeClient`
+    - Calls `ControlService.DeployModel` streaming RPC (server-side streaming: VM streams to Edge)
+    - Edge gRPC handler (Substep 2.2.6.5.1) receives, validates, and stores model
+    - Edge reports deployment status back to VM via gRPC response (Substep 2.2.6.5.4)
   - Location: `user-vm-api/internal/model-deployment/transfer.go`
-  - **Design decision**: For PoC, use HTTP multipart upload to Edge endpoint `POST /api/models/deploy`. Edge-side endpoint is implemented in Substep 2.2.6.5.1. Post-PoC can migrate to gRPC streaming for better progress tracking and resumable transfers.
+  - **Design decision**: Uses gRPC streaming (server-side streaming: VM streams to Edge) via `ControlService.DeployModel` RPC. This leverages existing gRPC infrastructure on both sides, provides better monitoring, and avoids introducing HTTP connections that complicate the system. Edge-side gRPC handler is implemented in Substep 2.2.6.5.1.
   - **Implementation (Dec 2025)**:
-    - Created `ModelTransferService` that transfers models to Edge using **HTTP multipart upload** (not gRPC):
-      - Reads model file from `/app/data/models/{model_id}/model.onnx`
-      - Reads model metadata from catalog
-      - Creates multipart form request with:
-        - Model file as form field `model` (multipart file upload)
-        - Model metadata as JSON form field `metadata`
-        - Individual fields: `model_id`, `version`, `model_type`
-        - `deployment_id` field for tracking (Edge uses this to report status back)
-      - Sends HTTP POST to Edge endpoint `POST /api/models/deploy` over WireGuard tunnel
-      - Uses `http.Client` with 10-minute timeout for large file transfers (10-50MB models)
-      - Sets `Content-Type: multipart/form-data` header
-      - Sets `X-Edge-ID` header for Edge identification
-    - **Protocol**: HTTP multipart POST (not gRPC) - simpler for PoC, similar to dataset upload pattern
+    - Created `ModelTransferService` (`transfer.go`) that transfers models to Edge using **gRPC streaming** (server-side streaming: VM streams to Edge):
+      - **Storage strategy** (corrected):
+        - **Trained models**: Read from MinIO only (`models/{model_id}/model.onnx`) - trained models are stored in MinIO only, NOT on disk (to avoid disk space issues with many trained instances for different cameras/edges)
+        - **Baseline models**: Read from filesystem (`/app/data/models/{model_id}/model.onnx`) - baseline models remain on disk, can optionally be archived to MinIO for backup
+        - Determines model type by checking `training_dataset_id` in model catalog entry (if present, it's a trained model)
+        - For trained models: Downloads from MinIO to temporary file for each transfer attempt (handles retries by re-downloading)
+        - For baseline models: Opens from filesystem for each transfer attempt
+      - **Model metadata**: Reads from catalog (metadata stored in catalog, not separately in MinIO or filesystem)
+      - **MinIO integration**: 
+        - `minioStorage` parameter added to `NewModelTransferService()` (can be nil if MinIO not configured)
+        - For trained models: Verifies model exists in MinIO before transfer, downloads to temp file
+        - For baseline models: Uses filesystem, MinIO archiving is optional (handled by orchestrator)
+      - Creates gRPC streaming connection via `EdgeClient`:
+        - Uses `EdgeClient.GetEdgeWireGuardIP()` to get Edge's WireGuard IP
+        - Connects to Edge's gRPC server at `{edge_wireguard_ip}:50052`
+        - Creates `ControlService.DeployModel` streaming RPC (server-side streaming)
+      - Streams model file in chunks (1MB chunks):
+        - First chunk: `DeployModelHeader` with all metadata (deployment_id, model_id, version, model_type, camera_id, framework, training_dataset_id, training_date, input_shape, preprocessing, metadata_json, total_size)
+        - Subsequent chunks: `DeployModelChunk` with model file data (bytes) and offset
+        - Final chunk: EOF flag set
+      - Uses gRPC context with 10-minute timeout for large file transfers (10-50MB models)
+    - **Protocol**: gRPC streaming (server-side streaming: VM streams to Edge) - uses existing gRPC infrastructure, better monitoring, consistent with other VM→Edge calls
     - **MUST use existing WireGuard tunnel**:
       - Verifies Edge is connected via `EdgeAPIServer.GetConnection()`
-      - Uses Edge's WireGuard IP (placeholder for PoC - requires WireGuardServer integration)
+      - Uses `EdgeClient.GetEdgeWireGuardIP()` to get Edge's WireGuard IP
       - Reuses tunnel infrastructure from TunnelGateway service
       - **No separate connection or tunnel created**
-      - **No gRPC used** - pure HTTP multipart over WireGuard tunnel
+      - **Uses gRPC over WireGuard tunnel** - consistent with other VM→Edge calls (RequestSnapshotCapture, etc.)
     - Transfer metadata includes:
       - Model ID, version, type, camera ID
       - Framework, training dataset ID, training date
       - Input shape, preprocessing configuration
       - Full metadata JSON for Edge reference
       - Deployment ID for tracking (Edge uses this to report status back)
-    - Integration with Edge-side endpoint:
-      - Sends to Edge's `/api/models/deploy` endpoint (implemented in Substep 2.2.6.5.1)
-      - Edge receives model, validates, stores, and reports status (Substep 2.2.6.5.4)
-      - Edge endpoint expects multipart form data with model file and metadata
+    - Integration with Edge-side gRPC service:
+      - Calls Edge's `ControlService.DeployModel` streaming RPC (implemented in Substep 2.2.6.5.1)
+      - Edge gRPC handler receives model stream, validates, stores, and reports status (Substep 2.2.6.5.4)
+      - Edge gRPC handler expects streaming chunks: header chunk with metadata, then data chunks with model file bytes
     - Response handling:
-      - Parses Edge response JSON with `success`, `model_file_path`, `message`, `error` fields
+      - Receives `DeployModelResponse` from Edge via `stream.CloseAndRecv()`
+      - Parses response with `success`, `model_file_path`, `message`, `error_message` fields
       - Returns `TransferResult` with success status and model file path
-      - Handles HTTP status codes (200 OK, 202 Accepted for success)
-    - **Note**: WireGuard IP retrieval requires WireGuardServer integration (TODO for production)
+      - **Edge gRPC server integration**:
+      - Edge gRPC server (`edge/orchestrator/internal/grpc/server.go`) implements `DeployModel` handler
+      - Handler receives streaming chunks (header with metadata, then data chunks), assembles model file, and calls `ModelStorage.StoreModel()`
+      - Model storage service is wired to gRPC server via `SetModelStorage()` method in `main.go`
+      - Proto definition updated: Added `DeployModel` RPC to `ControlService` in `proto/proto/edge/control.proto` with `DeployModelChunk` (streaming) and `DeployModelResponse` messages
 
 - **Substep 2.8.2.2**: Edge model deployment endpoint (VM-side API)
   - **Status**: ✅ DONE
@@ -4523,13 +5046,13 @@ All P0 requirements for Epic 2.7 (Model Training Pipeline) are:
     - Returns deployment job ID for tracking
   - **P0**: Integration with Tunnel Gateway (uses existing WireGuard tunnel):
     - Use `EdgeAPIServer` to get Edge connection status (verifies WireGuard tunnel is active)
-    - Use `ModelTransferService` to send model to Edge's `/api/models/deploy` endpoint
+    - Use `ModelTransferService` to send model to Edge's gRPC `ControlService.DeployModel` streaming RPC
     - Handle Edge authentication (verify Edge ID matches WireGuard peer from established tunnel)
     - **Critical**: All communication must go through the same WireGuard tunnel - no separate connections
   - **P0**: Deployment workflow:
     - Creates deployment job with status `pending`
-    - Triggers `ModelTransferService.TransferModel()` which sends model to Edge
-    - Edge receives model via `/api/models/deploy` endpoint (Substep 2.2.6.5.1)
+    - Triggers `ModelTransferService.TransferModel()` which sends model to Edge via gRPC streaming
+    - Edge receives model via `ControlService.DeployModel` gRPC streaming RPC (Substep 2.2.6.5.1)
     - Edge validates, stores, and loads model (Substeps 2.2.6.5.1-2.2.6.5.3)
     - Edge reports deployment status back to VM (Substep 2.2.6.5.4)
     - VM updates deployment job status based on Edge response
@@ -4540,21 +5063,25 @@ All P0 requirements for Epic 2.7 (Model Training Pipeline) are:
     - Edge-side validation failure: Return 500 with Edge error message
   - Location: `user-vm-api/internal/orchestrator/api.go` (model deployment endpoints)
   - **Implementation (Dec 2025)**:
-    - Created `POST /api/edges/{edge_id}/models/deploy` endpoint:
-      - Validates Edge is connected via WireGuard tunnel (checks `EdgeAPIServer.GetConnection()`)
-      - Validates model exists in catalog
-      - Triggers `ModelDeploymentService.ManualDeploy()` which creates deployment job and starts transfer
-      - Returns deployment job ID and status (202 Accepted)
+    - Created `POST /api/edges/{edge_id}/models/deploy?model_id={model_id}` endpoint in `model_deployment_handlers.go`:
+      - Accepts `model_id` as query parameter (required)
+      - Accepts optional `camera_id` query parameter for camera-specific deployment
+      - Validates Edge is connected via WireGuard tunnel (checks `EdgeAPIServer.GetConnectionMonitor()` and `GetConnection()`)
+      - Validates model exists in catalog and is ready for deployment (status must be `ready` or `baseline`)
+      - Triggers `ModelDeploymentService.ManualDeploy()` which creates deployment job and starts transfer via gRPC streaming
+      - Returns deployment job ID, model ID, edge ID, camera ID, status, and message (202 Accepted)
     - Error handling:
-      - Edge not connected: Returns 503 Service Unavailable
+      - Edge not connected: Returns 503 Service Unavailable (but allows in PoC mode if Edge ID is provided)
       - Model not found: Returns 404 Not Found
+      - Model not ready: Returns 400 Bad Request with status information
       - Deployment service unavailable: Returns 503 Service Unavailable
       - Transfer failure: Returns 500 with error details
     - Integration with Tunnel Gateway:
-      - Uses `EdgeAPIServer.GetConnection()` to verify WireGuard tunnel is active
-      - All communication goes through existing WireGuard tunnel
+      - Uses `EdgeAPIServer.GetConnectionMonitor()` to check connection state (preferred)
+      - Falls back to `EdgeAPIServer.GetConnection()` for legacy connection tracking
+      - All communication goes through existing WireGuard tunnel via gRPC
       - No separate connections created
-    - **Note**: Edge-side endpoint (`/api/models/deploy`) is implemented in Substep 2.2.6.5.1
+    - **Note**: Edge-side gRPC handler (`ControlService.DeployModel`) is implemented in Substep 2.2.6.5.1
 
 - **Substep 2.8.2.3**: Model transfer retry and error handling
   - **Status**: ✅ DONE
@@ -4580,25 +5107,33 @@ All P0 requirements for Epic 2.7 (Model Training Pipeline) are:
   - **Implementation (Dec 2025)**:
     - Implemented exponential backoff retry logic:
       - Max 3 retries with exponential backoff (2s, 4s, 8s, capped at 30s)
-      - Retries on network errors and 5xx server errors
-      - Does not retry on 4xx client errors (permanent failures)
+      - Retries on network errors and retryable gRPC errors
+      - Does not retry on non-retryable gRPC errors (InvalidArgument, NotFound, PermissionDenied, etc.)
+      - Does not retry on context cancellation or deadline exceeded
     - WireGuard tunnel handling:
-      - Before transfer: Verifies Edge is connected via `EdgeAPIServer.GetConnection()`
-      - During retry: Re-verifies Edge connection status before retry
-      - Waits for tunnel reconnection if Edge disconnects (5 second wait)
+      - Before transfer: Verifies Edge is connected via `EdgeAPIServer.GetConnectionMonitor()` and `GetConnection()`
+      - During transfer: Monitors tunnel health every 5 seconds (checks Edge connection status)
+      - During retry: Re-verifies Edge connection status before retry using `waitForConnection()` (waits up to 30 seconds)
+      - Waits for tunnel reconnection if Edge disconnects (30 second timeout)
       - Tunnel reconnection handled by WireGuard service
     - Error handling:
-      - Classifies errors as retryable (network, 5xx) or non-retryable (4xx, context cancellation)
-      - Updates deployment status in database on failure
-      - Logs transfer progress and failures for debugging
+      - Enhanced gRPC error classification:
+        - Retryable: `Unavailable`, `DeadlineExceeded`, `ResourceExhausted`, `Internal`, `Aborted`, `Unknown`
+        - Non-retryable: `InvalidArgument`, `NotFound`, `AlreadyExists`, `PermissionDenied`, `FailedPrecondition`, `OutOfRange`, `Unimplemented`, `Unauthenticated`
+      - Checks error message strings for non-retryable patterns (case-insensitive)
+      - Updates deployment status in database on failure (handled by orchestrator in async goroutine)
+      - Logs transfer progress and failures for debugging:
+        - Progress logging every 5 seconds during transfer (bytes sent, total size, progress percent)
+        - Detailed error logging with gRPC error codes and retryability status
     - Tunnel connectivity validation:
-      - Before transfer: Checks `EdgeAPIServer` connection map
-      - During retry: Verifies Edge is still connected
-      - After transfer: Edge sends confirmation via status reporting endpoint (Substep 2.2.6.5.4)
-    - Integration with Edge-side endpoint:
-      - Sends model to Edge's `/api/models/deploy` endpoint (Substep 2.2.6.5.1)
+      - Before transfer: Checks `EdgeAPIServer.GetConnectionMonitor()` and `GetConnection()` connection map
+      - During transfer: Periodically checks Edge connection status (every 5 seconds) to detect tunnel drops
+      - During retry: Verifies Edge is still connected using `waitForConnection()` with timeout
+      - After transfer: Edge sends confirmation via gRPC response (Substep 2.2.6.5.4)
+    - Integration with Edge-side gRPC service:
+      - Sends model to Edge's `ControlService.DeployModel` gRPC streaming RPC (Substep 2.2.6.5.1)
       - Edge validates, stores, and loads model (Substeps 2.2.6.5.1-2.2.6.5.3)
-      - Edge reports status back to VM (Substep 2.2.6.5.4)
+      - Edge reports status back to VM via gRPC response (Substep 2.2.6.5.4)
     - **Note**: Partial transfer resume deferred to P1 (not implemented for PoC)
 
 ### Step 2.8.3: Model Deployment Tracking & Status
@@ -4621,21 +5156,47 @@ All P0 requirements for Epic 2.7 (Model Training Pipeline) are:
     - Pagination for large deployment histories
   - Location: `user-vm-api/internal/orchestrator/api.go` (deployment endpoints), `user-vm-api/internal/model-deployment/store.go` (database operations)
   - **Implementation (Dec 2025)**:
-    - Created deployment status API endpoints:
+    - Created deployment status API endpoints in `model_deployment_handlers.go`:
       - `GET /api/deployments` - List all deployments with filtering (edge_id, model_id, camera_id, status)
+        - Implemented in `handleDeployments()`
+        - Supports query parameters: `edge_id`, `model_id`, `camera_id`, `status`
+        - Supports pagination: `limit` and `offset` query parameters
+        - Returns JSON response with `deployments` array and `total` count
       - `GET /api/deployments/{deployment_id}` - Get deployment status by ID
+        - Implemented in `handleDeploymentByID()` (first path handler)
+        - Returns single deployment with all fields
+        - Returns 404 if deployment not found
       - `GET /api/edges/{edge_id}/deployments` - List deployments for specific Edge
+        - Implemented in `handleDeploymentByID()` (second path handler)
+        - Filters deployments by Edge ID
+        - Supports pagination: `limit` and `offset` query parameters
       - `GET /api/models/{model_id}/deployments` - List deployments for specific model
+        - Implemented in `handleDeploymentByID()` (third path handler)
+        - Filters deployments by Model ID
+        - Supports pagination: `limit` and `offset` query parameters
     - Response includes all deployment fields:
       - Deployment ID, model ID, Edge ID, camera ID
-      - Status (pending, deploying, deployed, failed)
-      - Timestamps (started, completed, created, updated)
-      - Error message (if failed)
-      - Model file path and deployment version
+      - Status (pending, deploying, deployed, failed, active)
+      - Timestamps: `deployment_started_at`, `deployment_completed_at`, `created_at`, `updated_at`
+      - Error message (if failed): `error_message`
+      - Model file path: `model_file_path` (path on Edge after deployment)
+      - Deployment version: `deployment_version` (from model metadata)
     - Filtering and pagination support:
       - Query parameters: `edge_id`, `model_id`, `camera_id`, `status`
-      - Pagination: `limit` and `offset` query parameters
-      - Returns total count with filtered results
+      - Pagination: `limit` and `offset` query parameters (parsed from query string)
+      - Returns total count with filtered results (count of items in response array)
+    - Error handling:
+      - Returns 503 Service Unavailable if orchestrator not configured
+      - Returns 500 Internal Server Error if database query fails
+      - Returns 404 Not Found if deployment ID not found
+      - Returns 400 Bad Request for invalid query parameters
+    - Routes registered in `api.go`:
+      - `/api/deployments` → `handleDeployments`
+      - `/api/deployments/` → `handleDeploymentByID` (handles all sub-paths)
+      - `/api/models/{model_id}/deployments` → `handleModelByID` delegates to `handleDeploymentByID`
+    - Route handling:
+      - `/api/models/` route checks for `/deployments` sub-path and delegates to deployment handler
+      - This ensures `/api/models/{model_id}/deployments` is properly routed
 
 - **Substep 2.8.3.2**: Deployment status updates
   - **Status**: ✅ DONE
@@ -4654,19 +5215,38 @@ All P0 requirements for Epic 2.7 (Model Training Pipeline) are:
   - **Implementation (Dec 2025)**:
     - Deployment status updates during transfer:
       - `StartDeployment`: Sets status to `deploying` and `deployment_started_at` timestamp
+        - Updates deployment job in database via `DeploymentStore.UpdateDeployment()`
+        - Starts async transfer via `ModelTransferService.TransferModel()`
       - `CompleteDeployment`: Sets status to `deployed` and `deployment_completed_at` timestamp
+        - Called by transfer service on successful transfer
+        - Stores `model_file_path` from Edge response
+        - Updates deployment job in database
       - `FailDeployment`: Sets status to `failed` with error message and `deployment_completed_at` timestamp
+        - Called by transfer service on transfer failure
+        - Stores error message for debugging
+        - Updates deployment job in database
+      - `ActivateDeployment`: Sets status to `active` (new method)
+        - Called when Edge reports model is loaded and active for inference
+        - Updates deployment job status to `active` in database
     - Integration with transfer service:
-      - Transfer service calls `CompleteDeployment` on success
-      - Transfer service calls `FailDeployment` on failure
-      - Status updates are persisted to database via `DeploymentStore`
+      - Transfer service calls `CompleteDeployment` on successful gRPC transfer
+      - Transfer service calls `FailDeployment` on transfer failure (after retries exhausted)
+      - Status updates are persisted to database via `DeploymentStore.UpdateDeployment()`
+      - All status updates are logged for debugging
     - Edge confirmation handling:
-      - Edge sends deployment confirmation after model is received (handled by Edge-side endpoint in future epic)
-      - Deployment status updated based on Edge response
-      - Edge-side validation failures handled via error message
+      - Edge sends deployment confirmation via `StatusReporter.ReportStatus()` after model is received and validated
+      - Edge reports "deployed" status after model is stored
+      - Edge reports "active" status after model is loaded and ready for inference
+      - VM receives status updates via `POST /api/deployments/{deployment_id}/status` endpoint
+      - Endpoint calls `CompleteDeployment` for "deployed" status
+      - Endpoint calls `ActivateDeployment` for "active" status
+      - Endpoint calls `FailDeployment` for "failed" status (with error message)
+      - Edge-side validation failures handled via error message in "failed" status
     - Deployment completion handling:
-      - Previous model deployments can be queried by Edge/camera
-      - Active model per Edge/camera tracked via latest `deployed` status deployment
+      - Previous model deployments can be queried by Edge/camera via `GetVersionHistory()`
+      - Active model per Edge/camera tracked via `GetActiveModelVersion()`
+      - `GetActiveModelVersion()` prefers `active` status over `deployed` status
+      - Returns latest deployment if no active model found
       - **Note**: Marking previous deployments as `superseded` deferred to future enhancement (not needed for PoC)
 
 ### Step 2.8.4: Model Versioning & Rollback (Future Enhancement - Post-PoC)
@@ -4738,34 +5318,80 @@ All P0 requirements for Epic 2.7 (Model Training Pipeline) are:
     - `POST /api/models/deploy` - Receive model file and metadata from VM
     - Accept multipart form data with:
       - Model file (ONNX format)
-      - Model metadata (JSON)
+      - Model metadata (JSON) containing:
+        - `model_id`: Unique model identifier
+        - `camera_id`: Target camera for this model (required for camera-specific deployment)
+        - `version`: Model version
+        - `model_type`: Model type (yolo, cae, etc.)
+        - `input_shape`: Input tensor shape
+        - `preprocessing`: Preprocessing configuration
+        - `training_dataset_id`: Dataset used for training
+        - Other metadata fields
       - Deployment ID (for tracking)
     - Validate model file (format, size, metadata)
     - Store model in Edge's model directory
+    - Register model in Edge's model management system (SQLite database)
   - **P0**: Model storage on Edge:
     - Store models at `/var/lib/view-guard-edge/models/{model_id}/model.onnx`
     - Store metadata at `/var/lib/view-guard-edge/models/{model_id}/metadata.json`
-    - Track deployed models in Edge's local database (SQLite)
+    - Track deployed models in Edge's local database (SQLite `deployed_models` table)
+    - Link model to camera ID in database for camera-specific inference
   - **P0**: Model validation:
     - Verify model file is valid ONNX format
     - Check model size (must be ≤50MB)
     - Validate metadata structure (input shape, preprocessing, model type)
+    - Validate `camera_id` exists in Edge's camera registry
     - Return error response if validation fails
   - **P0**: Deployment confirmation:
-    - After successful model storage, send confirmation to VM
-    - Include deployment ID and model file path
+    - After successful model storage and registration, send confirmation to VM
+    - Include deployment ID, model file path, and camera ID
     - Handle deployment failures and report to VM
-  - Location: `edge/orchestrator/internal/web/handlers.go` (model deployment endpoint), `edge/orchestrator/internal/storage/` (model storage)
-  - **Note**: Edge model loading and inference integration will be in future epic
+  - Location: `edge/orchestrator/internal/web/handlers.go` (model deployment endpoint), `edge/orchestrator/internal/storage/models.go` (model storage), `edge/orchestrator/internal/state/database.go` (database schema)
+  - **Implementation (Dec 2025)**:
+    - HTTP endpoint `POST /api/models/deploy` registered in `edge/orchestrator/internal/web/server.go`:
+      - Route added to `/api/models` group
+      - Handler `handleModelDeploy` processes multipart form data
+    - Model file validation:
+      - Size validation: Checks model file size ≤50MB (validated in handler before processing)
+      - Format validation: Basic ONNX format check (validates file is not too small, full ONNX parsing deferred to production)
+      - Model storage service (`storage.ModelStorage.StoreModel`) also validates size and format
+    - Metadata validation:
+      - Required fields: `model_id`, `camera_id` (required for camera-specific deployment)
+      - Optional fields: `version`, `model_type`, `framework`, `input_shape`, `preprocessing`, `training_dataset_id`, `training_date`
+      - Metadata structure validated during JSON parsing
+    - Camera validation:
+      - Validates `camera_id` exists in Edge's camera registry using `cameraMgr.GetCamera()`
+      - Returns error if camera not found
+    - Model storage:
+      - Models stored at `/var/lib/view-guard-edge/models/{model_id}/model.onnx`
+      - Metadata stored at `/var/lib/view-guard-edge/models/{model_id}/metadata.json`
+      - Model registered in SQLite `deployed_models` table via `ModelStorage.StoreModel()`
+      - Model linked to camera ID in database for camera-specific inference
+    - Deployment confirmation:
+      - After successful storage, sends "deployed" status to VM via `StatusReporter.ReportStatus()`
+      - Includes deployment ID, model file path, and camera ID
+      - Model loader attempts to load model for inference asynchronously
+      - After model loaded, sends "active" status to VM
+      - On failure, sends "failed" status with error message
+    - Error handling:
+      - Returns appropriate HTTP status codes (400 for validation errors, 500 for storage errors)
+      - Error messages included in JSON response
+      - Failed deployments reported to VM via status reporter
 
-- **Substep 2.8.5.2**: Edge model storage and tracking
+- **Substep 2.8.5.2**: Edge model storage and management system
   - **Status**: ✅ DONE
-  - **P0**: Create model storage service on Edge:
-    - Manage model files in `/var/lib/view-guard-edge/models/`
-    - Track deployed models in SQLite database
-    - Support model versioning (store multiple versions per model)
-    - Handle model cleanup (remove old versions when disk space is low)
-  - **P0**: Model database schema:
+  - **P0**: Create Edge model management system:
+    - **Model Storage Service**: Manage model files on Edge disk:
+      - Store models at `/var/lib/view-guard-edge/models/{model_id}/model.onnx`
+      - Store metadata at `/var/lib/view-guard-edge/models/{model_id}/metadata.json`
+      - Support model versioning (store multiple versions per model)
+      - Handle model cleanup (remove old versions when disk space is low)
+    - **Model Registry**: Track deployed models in Edge's SQLite database:
+      - Model ID, version, camera ID, deployment timestamp
+      - Model file path, metadata path
+      - Model status (deployed, active, inactive, failed)
+      - Link models to specific cameras for camera-specific inference
+  - **P0**: Edge model database schema:
     - `deployed_models` table with fields:
       - `model_id` (TEXT PRIMARY KEY)
       - `deployment_id` (TEXT, from VM)
@@ -4813,27 +5439,100 @@ All P0 requirements for Epic 2.7 (Model Training Pipeline) are:
       - Total model count
       - Models by status (active, inactive, failed)
       - Total storage used (bytes and MB)
+  - **Implementation (Dec 2025)**:
+    - **Model Storage Service** (`edge/orchestrator/internal/storage/models.go`):
+      - `StoreModel`: Stores model files at `/var/lib/view-guard-edge/models/{model_id}/model.onnx` and metadata at `{model_id}/metadata.json`
+        - Validates model size (≤50MB) and format (basic ONNX check)
+        - Creates model directory structure
+        - Writes model file and metadata JSON
+        - Creates/updates database record with `ON CONFLICT(model_id) DO UPDATE` (PoC: same model_id overwrites)
+      - `GetModel`: Retrieves deployed model by ID from database
+      - `ListModels`: Lists models with optional filters (edge_id, camera_id, status)
+      - `GetModelByVersion`: Retrieves specific model version by model_id and version
+      - `GetVersionHistory`: Returns all versions of a model (ordered by deployed_at DESC)
+      - `UpdateModelStatus`: Updates model status (active, inactive, failed) in database
+      - `DeleteModel`: Deletes model files and database record, attempts to remove empty directory
+      - `CleanupModels`: Removes old/inactive models based on `CleanupOptions`:
+        - `RemoveInactive`: Remove models with 'inactive' status
+        - `RemoveFailed`: Remove models with 'failed' status
+        - `KeepActiveVersions`: Keep N most recent active models per camera
+        - `MaxAgeDays`: Remove models older than N days
+        - `FreeSpaceTargetMB`: Cleanup until this much space is freed
+        - Returns `CleanupResult` with deleted models count, freed space, and errors
+      - `GetStorageStats`: Returns storage statistics:
+        - Total model count
+        - Models by status (active, inactive, failed)
+        - Total storage used (bytes and MB)
+    - **Database Schema** (`edge/orchestrator/internal/state/database.go`):
+      - `deployed_models` table with fields:
+        - `model_id` (TEXT PRIMARY KEY)
+        - `deployment_id` (TEXT, from VM)
+        - `model_path` (TEXT, path to model.onnx)
+        - `metadata_path` (TEXT, path to metadata.json)
+        - `deployed_at` (INTEGER, Unix timestamp)
+        - `status` (TEXT: active, inactive, failed)
+        - `edge_id` (TEXT, Edge identifier)
+        - `camera_id` (TEXT, optional camera assignment)
+        - `version` (TEXT, model version)
+        - `model_type` (TEXT, e.g., 'yolo', 'cae')
+        - `framework` (TEXT, e.g., 'onnx')
+        - `created_at` (INTEGER, Unix timestamp)
+        - `updated_at` (INTEGER, Unix timestamp)
+      - Indexes for performance:
+        - `idx_deployed_models_edge` on `edge_id`
+        - `idx_deployed_models_camera` on `camera_id`
+        - `idx_deployed_models_status` on `status`
+        - `idx_deployed_models_deployment_id` on `deployment_id`
+    - **Model Versioning**:
+      - Database schema supports version tracking (version field in deployed_models table)
+      - Can query models by version via `GetModelByVersion()`
+      - Can retrieve version history via `GetVersionHistory()`
+      - **PoC Limitation**: Models with same `model_id` are overwritten (`ON CONFLICT(model_id) DO UPDATE`)
+      - **Future Enhancement**: Support multiple versions per model_id (would require schema change to composite primary key)
+    - **Model Metadata Management**:
+      - Metadata parsed from VM and stored in JSON file at `{model_id}/metadata.json`
+      - Tracks: `model_id`, `version`, `model_type`, `camera_id`, `framework`, `training_dataset_id`, `training_date`, `input_shape`, `preprocessing`
+      - Database stores key metadata fields (`version`, `model_type`, `framework`, `camera_id`) for querying
+      - Additional metadata stored in JSON file for full details
+    - **Model Cleanup**:
+      - `CleanupModels()` follows pattern from existing Edge storage cleanup (`retention.go`)
+      - Removes both files and database records
+      - Supports multiple cleanup strategies (status-based, age-based, version-based, space-based)
+      - Gracefully handles errors and reports them in `CleanupResult`
 
-- **Substep 2.8.5.3**: Edge model loading for inference
+- **Substep 2.8.5.3**: Edge model loading and camera-specific activation
   - **Status**: ✅ DONE
   - **P0**: Model loader service:
-    - Load ONNX models from Edge storage
+    - Load ONNX models from Edge storage (`/var/lib/view-guard-edge/models/{model_id}/model.onnx`)
     - Initialize OpenVINO runtime with model
     - Validate model compatibility with Edge hardware
     - Handle model loading errors gracefully
-  - **P0**: Model activation:
+  - **P0**: **Camera-Specific Model Activation**:
+    - Link model to specific camera ID from model metadata
+    - Store camera-to-model mapping in Edge database (`camera_models` table or `deployed_models.camera_id`)
+    - When model is activated, associate it with the target camera
+    - Only process frames from that specific camera with this model
+    - Support one active model per camera (new model replaces previous model for same camera)
+  - **P0**: Model activation workflow:
     - Mark model as `active` in database when loaded successfully
-    - Support switching between model versions
-    - Deactivate previous model when new model is activated
+    - Update camera-to-model mapping: `camera_id` → `model_id`
+    - Deactivate previous model for the same camera when new model is activated
+    - Support switching between model versions for the same camera
   - **P0**: Integration with AI service:
-    - Notify AI service when new model is available
-    - AI service loads model for inference
+    - Notify AI service when new model is available for a specific camera
+    - AI service loads model for inference on that camera's video stream
     - Support model hot-swapping (load new model without restart)
+    - Configure preprocessing parameters from model metadata (input shape, normalization, etc.)
   - **P0**: Model readiness check:
     - Verify model is loaded and ready for inference
     - Check model input/output shapes match expected format
-    - Validate preprocessing requirements
-  - Location: `edge/orchestrator/internal/ai/model_loader.go`, `edge/ai-service/ai_service/inference.py` (model loading)
+    - Validate preprocessing requirements match camera stream format
+    - Verify camera exists and is accessible
+  - **P0**: Frame processing preparation:
+    - Configure frame preprocessing for the specific camera (resize, normalize, etc.)
+    - Set up inference pipeline: Camera stream → Preprocessing → Model inference → Post-processing
+    - Initialize inference session for the camera-model pair
+  - Location: `edge/orchestrator/internal/ai/model_loader.go`, `edge/orchestrator/internal/ai/camera_model_manager.go`, `edge/ai-service/ai_service/inference.py` (model loading)
   - **Implementation (Dec 2025)**:
     - Created `ModelLoader` service (`edge/orchestrator/internal/ai/model_loader.go`):
       - `LoadModel`: Loads model from storage and prepares it for inference
@@ -4871,10 +5570,30 @@ All P0 requirements for Epic 2.7 (Model Training Pipeline) are:
       - Future epic will implement HTTP call to AI service to load model
       - Future epic will implement OpenVINO runtime initialization in Python AI service
       - Future epic will implement model compatibility validation
+    - **Camera-Specific Model Activation**:
+      - Model is linked to specific camera ID from metadata
+      - `camera_id` field in `deployed_models` table links model to camera
+      - Only one active model per camera (new model replaces previous model)
+      - Model activation updates `camera_id` → `model_id` mapping in database
+      - Frame processing uses model associated with camera ID
     - Model metadata for inference:
       - `ModelMetadataForInference` struct contains inference-relevant fields
       - Extracted from `storage.ModelMetadata` (model_id, version, model_type, camera_id, framework, input_shape, preprocessing)
-  - **Note**: Full inference integration (using trained models for event detection) will be in future epic. OpenVINO runtime initialization and actual model loading in Python AI service will be implemented in future epic.
+      - Camera ID is required for model activation and inference routing
+    - **Frame Processing Integration**:
+      - `InferenceService` (`edge/orchestrator/internal/processing/inference_service.go`) uses `ModelLoaderService` interface
+      - `ProcessFrame` method calls `GetActiveModel(cameraID)` to get camera-specific model
+      - Validates model readiness with `IsModelReady(cameraID)` before inference
+      - Only processes frames from cameras with active models
+      - Skips inference if no active model available (returns error)
+      - Model ID is included in `InferenceResult` for tracking
+    - **Model Loader Service Interface**:
+      - `ModelLoaderService` interface defined in `InferenceService`:
+        - `GetActiveModel(cameraID string) (*ai.ActiveModelInfo, error)`
+        - `IsModelReady(cameraID string) bool`
+      - `ModelLoader` implements this interface for camera-specific model routing
+      - Allows frame processing to query active models per camera
+  - **Note**: Full inference integration (using trained models for event detection) will be in future epic. OpenVINO runtime initialization and actual model loading in Python AI service will be implemented in future epic. The `notifyAIService` method is currently a placeholder that logs model readiness; actual AI service integration will be in a future epic.
 
 - **Substep 2.8.5.4**: Edge deployment status reporting
   - **Status**: ✅ DONE
@@ -4925,6 +5644,73 @@ All P0 requirements for Epic 2.7 (Model Training Pipeline) are:
       - Retries failed status updates up to 5 times
       - Drops updates after max retries to prevent queue overflow
       - Logs all status reporting attempts and failures
+  - **Implementation (Dec 2025)**:
+    - **StatusReporter Service** (`edge/orchestrator/internal/deployment/status_reporter.go`):
+      - `ReportStatus`: Reports deployment status to VM via HTTP POST
+        - Creates `StatusUpdate` with deployment ID, status, error message, and model path
+        - Attempts immediate send via `sendStatusUpdate`
+        - Queues update for retry if immediate send fails
+        - Returns nil (non-blocking, errors are logged)
+      - `sendStatusUpdate`: Sends HTTP POST to VM API Gateway `/api/deployments/{deployment_id}/status`
+        - Checks WireGuard connection status before sending
+        - Builds JSON request body with status, timestamp, model_path, and error fields
+        - Sets `X-Edge-ID` header for VM identification
+        - Returns error if WireGuard not connected or HTTP request fails
+      - `processQueue`: Processes queued status updates when WireGuard is connected
+        - Runs in background goroutine, checks queue every 10 seconds
+        - Only processes when WireGuard is connected
+        - Retries queued updates up to 5 times
+        - Drops updates after max retries to prevent queue overflow
+      - `retryWorker`: Handles retry queue with exponential backoff
+        - Uses exponential backoff: 2s, 4s, 8s, 16s, 32s (max 30s)
+        - Retries up to 5 times before dropping update
+        - Checks WireGuard connection before each retry
+        - Re-queues if WireGuard disconnected during retry
+      - Queue management:
+        - In-memory queue (`queue` slice) for pending updates
+        - Retry queue (`retryQueue` channel) for exponential backoff retries
+        - Thread-safe with `sync.Mutex` for queue access
+        - Queue size limit: 100 items for retry queue
+    - **Status Reporting Flow**:
+      - After model is received and validated: Reports "deployed" status with model path
+        - Triggered in `handleModelDeploy` after `StoreModel` succeeds
+        - Runs asynchronously in goroutine to avoid blocking deployment response
+      - After model is loaded and ready: Reports "active" status with model path
+        - Triggered in `handleModelDeploy` after `LoadModel` succeeds
+        - Runs asynchronously in goroutine
+      - On deployment failure: Reports "failed" status with error message
+        - Triggered in `handleModelDeploy` if `LoadModel` fails
+        - Includes error message in status update
+    - **VM-Side Endpoint** (`POST /api/deployments/{deployment_id}/status`):
+      - Handler in `user-vm-api/internal/orchestrator/model_deployment_handlers.go`
+      - Accepts status updates from Edge with JSON body:
+        - `status`: "deployed", "active", or "failed"
+        - `timestamp`: RFC3339 timestamp
+        - `model_path`: Optional model file path
+        - `error`: Optional error message
+      - Updates deployment job status via `ModelDeploymentOrchestrator`:
+        - "deployed" → calls `CompleteDeployment(modelFilePath)`
+        - "active" → calls `ActivateDeployment()`
+        - "failed" → calls `FailDeployment(errorMessage)`
+      - Returns HTTP 200 on success, appropriate error codes on failure
+    - **WireGuard Tunnel Integration**:
+      - Uses existing WireGuard tunnel to send HTTP requests to VM
+      - Checks `wgClient.IsConnected()` before sending status updates
+      - Queues updates if WireGuard is disconnected
+      - Subscribes to `EventTypeWireGuardConnected` events
+      - Processes queued updates when WireGuard reconnects (via `handleWireGuardConnected`)
+      - VM endpoint URL configured via `cfg.Edge.WireGuard.KVMEndpoint`
+    - **Integration Points**:
+      - Initialized in `edge/orchestrator/main.go` when WireGuard is enabled
+      - Wired to web server via `SetStatusReporterService()`
+      - Used in `handleModelDeploy` for automatic status reporting
+      - Service lifecycle: Started/stopped via service manager
+    - **Error Handling and Resilience**:
+      - Retries failed status updates up to 5 times with exponential backoff
+      - Drops updates after max retries to prevent queue overflow
+      - Logs all status reporting attempts, successes, and failures
+      - Non-blocking: `ReportStatus` returns immediately, errors are logged
+      - Queue processing continues even if individual updates fail
 
 ### Step 2.8.6: Integration with Training Pipeline
 

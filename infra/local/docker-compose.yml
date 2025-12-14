@@ -10,7 +10,7 @@ services:
     volumes:
       - ./wg:/wg
     command: >
-      sh -c " apk add --no-cache wireguard-tools bash && echo '[wg-setup] Running generate-keys.sh...' && bash /wg/generate-keys.sh && echo '[wg-setup] Running generate-configs.sh...' && bash /wg/generate-configs.sh && echo '[wg-setup] Done generating keys and configs' "
+      sh -c " apk add --no-cache wireguard-tools bash openssl && echo '[wg-setup] Running generate-keys.sh...' && bash /wg/generate-keys.sh && echo '[wg-setup] Running generate-configs.sh...' && bash /wg/generate-configs.sh && echo '[wg-setup] Running generate-certs.sh...' && bash /wg/generate-certs.sh && echo '[wg-setup] Done generating keys, configs, and certificates' "
     # Don't restart - this is a one-time setup service
     restart: "no"
   # =========================
@@ -80,6 +80,8 @@ services:
     depends_on:
       wg-setup:
         condition: service_completed_successfully
+      user-vm-api:
+        condition: service_healthy
       edge-ai-service:
         condition: service_healthy
     ports:
@@ -103,6 +105,13 @@ services:
       - edge-data:/app/data
       - ./config.docker.yaml:/app/config/config.yaml:ro
       - ./wg/config/edge-wg0.conf:/etc/wireguard/wg0.conf:ro
+      - ./wg/certs/edge-server.crt:/etc/ssl/certs/edge-server.crt:ro
+      - ./wg/certs/edge-server.key:/etc/ssl/private/edge-server.key:ro
+      - ./wg/certs/edge-client.crt:/etc/ssl/certs/edge-client.crt:ro
+      - ./wg/certs/edge-client.key:/etc/ssl/private/edge-client.key:ro
+      - ./wg/certs/edge-db.crt:/etc/ssl/certs/edge-db.crt:ro
+      - ./wg/certs/edge-db.key:/etc/ssl/private/edge-db.key:ro
+      - ./wg/certs/ca.crt:/etc/ssl/certs/ca.crt:ro
       - /dev:/dev # USB camera devices
     devices:
       - /dev/video2:/dev/video2
@@ -172,12 +181,13 @@ services:
       - USER_VM_API_STREAM_RELAY_LISTEN_ADDR=:8080
       - USER_VM_API_STORAGE_SYNC_ENABLED=true
       - USER_VM_API_STORAGE_SYNC_PROVIDER=s3
-      - USER_VM_API_STORAGE_SYNC_S3_ENDPOINT=http://minio:9000
+      - USER_VM_API_STORAGE_SYNC_S3_ENDPOINT=https://minio:9000
       - USER_VM_API_STORAGE_SYNC_S3_BUCKET_PREFIX=camera-
       - USER_VM_API_STORAGE_SYNC_S3_ACCESS_KEY=minioadmin
       - USER_VM_API_STORAGE_SYNC_S3_SECRET_KEY=minioadmin
       - USER_VM_API_STORAGE_SYNC_S3_REGION=us-east-1
-      - USER_VM_API_STORAGE_SYNC_S3_USE_SSL=false
+      - USER_VM_API_STORAGE_SYNC_S3_USE_SSL=true
+      - USER_VM_API_STORAGE_SYNC_S3_CA_CERT_PATH=/etc/ssl/certs/ca.crt
       - USER_VM_API_PYTHON_AI_SERVICE_URL=http://python-ai-service:8000
       - LOG_LEVEL=info
       - LOG_FORMAT=text
@@ -187,6 +197,13 @@ services:
       - user-vm-models:/app/data/models
       - ./user-vm-config.yaml:/app/config/config.yaml:ro
       - ./wg/config/server-wg0.conf:/etc/wireguard/wg0.conf:ro
+      - ./wg/certs/vm-server.crt:/etc/ssl/certs/vm-server.crt:ro
+      - ./wg/certs/vm-server.key:/etc/ssl/private/vm-server.key:ro
+      - ./wg/certs/vm-client.crt:/etc/ssl/certs/vm-client.crt:ro
+      - ./wg/certs/vm-client.key:/etc/ssl/private/vm-client.key:ro
+      - ./wg/certs/vm-db.crt:/etc/ssl/certs/vm-db.crt:ro
+      - ./wg/certs/vm-db.key:/etc/ssl/private/vm-db.key:ro
+      - ./wg/certs/ca.crt:/etc/ssl/certs/ca.crt:ro
     networks:
       - view-guard-edge
     restart: unless-stopped
@@ -231,20 +248,26 @@ services:
   minio:
     image: minio/minio:latest
     container_name: view-guard-minio
-    command: server /data --console-address ":9001"
     ports:
       - "9000:9000"
       - "9001:9001"
     environment:
       - MINIO_ROOT_USER=minioadmin
       - MINIO_ROOT_PASSWORD=minioadmin
+      # Enable TLS for MinIO
+      - MINIO_SERVER_URL=https://minio:9000
     volumes:
       - minio-data:/data
+      # Mount certificates for TLS
+      - ./wg/certs/vm-server.crt:/root/.minio/certs/public.crt:ro
+      - ./wg/certs/vm-server.key:/root/.minio/certs/private.key:ro
+      - ./wg/certs/ca.crt:/root/.minio/certs/CAs/ca.crt:ro
+    command: server /data --address ":9000" --console-address ":9001"
     networks:
       - view-guard-edge
     restart: unless-stopped
     healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:9000/minio/health/live" ]
+      test: [ "CMD", "curl", "-f", "-k", "https://localhost:9000/minio/health/live" ]
       interval: 30s
       timeout: 10s
       retries: 3

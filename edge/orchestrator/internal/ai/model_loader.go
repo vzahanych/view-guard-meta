@@ -264,6 +264,7 @@ func (ml *ModelLoader) CheckModelReadiness(ctx context.Context, model *storage.D
 }
 
 // GetActiveModel returns the active model for a camera
+// This method implements web.ModelLoaderService interface
 func (ml *ModelLoader) GetActiveModel(cameraID string) (*ActiveModelInfo, bool) {
 	model, exists := ml.activeModels[cameraID]
 	if !exists {
@@ -347,4 +348,3 @@ func (ml *ModelLoader) IsModelReady(cameraID string) bool {
 	model, exists := ml.activeModels[cameraID]
 	return exists && model != nil && model.Ready
 }
-

@@ -180,11 +180,11 @@ const (
 		deployment_id TEXT PRIMARY KEY,
 		model_id TEXT NOT NULL,
 		edge_id TEXT NOT NULL,
-		camera_id TEXT,
-		status TEXT NOT NULL DEFAULT 'pending', -- pending, deploying, deployed, failed
-		deployment_started_at INTEGER,
-		deployment_completed_at INTEGER,
-		error_message TEXT,
+		camera_id TEXT, -- Optional, for camera-specific models
+		status TEXT NOT NULL DEFAULT 'pending', -- pending, deploying, deployed, active, failed
+		deployment_started_at INTEGER, -- Timestamp when deployment started
+		deployment_completed_at INTEGER, -- Timestamp when deployment completed
+		error_message TEXT, -- Error message if deployment failed
 		model_file_path TEXT, -- Path to deployed model file on Edge (for tracking)
 		deployment_version TEXT, -- Model version deployed
 		created_at INTEGER NOT NULL,

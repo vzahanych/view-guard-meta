@@ -36,23 +36,24 @@ cleanup_old_data() {
     cd "$SCRIPT_DIR"
     
     log_info "Stopping any running docker-compose services..."
-    docker compose -f "$COMPOSE_FILE" down -v 2>/dev/null || true
+    docker compose -f "$COMPOSE_FILE" down 2>/dev/null || true
     
-    log_info "Removing docker volumes (if any remain)..."
-    # Remove volumes by name pattern (docker-compose creates volumes with project prefix)
-    # The -v flag in docker compose down should handle most, but we clean up any remaining
-    VOLUMES=$(docker volume ls -q | grep -E "(edge-data|ai-models|ai-data|user-vm-data|user-vm-datasets|user-vm-models|minio-data)" || true)
-    if [ -n "$VOLUMES" ]; then
-        echo "$VOLUMES" | xargs docker volume rm 2>/dev/null || true
+    # Check if volumes exist - only clean keys if we're actually removing volumes
+    # Keys should persist across test runs unless volumes are cleaned
+    VOLUMES_EXIST=$(docker volume ls -q 2>/dev/null | grep -E "(edge-data|ai-models|ai-data|user-vm-data|user-vm-datasets|user-vm-models|minio-data|baseline-models)" | wc -l)
+    VOLUMES_EXIST=${VOLUMES_EXIST:-0}
+    VOLUMES_EXIST=$((VOLUMES_EXIST + 0))
+    
+    if [ "$VOLUMES_EXIST" -gt 0 ]; then
+        log_info "Volumes detected, but not removing them (keys will be preserved)"
+        log_info "Note: Keys persist across test runs. To regenerate keys, manually remove volumes first"
+    else
+        log_info "No volumes detected, keys will be preserved"
     fi
     
-    log_info "Cleaning WireGuard configuration and keys (will be regenerated)..."
-    # Remove config files (will be regenerated from keys)
-    rm -rf "${SCRIPT_DIR}/wg/config"/*.conf 2>/dev/null || true
-    rm -rf "${SCRIPT_DIR}/wg/config/edge-wg0.conf" 2>/dev/null || true
-    rm -rf "${SCRIPT_DIR}/wg/config/server-wg0.conf" 2>/dev/null || true
-    # Remove keys directory to force regeneration (ensures fresh keys on clean start)
-    rm -rf "${SCRIPT_DIR}/wg/keys"/* 2>/dev/null || true
+    # Never remove keys during normal cleanup - only remove when volumes are explicitly cleaned
+    # This ensures keys persist across test runs, preventing authentication issues
+    
     # Ensure directories exist
     mkdir -p "${SCRIPT_DIR}/wg/keys" "${SCRIPT_DIR}/wg/config"
     

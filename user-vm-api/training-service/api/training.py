@@ -221,7 +221,15 @@ async def start_training(request: TrainingStartRequest):
     # Validate dataset exists and has sufficient snapshots
     dataset_path = config.get_dataset_path(request.edge_id, request.camera_id, request.dataset_id)
     if not os.path.exists(dataset_path):
-        raise HTTPException(status_code=404, detail=f"Dataset not found: {request.dataset_id}")
+        # Provide detailed error message with expected path for debugging
+        error_detail = (
+            f"Dataset not found: {request.dataset_id}. "
+            f"Expected path: {dataset_path}. "
+            f"Parameters: edge_id={request.edge_id}, camera_id={request.camera_id}, dataset_id={request.dataset_id}. "
+            f"Please verify the dataset was synced correctly in Epic 2.5."
+        )
+        logger.error(error_detail)
+        raise HTTPException(status_code=404, detail=error_detail)
     
     is_valid, error = _validate_dataset_snapshots(dataset_path, min_snapshots=50)
     if not is_valid:

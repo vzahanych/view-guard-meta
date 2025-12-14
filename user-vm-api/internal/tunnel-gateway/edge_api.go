@@ -13,10 +13,12 @@ import (
 	"github.com/vzahanych/view-guard-meta/user-vm-api/internal/shared/database"
 	"github.com/vzahanych/view-guard-meta/user-vm-api/internal/shared/logging"
 	"github.com/vzahanych/view-guard-meta/user-vm-api/internal/shared/service"
+	grpctls "github.com/vzahanych/view-guard-meta/user-vm-api/internal/shared/tls"
 	"go.uber.org/zap"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 )
@@ -103,8 +105,9 @@ func NewEdgeAPIServer(cfg *config.Config, log *logging.Logger, db *database.DB, 
 		capStore:    NewCapabilityStore(db),
 	}
 
-	// Create connection monitor
-	server.connectionMonitor = NewConnectionMonitor(cfg, log, db, server, wgServer)
+	// Connection monitor will be created after EdgeClient is available
+	// (EdgeClient is needed for active gRPC health checks)
+	server.connectionMonitor = nil
 
 	return server, nil
 }
@@ -130,6 +133,12 @@ func (s *EdgeAPIServer) GetCapabilityStore() *CapabilityStore {
 // GetConnectionMonitor returns the connection monitor instance
 func (s *EdgeAPIServer) GetConnectionMonitor() *ConnectionMonitor {
 	return s.connectionMonitor
+}
+
+// SetConnectionMonitor sets the connection monitor instance
+// Called after EdgeClient is created (EdgeClient is needed for active gRPC health checks)
+func (s *EdgeAPIServer) SetConnectionMonitor(monitor *ConnectionMonitor) {
+	s.connectionMonitor = monitor
 }
 
 // GetDB returns the database instance
@@ -186,12 +195,38 @@ func (s *EdgeAPIServer) Start(ctx context.Context) error {
 	}
 	s.listener = listener
 
-	// Create gRPC server with authentication interceptor
+	// Load TLS credentials for mTLS (zero-trust security)
+	var creds credentials.TransportCredentials
+	serverCertPath := "/etc/ssl/certs/vm-server.crt"
+	serverKeyPath := "/etc/ssl/private/vm-server.key"
+	caCertPath := "/etc/ssl/certs/ca.crt"
+
+	// Try to load TLS credentials (certificates should be mounted from Epic 2.0)
+	tlsCreds, err := grpctls.LoadServerCredentials(serverCertPath, serverKeyPath, caCertPath)
+	if err != nil {
+		s.logger.Warn("Failed to load TLS credentials for gRPC server, using insecure (not recommended for production)",
+			zap.Error(err),
+			zap.String("server_cert", serverCertPath),
+			zap.String("server_key", serverKeyPath),
+			zap.String("ca_cert", caCertPath),
+			zap.String("note", "TLS certificates should be generated in Epic 2.0 and mounted to containers"))
+		// Fall back to insecure for development/testing
+		creds = nil
+	} else {
+		s.logger.Info("Loaded TLS credentials for gRPC server (mTLS enabled)",
+			zap.String("server_cert", serverCertPath))
+		creds = tlsCreds
+	}
+
+	// Create gRPC server with authentication interceptor and TLS
 	opts := []grpc.ServerOption{
 		grpc.UnaryInterceptor(s.authInterceptor),
 		grpc.StreamInterceptor(s.authStreamInterceptor),
-		// Note: For production, add TLS credentials here
-		// grpc.Creds(credentials.NewTLS(tlsConfig))
+	}
+
+	// Add TLS credentials if available
+	if creds != nil {
+		opts = append(opts, grpc.Creds(creds))
 	}
 
 	s.grpcServer = grpc.NewServer(opts...)
@@ -297,7 +332,7 @@ func (s *EdgeAPIServer) authenticateConnection(ctx context.Context) (string, err
 	}
 
 	peerAddr := p.Addr.String()
-	s.logger.Debug("Authenticating connection", zap.String("peer_addr", peerAddr))
+	s.logger.Info("Authenticating connection", zap.String("peer_addr", peerAddr))
 
 	// Extract IP address
 	host, _, err := net.SplitHostPort(peerAddr)

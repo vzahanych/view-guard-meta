@@ -18,38 +18,39 @@ import (
 type ConnectionState string
 
 const (
-	StateRegistered  ConnectionState = "registered"  // Edge is registered but not yet connected
-	StateConnecting  ConnectionState = "connecting"  // Edge is attempting to connect
-	StateConnected   ConnectionState = "connected"   // Edge is actively connected
+	StateRegistered   ConnectionState = "registered"   // Edge is registered but not yet connected
+	StateConnecting   ConnectionState = "connecting"   // Edge is attempting to connect
+	StateConnected    ConnectionState = "connected"    // Edge is actively connected
 	StateDisconnected ConnectionState = "disconnected" // Edge is disconnected
-	StateStale       ConnectionState = "stale"       // Edge connection is stale (no recent activity)
+	StateStale        ConnectionState = "stale"        // Edge connection is stale (no recent activity)
 	StateReconnecting ConnectionState = "reconnecting" // Edge is attempting to reconnect
 )
 
 // ConnectionMonitor continuously monitors Edge connection status
 type ConnectionMonitor struct {
-	config       *config.Config
-	logger       *logging.Logger
-	db           *database.DB
+	config        *config.Config
+	logger        *logging.Logger
+	db            *database.DB
 	edgeAPIServer *EdgeAPIServer
-	wgServer     *WireGuardServer
-	eventBus     *service.EventBus
+	wgServer      *WireGuardServer
+	edgeClient    *EdgeClient // For active gRPC health checks (VM → Edge)
+	eventBus      *service.EventBus
 
 	// Connection state tracking
-	states      map[string]*ConnectionStateInfo // edge_id -> state info
-	statesMu    sync.RWMutex
+	states   map[string]*ConnectionStateInfo // edge_id -> state info
+	statesMu sync.RWMutex
 
 	// Monitoring intervals
-	checkInterval      time.Duration // How often to check connections
-	heartbeatTimeout   time.Duration // Timeout for heartbeat (5 minutes)
-	staleThreshold     time.Duration // Threshold for stale connections (10 minutes)
-	reconnectInterval  time.Duration // Interval between reconnection attempts
-	keepaliveInterval  time.Duration // Interval for keepalive pings (30 seconds)
+	checkInterval     time.Duration // How often to check connections
+	heartbeatTimeout  time.Duration // Timeout for heartbeat (5 minutes)
+	staleThreshold    time.Duration // Threshold for stale connections (10 minutes)
+	reconnectInterval time.Duration // Interval between reconnection attempts
+	keepaliveInterval time.Duration // Interval for keepalive pings (30 seconds)
 
 	// Reconnection tracking
-	reconnectBackoffs map[string]time.Duration // edge_id -> current backoff duration
-	reconnectMu       sync.RWMutex
-	maxRetries        int           // Maximum reconnection attempts before giving up (default: 10)
+	reconnectBackoffs           map[string]time.Duration // edge_id -> current backoff duration
+	reconnectMu                 sync.RWMutex
+	maxRetries                  int           // Maximum reconnection attempts before giving up (default: 10)
 	extendedDisconnectThreshold time.Duration // Threshold for extended disconnection alert (default: 30 minutes)
 
 	ctx    context.Context
@@ -59,39 +60,39 @@ type ConnectionMonitor struct {
 
 // ConnectionStateInfo tracks detailed state information for an Edge
 type ConnectionStateInfo struct {
-	EdgeID           string
-	State            ConnectionState
-	LastSeen         time.Time
-	LastHeartbeat    time.Time
-	LastHandshake    time.Time
-	ConnectionCount  int64
-	ReconnectAttempts int
+	EdgeID               string
+	State                ConnectionState
+	LastSeen             time.Time
+	LastHeartbeat        time.Time
+	LastHandshake        time.Time
+	ConnectionCount      int64
+	ReconnectAttempts    int
 	LastReconnectAttempt time.Time
-	Latency          time.Duration
-	BytesReceived    uint64
-	BytesSent        uint64
-	StateChangedAt   time.Time
-	
+	Latency              time.Duration
+	BytesReceived        uint64
+	BytesSent            uint64
+	StateChangedAt       time.Time
+
 	// Health metrics
-	FirstConnectedAt    time.Time // First time connection was established
-	LastConnectedAt      time.Time // Last time connection was established
+	FirstConnectedAt     time.Time     // First time connection was established
+	LastConnectedAt      time.Time     // Last time connection was established
 	TotalUptime          time.Duration // Cumulative uptime
 	TotalDowntime        time.Duration // Cumulative downtime
-	CurrentSessionStart  time.Time // Start of current connected session
+	CurrentSessionStart  time.Time     // Start of current connected session
 	CurrentSessionUptime time.Duration // Uptime of current session
-	
+
 	// gRPC call metrics
-	GRPCCallCount      int64 // Total gRPC calls
-	GRPCSuccessCount   int64 // Successful gRPC calls
-	GRPCFailureCount   int64 // Failed gRPC calls
-	LastGRPCCallTime   time.Time // Last gRPC call timestamp
-	
+	GRPCCallCount    int64     // Total gRPC calls
+	GRPCSuccessCount int64     // Successful gRPC calls
+	GRPCFailureCount int64     // Failed gRPC calls
+	LastGRPCCallTime time.Time // Last gRPC call timestamp
+
 	// Packet loss metrics (calculated from ping/pong)
-	PingCount          uint64 // Total pings sent
-	PongCount          uint64 // Total pongs received
+	PingCount          uint64    // Total pings sent
+	PongCount          uint64    // Total pongs received
 	LastPacketLossCalc time.Time // Last time packet loss was calculated
-	
-	mu               sync.RWMutex
+
+	mu sync.RWMutex
 }
 
 // NewConnectionMonitor creates a new connection monitor service
@@ -101,26 +102,28 @@ func NewConnectionMonitor(
 	db *database.DB,
 	edgeAPIServer *EdgeAPIServer,
 	wgServer *WireGuardServer,
+	edgeClient *EdgeClient, // For active gRPC health checks (VM → Edge)
 ) *ConnectionMonitor {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &ConnectionMonitor{
-		config:       cfg,
-		logger:       log,
-		db:           db,
-		edgeAPIServer: edgeAPIServer,
-		wgServer:     wgServer,
-		states:       make(map[string]*ConnectionStateInfo),
-		checkInterval:     30 * time.Second,
-		heartbeatTimeout:   5 * time.Minute,
-		staleThreshold:     10 * time.Minute,
-		reconnectInterval:  30 * time.Second,
-		keepaliveInterval:  30 * time.Second,
-		reconnectBackoffs: make(map[string]time.Duration),
-		maxRetries:        10, // Maximum 10 reconnection attempts
+		config:                      cfg,
+		logger:                      log,
+		db:                          db,
+		edgeAPIServer:               edgeAPIServer,
+		wgServer:                    wgServer,
+		edgeClient:                  edgeClient,
+		states:                      make(map[string]*ConnectionStateInfo),
+		checkInterval:               30 * time.Second,
+		heartbeatTimeout:            5 * time.Minute,
+		staleThreshold:              10 * time.Minute,
+		reconnectInterval:           30 * time.Second,
+		keepaliveInterval:           30 * time.Second,
+		reconnectBackoffs:           make(map[string]time.Duration),
+		maxRetries:                  10,               // Maximum 10 reconnection attempts
 		extendedDisconnectThreshold: 30 * time.Minute, // Alert after 30 minutes of disconnection
-		ctx:          ctx,
-		cancel:       cancel,
+		ctx:                         ctx,
+		cancel:                      cancel,
 	}
 }
 
@@ -300,6 +303,31 @@ func (cm *ConnectionMonitor) checkEdgeConnection(edgeID, publicKey string, dbLas
 		stateInfo.BytesSent = wgPeer.BytesSent
 		wgPeer.mu.RUnlock()
 		stateInfo.LastHandshake = lastHandshake
+	}
+
+	// Active gRPC health check: VM monitors Edge status through gRPC (security requirement)
+	// This verifies the bidirectional gRPC connection is alive and ready
+	// All VM-Edge communication is gRPC-only (no HTTP)
+	if cm.edgeClient != nil && (grpcConnected || wgConnected) {
+		healthCtx, healthCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		grpcHealthErr := cm.edgeClient.VerifyConnectionHealth(healthCtx, edgeID)
+		healthCancel()
+
+		if grpcHealthErr != nil {
+			cm.logger.Warn("gRPC health check failed for Edge",
+				zap.String("edge_id", edgeID),
+				zap.Error(grpcHealthErr),
+				zap.String("note", "Bidirectional gRPC connection health is critical for security"))
+			// Mark gRPC as not healthy even if we have a connection object
+			grpcConnected = false
+		} else {
+			cm.logger.Debug("gRPC health check passed for Edge",
+				zap.String("edge_id", edgeID),
+				zap.String("note", "Bidirectional gRPC connection is alive and ready"))
+			stateInfo.LastGRPCCallTime = now
+			stateInfo.GRPCCallCount++
+			stateInfo.GRPCSuccessCount++
+		}
 	}
 
 	// Determine new state based on connection status
@@ -607,7 +635,7 @@ func (cm *ConnectionMonitor) publishConnectionFailed(edgeID string, reconnectAtt
 		Type:      service.EventType("edge.connection_failed"),
 		Timestamp: time.Now().Unix(),
 		Data: map[string]interface{}{
-			"edge_id":            edgeID,
+			"edge_id":             edgeID,
 			"reconnect_attempts":  reconnectAttempts,
 			"disconnect_duration": disconnectDuration.String(),
 			"max_retries":         cm.maxRetries,
@@ -630,31 +658,31 @@ func (cm *ConnectionMonitor) GetConnectionState(edgeID string) (*ConnectionState
 	defer stateInfo.mu.RUnlock()
 
 	return &ConnectionStateInfo{
-		EdgeID:         stateInfo.EdgeID,
-		State:          stateInfo.State,
-		LastSeen:       stateInfo.LastSeen,
-		LastHeartbeat:  stateInfo.LastHeartbeat,
-		LastHandshake:  stateInfo.LastHandshake,
-		ConnectionCount: stateInfo.ConnectionCount,
-		ReconnectAttempts: stateInfo.ReconnectAttempts,
+		EdgeID:               stateInfo.EdgeID,
+		State:                stateInfo.State,
+		LastSeen:             stateInfo.LastSeen,
+		LastHeartbeat:        stateInfo.LastHeartbeat,
+		LastHandshake:        stateInfo.LastHandshake,
+		ConnectionCount:      stateInfo.ConnectionCount,
+		ReconnectAttempts:    stateInfo.ReconnectAttempts,
 		LastReconnectAttempt: stateInfo.LastReconnectAttempt,
-		Latency:        stateInfo.Latency,
-		BytesReceived:  stateInfo.BytesReceived,
-		BytesSent:      stateInfo.BytesSent,
-		StateChangedAt: stateInfo.StateChangedAt,
-		FirstConnectedAt: stateInfo.FirstConnectedAt,
-		LastConnectedAt: stateInfo.LastConnectedAt,
-		TotalUptime: stateInfo.TotalUptime,
-		TotalDowntime: stateInfo.TotalDowntime,
-		CurrentSessionStart: stateInfo.CurrentSessionStart,
+		Latency:              stateInfo.Latency,
+		BytesReceived:        stateInfo.BytesReceived,
+		BytesSent:            stateInfo.BytesSent,
+		StateChangedAt:       stateInfo.StateChangedAt,
+		FirstConnectedAt:     stateInfo.FirstConnectedAt,
+		LastConnectedAt:      stateInfo.LastConnectedAt,
+		TotalUptime:          stateInfo.TotalUptime,
+		TotalDowntime:        stateInfo.TotalDowntime,
+		CurrentSessionStart:  stateInfo.CurrentSessionStart,
 		CurrentSessionUptime: stateInfo.CurrentSessionUptime,
-		GRPCCallCount: stateInfo.GRPCCallCount,
-		GRPCSuccessCount: stateInfo.GRPCSuccessCount,
-		GRPCFailureCount: stateInfo.GRPCFailureCount,
-		LastGRPCCallTime: stateInfo.LastGRPCCallTime,
-		PingCount: stateInfo.PingCount,
-		PongCount: stateInfo.PongCount,
-		LastPacketLossCalc: stateInfo.LastPacketLossCalc,
+		GRPCCallCount:        stateInfo.GRPCCallCount,
+		GRPCSuccessCount:     stateInfo.GRPCSuccessCount,
+		GRPCFailureCount:     stateInfo.GRPCFailureCount,
+		LastGRPCCallTime:     stateInfo.LastGRPCCallTime,
+		PingCount:            stateInfo.PingCount,
+		PongCount:            stateInfo.PongCount,
+		LastPacketLossCalc:   stateInfo.LastPacketLossCalc,
 	}, true
 }
 
@@ -667,31 +695,31 @@ func (cm *ConnectionMonitor) GetAllConnectionStates() map[string]*ConnectionStat
 	for edgeID, stateInfo := range cm.states {
 		stateInfo.mu.RLock()
 		result[edgeID] = &ConnectionStateInfo{
-			EdgeID:         stateInfo.EdgeID,
-			State:          stateInfo.State,
-			LastSeen:       stateInfo.LastSeen,
-			LastHeartbeat:  stateInfo.LastHeartbeat,
-			LastHandshake:  stateInfo.LastHandshake,
-			ConnectionCount: stateInfo.ConnectionCount,
-			ReconnectAttempts: stateInfo.ReconnectAttempts,
+			EdgeID:               stateInfo.EdgeID,
+			State:                stateInfo.State,
+			LastSeen:             stateInfo.LastSeen,
+			LastHeartbeat:        stateInfo.LastHeartbeat,
+			LastHandshake:        stateInfo.LastHandshake,
+			ConnectionCount:      stateInfo.ConnectionCount,
+			ReconnectAttempts:    stateInfo.ReconnectAttempts,
 			LastReconnectAttempt: stateInfo.LastReconnectAttempt,
-			Latency:        stateInfo.Latency,
-			BytesReceived:  stateInfo.BytesReceived,
-			BytesSent:      stateInfo.BytesSent,
-			StateChangedAt: stateInfo.StateChangedAt,
-			FirstConnectedAt: stateInfo.FirstConnectedAt,
-			LastConnectedAt: stateInfo.LastConnectedAt,
-			TotalUptime: stateInfo.TotalUptime,
-			TotalDowntime: stateInfo.TotalDowntime,
-			CurrentSessionStart: stateInfo.CurrentSessionStart,
+			Latency:              stateInfo.Latency,
+			BytesReceived:        stateInfo.BytesReceived,
+			BytesSent:            stateInfo.BytesSent,
+			StateChangedAt:       stateInfo.StateChangedAt,
+			FirstConnectedAt:     stateInfo.FirstConnectedAt,
+			LastConnectedAt:      stateInfo.LastConnectedAt,
+			TotalUptime:          stateInfo.TotalUptime,
+			TotalDowntime:        stateInfo.TotalDowntime,
+			CurrentSessionStart:  stateInfo.CurrentSessionStart,
 			CurrentSessionUptime: stateInfo.CurrentSessionUptime,
-			GRPCCallCount: stateInfo.GRPCCallCount,
-			GRPCSuccessCount: stateInfo.GRPCSuccessCount,
-			GRPCFailureCount: stateInfo.GRPCFailureCount,
-			LastGRPCCallTime: stateInfo.LastGRPCCallTime,
-			PingCount: stateInfo.PingCount,
-			PongCount: stateInfo.PongCount,
-			LastPacketLossCalc: stateInfo.LastPacketLossCalc,
+			GRPCCallCount:        stateInfo.GRPCCallCount,
+			GRPCSuccessCount:     stateInfo.GRPCSuccessCount,
+			GRPCFailureCount:     stateInfo.GRPCFailureCount,
+			LastGRPCCallTime:     stateInfo.LastGRPCCallTime,
+			PingCount:            stateInfo.PingCount,
+			PongCount:            stateInfo.PongCount,
+			LastPacketLossCalc:   stateInfo.LastPacketLossCalc,
 		}
 		stateInfo.mu.RUnlock()
 	}
@@ -1133,4 +1161,3 @@ func (cm *ConnectionMonitor) HandleDisconnection(edgeID string) {
 		stateInfo.mu.Unlock()
 	}
 }
-

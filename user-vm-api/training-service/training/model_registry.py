@@ -66,9 +66,19 @@ class ModelRegistry:
         # Get model file size
         file_size = os.path.getsize(onnx_path)
         
-        # Get model output directory
-        model_output_dir = config.get_model_path(trained_model_id)
-        os.makedirs(model_output_dir, exist_ok=True)
+        # Get model output directory (use the directory where the ONNX file is located)
+        # This ensures we use a writable location (training output) rather than read-only shared models
+        model_output_dir = os.path.dirname(onnx_path)
+        try:
+            os.makedirs(model_output_dir, exist_ok=True)
+        except OSError as e:
+            if e.errno == 30:  # Read-only file system
+                # If read-only, use training output directory instead
+                model_output_dir = os.path.join(config.TRAINING_OUTPUT_DIR, trained_model_id)
+                os.makedirs(model_output_dir, exist_ok=True)
+                logger.info(f"Using writable location for model metadata: {model_output_dir}")
+            else:
+                raise
         
         # Create comprehensive model metadata
         metadata = self._create_model_metadata(

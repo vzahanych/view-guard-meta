@@ -3,6 +3,7 @@ package capabilities
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/camera"
@@ -24,6 +25,7 @@ type SyncService struct {
 	interval      time.Duration
 	cancel        context.CancelFunc
 	syncTrigger   chan struct{} // Channel to trigger immediate sync
+	pendingSync   bool          // Flag to indicate cameras are waiting to sync
 }
 
 // NewSyncService creates a new capability sync service
@@ -78,6 +80,34 @@ func (s *SyncService) Start(ctx context.Context) error {
 		}()
 		s.LogInfo("Subscribed to WireGuard connection events for immediate capability sync")
 
+		// Subscribe to camera registration events (cameras are registered after discovery)
+		// When cameras are registered, check gRPC connection and sync if ready
+		cameraRegCh := s.GetEventBus().Subscribe(service.EventTypeCameraRegistered)
+		go func() {
+			for {
+				select {
+				case event, ok := <-cameraRegCh:
+					if !ok {
+						return
+					}
+					// Camera discovered - mark as pending and attempt sync
+					s.pendingSync = true
+					s.LogDebug("Camera registered, checking gRPC connection for sync", "camera_id", event.Data["camera_id"])
+
+					// Attempt sync - it will check gRPC connection and authentication
+					select {
+					case s.syncTrigger <- struct{}{}:
+						// Sync attempt triggered
+					default:
+						// Channel is full, sync already queued
+					}
+				case <-runCtx.Done():
+					return
+				}
+			}
+		}()
+		s.LogInfo("Subscribed to camera registration events - will sync when gRPC connection is ready")
+
 		// Subscribe to screenshot events for immediate dataset status refresh (Step 2.2.2.1.2)
 		screenshotCh := s.GetEventBus().Subscribe(service.EventTypeScreenshotSaved)
 		go s.handleScreenshotSaved(runCtx, screenshotCh)
@@ -107,31 +137,46 @@ func (s *SyncService) syncLoop(ctx context.Context) {
 	ticker := time.NewTicker(s.interval)
 	defer ticker.Stop()
 
-	// Attempt an immediate sync on startup
-	s.syncOnce(ctx)
+	// Retry ticker for pending syncs (check every 5 seconds if we have pending cameras)
+	retryTicker := time.NewTicker(5 * time.Second)
+	defer retryTicker.Stop()
+
+	// Don't attempt immediate sync on startup - wait for camera discovery and gRPC authentication
+	// The sync will be triggered by camera registration events when gRPC is ready
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			// Periodic sync
 			s.syncOnce(ctx)
+		case <-retryTicker.C:
+			// Retry pending syncs if gRPC connection becomes ready
+			if s.pendingSync {
+				s.LogDebug("Retrying capability sync for pending cameras")
+				s.syncOnce(ctx)
+			}
 		case <-s.syncTrigger:
-			// Immediate sync triggered by WireGuard connection event
-			s.LogInfo("Triggering immediate capability sync after WireGuard connection")
+			// Immediate sync triggered by camera registration or WireGuard connection
 			s.syncOnce(ctx)
 		}
 	}
 }
 
-// handleWireGuardConnected handles WireGuard connection events and triggers immediate sync
+// handleWireGuardConnected handles WireGuard connection events
+// Note: We don't trigger sync immediately - we wait for cameras to be discovered first
+// Then camera registration events will trigger sync when gRPC is ready
 func (s *SyncService) handleWireGuardConnected(event service.Event) {
-	// Trigger immediate sync when WireGuard connects
-	select {
-	case s.syncTrigger <- struct{}{}:
-		// Sync triggered successfully
-	default:
-		// Channel is full, sync already queued
+	// If we have pending cameras waiting to sync, trigger sync attempt
+	if s.pendingSync {
+		s.LogDebug("WireGuard connected, attempting sync for pending cameras")
+		select {
+		case s.syncTrigger <- struct{}{}:
+			// Sync triggered
+		default:
+			// Channel is full, sync already queued
+		}
 	}
 }
 
@@ -174,21 +219,28 @@ func (s *SyncService) handleScreenshotSaved(ctx context.Context, ch <-chan servi
 }
 
 func (s *SyncService) syncOnce(ctx context.Context) {
+	// Check gRPC connection first
 	if !s.grpcClient.IsConnected() {
-		s.LogDebug("Skipping capability sync - gRPC not connected")
+		s.LogDebug("Skipping capability sync - gRPC not connected (will retry when connection is ready)")
+		s.pendingSync = true // Mark as pending so we retry when connection is ready
 		return
 	}
 
 	controlClient := s.grpcClient.GetControlClient()
 	if controlClient == nil {
-		s.LogDebug("Skipping capability sync - control client unavailable")
+		s.LogDebug("Skipping capability sync - control client unavailable (will retry)")
+		s.pendingSync = true
 		return
 	}
 
 	cameras := s.cameraMgr.ListCameras(false)
 	if len(cameras) == 0 {
+		s.LogDebug("Skipping capability sync - no cameras discovered yet")
+		s.pendingSync = false
 		return
 	}
+
+	s.LogDebug("Starting capability sync", "camera_count", len(cameras))
 
 	req := &edgeproto.SyncCapabilitiesRequest{
 		SyncedAt: time.Now().UnixNano(),
@@ -211,16 +263,32 @@ func (s *SyncService) syncOnce(ctx context.Context) {
 
 	resp, err := controlClient.SyncCapabilities(callCtx, req)
 	if err != nil {
+		// Check if it's an authentication error - if so, mark as pending and retry later
+		if isAuthError(err) {
+			s.LogDebug("Capability sync failed - authentication not ready, will retry", "error", err)
+			s.pendingSync = true
+			return
+		}
 		s.LogError("Capability sync failed", err)
+		s.pendingSync = true // Retry on other errors too
 		return
 	}
 
 	if !resp.Success {
+		// Check if it's an authentication-related rejection
+		if resp.ErrorMessage != "" && (contains(resp.ErrorMessage, "not registered") || contains(resp.ErrorMessage, "authentication")) {
+			s.LogDebug("Capability sync rejected - authentication not ready, will retry", "error", resp.ErrorMessage)
+			s.pendingSync = true
+			return
+		}
 		s.LogInfo("Capability sync rejected", "error", resp.ErrorMessage)
+		s.pendingSync = true
 		return
 	}
 
-	s.LogInfo("Capability sync sent", "cameras", len(req.Cameras))
+	// Success - clear pending flag
+	s.pendingSync = false
+	s.LogInfo("Capability sync sent successfully", "cameras", len(req.Cameras))
 }
 
 // SyncCameraCapabilities syncs capabilities for a single camera to the VM
@@ -303,6 +371,22 @@ func (s *SyncService) buildDatasetStatus(ctx context.Context, cam *camera.Camera
 		SnapshotRequired:      datasetStatus.SnapshotRequired,
 		LastSynced:            datasetStatus.LastSynced,
 	}
+}
+
+// isAuthError checks if an error is authentication-related
+func isAuthError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := strings.ToLower(err.Error())
+	return strings.Contains(errStr, "unauthenticated") ||
+		strings.Contains(errStr, "not registered") ||
+		strings.Contains(errStr, "authentication failed")
+}
+
+// contains checks if a string contains a substring (case-insensitive)
+func contains(s, substr string) bool {
+	return strings.Contains(strings.ToLower(s), strings.ToLower(substr))
 }
 
 func (s *SyncService) toProto(cam *camera.Camera, status *camera.CameraDatasetStatus) *edgeproto.CameraCapability {

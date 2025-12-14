@@ -34,6 +34,14 @@ test_verify_dataset_readiness() {
         snapshot_required=$(echo "$cameras_status" | grep -A 20 "\"id\":\"$camera_id\"" | grep -o '"snapshot_required":[^,}]*' | grep -o 'true\|false' || echo "true")
     fi
     
+    # Ensure we have valid numeric values with proper defaults
+    if [ -z "$labeled_count" ] || [ "$labeled_count" = "null" ] || [ "$labeled_count" = "" ]; then
+        labeled_count="0"
+    fi
+    if [ -z "$required_count" ] || [ "$required_count" = "null" ] || [ "$required_count" = "" ]; then
+        required_count="50"
+    fi
+    
     labeled_count=$(echo "$labeled_count" | grep -o '[0-9]*' || echo "0")
     required_count=$(echo "$required_count" | grep -o '[0-9]*' || echo "50")
     labeled_count=$((labeled_count + 0))
@@ -67,9 +75,13 @@ test_capture_additional_snapshots() {
         
         # Capture snapshot
         local snapshot_file="/tmp/test_snapshot_${camera_id}_sync_${i}_$$.jpg"
-        local http_code=$(curl -sf -w "%{http_code}" -o "$snapshot_file" "${edge_api_url}/api/cameras/${camera_id}/snapshot" 2>&1 || echo "000")
+        # Separate stderr from http_code output
+        local http_code=$(curl -s -w "%{http_code}" -o "$snapshot_file" "${edge_api_url}/api/cameras/${camera_id}/snapshot" 2>/dev/null || echo "000")
         
         if [ "$http_code" != "200" ] || [ ! -f "$snapshot_file" ] || [ ! -s "$snapshot_file" ]; then
+            if [ "$http_code" = "000" ]; then
+                log_warn "Failed to capture snapshot $i (connection error)" >&2
+            fi
             rm -f "$snapshot_file"
             continue
         fi

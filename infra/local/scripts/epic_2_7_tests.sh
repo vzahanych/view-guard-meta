@@ -36,6 +36,21 @@ test_find_dataset() {
     local edge_id="poc-edge-1"
     local dataset_id=""
     local camera_id=""
+    local edge_api_url="http://localhost:8181"
+    
+    # First, try to get camera_id the same way Epic 2.5 does
+    if [ -z "$camera_id" ]; then
+        log_info "Getting camera ID from Edge API..." >&2
+        # Source epic_2_4_tests.sh to get test_get_camera_id function
+        # Redirect stderr to /dev/null to avoid capturing log messages, only capture stdout
+        local camera_id_result=$(test_get_camera_id "$edge_api_url" 2>/dev/null || echo "")
+        # Clean up any remaining log messages or whitespace
+        camera_id_result=$(echo "$camera_id_result" | grep -v "^\[" | grep -v "INFO\|WARN\|ERROR" | tr -d '\r\n' | xargs)
+        if [ -n "$camera_id_result" ] && [ "$camera_id_result" != "FAILED" ] && [ "${#camera_id_result}" -lt 50 ]; then
+            camera_id="$camera_id_result"
+            log_info "Found camera_id: $camera_id" >&2
+        fi
+    fi
     
     # Search for datasets in the datasets directory using find
     if docker compose -f "$COMPOSE_FILE" exec -T python-ai-service test -d /app/data/datasets 2>/dev/null; then
@@ -51,20 +66,27 @@ test_find_dataset() {
             if [ -n "$first_dataset_path" ]; then
                 # Extract components from path: /app/data/datasets/{edge_id}/{camera_id}/{dataset_id}
                 local path_parts=$(echo "$first_dataset_path" | sed 's|/app/data/datasets/||' | tr '/' '\n')
-                edge_id=$(echo "$path_parts" | sed -n '1p' | tr -d '\r\n')
-                camera_id=$(echo "$path_parts" | sed -n '2p' | tr -d '\r\n')
-                dataset_id=$(echo "$path_parts" | sed -n '3p' | tr -d '\r\n')
+                local edge_id_from_path=$(echo "$path_parts" | sed -n '1p' | tr -d '\r\n')
+                local camera_id_from_path=$(echo "$path_parts" | sed -n '2p' | tr -d '\r\n')
+                local dataset_id_from_path=$(echo "$path_parts" | sed -n '3p' | tr -d '\r\n')
                 
-                if [ -z "$dataset_id" ] || [ -z "$camera_id" ] || [ -z "$edge_id" ]; then
+                if [ -z "$dataset_id_from_path" ] || [ -z "$camera_id_from_path" ] || [ -z "$edge_id_from_path" ]; then
                     # Fallback: try to parse from full path using basename/dirname
-                    dataset_id=$(basename "$first_dataset_path" | tr -d '\r\n')
+                    dataset_id_from_path=$(basename "$first_dataset_path" | tr -d '\r\n')
                     local camera_path=$(dirname "$first_dataset_path" | tr -d '\r\n')
-                    camera_id=$(basename "$camera_path" | tr -d '\r\n')
+                    camera_id_from_path=$(basename "$camera_path" | tr -d '\r\n')
                     local edge_path=$(dirname "$camera_path" | tr -d '\r\n')
-                    edge_id=$(basename "$edge_path" | tr -d '\r\n')
+                    edge_id_from_path=$(basename "$edge_path" | tr -d '\r\n')
                 fi
                 
-                if [ -n "$dataset_id" ] && [ -n "$camera_id" ] && [ -n "$edge_id" ]; then
+                if [ -n "$dataset_id_from_path" ] && [ -n "$camera_id_from_path" ] && [ -n "$edge_id_from_path" ]; then
+                    dataset_id="$dataset_id_from_path"
+                    # Prioritize camera_id from filesystem path (actual storage path) over Edge API
+                    # This ensures we use the same camera_id that was used when storing the dataset
+                    camera_id="$camera_id_from_path"
+                    if [ -z "$edge_id" ] || [ "$edge_id" = "poc-edge-1" ]; then
+                        edge_id="$edge_id_from_path"
+                    fi
                     log_info "Found dataset in filesystem: $dataset_id for camera: $camera_id, edge: $edge_id" >&2
                 fi
             fi
@@ -78,6 +100,8 @@ test_find_dataset() {
     # If still no dataset found, check VM API
     if [ -z "$dataset_id" ]; then
         log_warn "No dataset found in filesystem, checking VM API for dataset information..." >&2
+        
+        # First, try to get camera list and find cameras with datasets
         local cameras_response=$(curl -sf "${VM_API}/api/cameras" || echo "FAILED")
         if [ "$cameras_response" != "FAILED" ]; then
             local dataset_id_from_api=""
@@ -96,7 +120,64 @@ test_find_dataset() {
                 if [ -n "$camera_id_from_api" ] && [ "$camera_id_from_api" != "null" ]; then
                     camera_id="$camera_id_from_api"
                 fi
-                log_info "Found dataset from VM API: $dataset_id for camera: $camera_id" >&2
+                log_info "Found dataset from VM API cameras list: $dataset_id for camera: $camera_id" >&2
+            fi
+        fi
+        
+        # If still not found, try checking specific camera endpoints (like Epic 2.5 does)
+        # This is the most reliable method - check the camera we know exists
+        # Clean camera_id to remove any log message contamination
+        camera_id=$(echo "$camera_id" | grep -v "^\[" | grep -v "INFO\|WARN\|ERROR\|Getting\|Using" | tr -d '\r\n' | xargs)
+        if [ -z "$dataset_id" ] && [ -n "$camera_id" ] && [ "$camera_id" != "null" ] && [ "${#camera_id}" -lt 50 ] && [ -n "$edge_id" ]; then
+            log_info "Checking specific camera dataset endpoint for camera: $camera_id..." >&2
+            local camera_dataset_response=$(curl -sfL "${VM_API}/api/cameras/${camera_id}/dataset?edge_id=${edge_id}" 2>&1 || echo "FAILED")
+            if [ "$camera_dataset_response" != "FAILED" ]; then
+                local dataset_id_from_camera=""
+                if command -v jq >/dev/null 2>&1; then
+                    dataset_id_from_camera=$(echo "$camera_dataset_response" | jq -r '.dataset_id // empty' 2>/dev/null || echo "")
+                else
+                    dataset_id_from_camera=$(echo "$camera_dataset_response" | grep -o '"dataset_id":"[^"]*"' | cut -d'"' -f4 || echo "")
+                fi
+                
+                if [ -n "$dataset_id_from_camera" ] && [ "$dataset_id_from_camera" != "null" ] && [ "$dataset_id_from_camera" != "" ]; then
+                    dataset_id="$dataset_id_from_camera"
+                    log_info "Found dataset from camera dataset endpoint: $dataset_id for camera: $camera_id" >&2
+                else
+                    log_warn "Camera dataset endpoint returned no dataset_id (response: $camera_dataset_response)" >&2
+                fi
+            else
+                log_warn "Failed to query camera dataset endpoint: ${VM_API}/api/cameras/${camera_id}/dataset?edge_id=${edge_id}" >&2
+            fi
+        fi
+        
+        # If still not found, try to get camera_id from cameras list and check that camera
+        if [ -z "$dataset_id" ]; then
+            if [ "$cameras_response" != "FAILED" ]; then
+                local first_camera_id=""
+                if command -v jq >/dev/null 2>&1; then
+                    first_camera_id=$(echo "$cameras_response" | jq -r '.cameras[0]?.id // empty' 2>/dev/null || echo "")
+                else
+                    first_camera_id=$(echo "$cameras_response" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4 || echo "")
+                fi
+                
+                if [ -n "$first_camera_id" ] && [ "$first_camera_id" != "null" ] && [ -n "$edge_id" ]; then
+                    log_info "Checking dataset for first camera: $first_camera_id..." >&2
+                    local camera_dataset_response=$(curl -sfL "${VM_API}/api/cameras/${first_camera_id}/dataset?edge_id=${edge_id}" 2>&1 || echo "FAILED")
+                    if [ "$camera_dataset_response" != "FAILED" ]; then
+                        local dataset_id_from_camera=""
+                        if command -v jq >/dev/null 2>&1; then
+                            dataset_id_from_camera=$(echo "$camera_dataset_response" | jq -r '.dataset_id // empty' 2>/dev/null || echo "")
+                        else
+                            dataset_id_from_camera=$(echo "$camera_dataset_response" | grep -o '"dataset_id":"[^"]*"' | cut -d'"' -f4 || echo "")
+                        fi
+                        
+                        if [ -n "$dataset_id_from_camera" ] && [ "$dataset_id_from_camera" != "null" ] && [ "$dataset_id_from_camera" != "" ]; then
+                            dataset_id="$dataset_id_from_camera"
+                            camera_id="$first_camera_id"
+                            log_info "Found dataset from camera dataset endpoint: $dataset_id for camera: $camera_id" >&2
+                        fi
+                    fi
+                fi
             fi
         fi
     fi

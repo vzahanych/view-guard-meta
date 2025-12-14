@@ -10,22 +10,26 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/ai"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/anomaly"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/camera"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/capabilities"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/config"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/dataset"
+	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/deployment"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/events"
 	grpcclient "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/grpc"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/health"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/logger"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/service"
+	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/snapshot_request"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/state"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/storage"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/telemetry"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/video"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/web"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/web/screenshots"
+	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/web/streaming"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/wireguard"
 )
 
@@ -40,6 +44,53 @@ func (a *telemetryCollectorAdapter) GetLastMetrics() interface{} {
 
 func (a *telemetryCollectorAdapter) Collect(ctx context.Context) (interface{}, error) {
 	return a.collector.Collect(ctx)
+}
+
+// modelLoaderAdapter adapts ai.ModelLoader to web.ModelLoaderService interface
+type modelLoaderAdapter struct {
+	loader *ai.ModelLoader
+}
+
+func (a *modelLoaderAdapter) LoadModel(ctx context.Context, modelID string, cameraID *string) (*web.ActiveModelInfo, error) {
+	aiModel, err := a.loader.LoadModel(ctx, modelID, cameraID)
+	if err != nil {
+		return nil, err
+	}
+	// Convert ai.ActiveModelInfo to web.ActiveModelInfo
+	return &web.ActiveModelInfo{
+		ModelID:      aiModel.ModelID,
+		ModelPath:    aiModel.ModelPath,
+		MetadataPath: aiModel.MetadataPath,
+		Version:      aiModel.Version,
+		ModelType:    aiModel.ModelType,
+		Framework:    aiModel.Framework,
+		CameraID:     aiModel.CameraID,
+		LoadedAt:     aiModel.LoadedAt,
+		Ready:        aiModel.Ready,
+	}, nil
+}
+
+func (a *modelLoaderAdapter) GetActiveModel(cameraID string) (*web.ActiveModelInfo, bool) {
+	aiModel, exists := a.loader.GetActiveModel(cameraID)
+	if !exists {
+		return nil, false
+	}
+	// Convert ai.ActiveModelInfo to web.ActiveModelInfo
+	return &web.ActiveModelInfo{
+		ModelID:      aiModel.ModelID,
+		ModelPath:    aiModel.ModelPath,
+		MetadataPath: aiModel.MetadataPath,
+		Version:      aiModel.Version,
+		ModelType:    aiModel.ModelType,
+		Framework:    aiModel.Framework,
+		CameraID:     aiModel.CameraID,
+		LoadedAt:     aiModel.LoadedAt,
+		Ready:        aiModel.Ready,
+	}, true
+}
+
+func (a *modelLoaderAdapter) IsModelReady(cameraID string) bool {
+	return a.loader.IsModelReady(cameraID)
 }
 
 var (
@@ -275,6 +326,40 @@ func main() {
 	svcMgr.Register(capabilitySync)
 	log.Info("Capability sync service registered")
 
+	// Initialize snapshot request service (handles VM → Edge snapshot capture requests)
+	// This requires streaming service which is created by web server, so we'll wire it later
+	var snapshotRequestSvc *snapshot_request.Service
+	if cfg.Edge.WireGuard.Enabled && screenshotSvc != nil {
+		// Create snapshot request service (streaming service will be set later)
+		snapshotRequestSvc = snapshot_request.NewService(
+			log,
+			cameraMgr,
+			screenshotSvc,
+			nil, // streaming service will be set after web server creates it
+			cfg,
+		)
+		log.Info("Snapshot request service initialized")
+	}
+
+	// Initialize deployment status reporter (reports model deployment status to VM)
+	var statusReporter *deployment.StatusReporter
+	if cfg.Edge.WireGuard.Enabled && wgClient != nil {
+		statusReporter = deployment.NewStatusReporter(cfg, wgClient, log)
+		svcMgr.Register(statusReporter)
+		log.Info("Deployment status reporter initialized and registered")
+	}
+
+	// Initialize model storage for Epic 2.8 (model deployment) - used by both web server and gRPC server
+	var modelStorage *storage.ModelStorage
+	if cfg.Edge.WireGuard.Enabled {
+		modelStorage, err = storage.NewModelStorage(cfg, stateMgr, log)
+		if err != nil {
+			log.Warn("Failed to create model storage, model deployment will be unavailable", "error", err)
+		} else {
+			log.Info("Model storage service initialized")
+		}
+	}
+
 	// Register web server if enabled
 	if cfg.Edge.Web.Enabled {
 		webServer := web.NewServer(&cfg.Edge.Web, log)
@@ -295,6 +380,9 @@ func main() {
 		if screenshotSvc != nil {
 			webServer.SetScreenshotService(screenshotSvc)
 		}
+		if snapshotRequestSvc != nil {
+			webServer.SetSnapshotRequestService(snapshotRequestSvc)
+		}
 
 		// Initialize dataset service for packaging and uploading datasets to VM
 		// Use same edge ID logic as telemetry sender for consistency
@@ -313,8 +401,55 @@ func main() {
 		webServer.SetCapabilitySyncService(capabilitySync)
 		log.Info("Capability sync service wired to web server")
 
+		// Wire model storage to web server (if available)
+		if modelStorage != nil {
+			webServer.SetModelStorageService(modelStorage)
+			log.Info("Model storage service wired to web server")
+
+			// Initialize AI client for model loader
+			aiClientConfig := ai.ClientConfig{
+				ServiceURL:          cfg.Edge.AI.ServiceURL,
+				Timeout:             30 * time.Second,
+				ConfidenceThreshold: cfg.Edge.AI.AnomalyThreshold,
+			}
+			aiClient := ai.NewClient(aiClientConfig, log)
+			modelLoader := ai.NewModelLoader(modelStorage, aiClient, log)
+			// Use adapter to convert ai.ModelLoader to web.ModelLoaderService
+			modelLoaderAdapter := &modelLoaderAdapter{loader: modelLoader}
+			webServer.SetModelLoaderService(modelLoaderAdapter)
+			log.Info("Model loader service initialized and wired to web server")
+		}
+
+		// Wire status reporter to web server
+		if statusReporter != nil {
+			webServer.SetStatusReporterService(statusReporter)
+			log.Info("Deployment status reporter wired to web server")
+		}
+
 		svcMgr.Register(webServer)
 		log.Info("Web server registered", "host", cfg.Edge.Web.Host, "port", cfg.Edge.Web.Port)
+
+		// Wire snapshot request service with streaming service (created by web server)
+		// Web server creates streaming service in SetDependencies, so we create our own for snapshot requests
+		if snapshotRequestSvc != nil && cameraMgr != nil && ffmpegWrapper != nil {
+			streamingSvc := streaming.NewService(cameraMgr, ffmpegWrapper, log)
+			snapshotRequestSvc.SetStreamingService(streamingSvc)
+			log.Info("Streaming service wired to snapshot request service")
+		}
+	}
+
+	// Register Edge gRPC server (for VM → Edge calls like RequestSnapshotCapture and DeployModel)
+	var grpcServer *grpcclient.Server
+	if cfg.Edge.WireGuard.Enabled && snapshotRequestSvc != nil {
+		grpcServer = grpcclient.NewServer(&cfg.Edge.WireGuard, log, snapshotRequestSvc)
+		svcMgr.Register(grpcServer)
+		log.Info("Edge gRPC server registered (for VM → Edge calls)")
+	}
+
+	// Wire model storage to gRPC server for model deployment (if both are available)
+	if grpcServer != nil && modelStorage != nil {
+		grpcServer.SetModelStorage(modelStorage)
+		log.Info("Model storage service wired to gRPC server for model deployment")
 	}
 
 	// Create health check manager

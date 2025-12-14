@@ -28,13 +28,14 @@ user_vm_api:
     enabled: true
     provider: "s3"  # MinIO for PoC (using AWS Go SDK)
     provider_config:
-      endpoint: "http://minio:9000"
+      endpoint: "https://minio:9000"  # TLS enabled for zero-trust security
       # Each camera gets its own bucket: camera-{camera_id}
       bucket_prefix: "camera-"  # Buckets: camera-rtsp-192.168.1.100, camera-usb-usb-3-9, etc.
       region: "us-east-1"
       access_key_id: "minioadmin"
       secret_access_key: "minioadmin"
-      use_ssl: false
+      use_ssl: true  # TLS enabled for zero-trust security
+      ca_cert_path: "/etc/ssl/certs/ca.crt"  # CA certificate for TLS verification
     quota_gb_per_camera: 10  # Quota per camera bucket
     retention_days: 90
 

@@ -16,23 +16,24 @@ const (
 	DeploymentStatusPending   DeploymentStatus = "pending"
 	DeploymentStatusDeploying DeploymentStatus = "deploying"
 	DeploymentStatusDeployed  DeploymentStatus = "deployed"
+	DeploymentStatusActive    DeploymentStatus = "active" // Model loaded and active on Edge for camera inference
 	DeploymentStatusFailed    DeploymentStatus = "failed"
 )
 
 // DeploymentJob represents a model deployment job record
 type DeploymentJob struct {
-	DeploymentID         string           `json:"deployment_id"`
-	ModelID              string           `json:"model_id"`
-	EdgeID               string           `json:"edge_id"`
-	CameraID             *string          `json:"camera_id,omitempty"`
-	Status               DeploymentStatus  `json:"status"`
-	DeploymentStartedAt  *time.Time        `json:"deployment_started_at,omitempty"`
+	DeploymentID          string           `json:"deployment_id"`
+	ModelID               string           `json:"model_id"`
+	EdgeID                string           `json:"edge_id"`
+	CameraID              *string          `json:"camera_id,omitempty"`
+	Status                DeploymentStatus `json:"status"`
+	DeploymentStartedAt   *time.Time       `json:"deployment_started_at,omitempty"`
 	DeploymentCompletedAt *time.Time       `json:"deployment_completed_at,omitempty"`
-	ErrorMessage         *string           `json:"error_message,omitempty"`
-	ModelFilePath        *string           `json:"model_file_path,omitempty"`
-	DeploymentVersion    *string           `json:"deployment_version,omitempty"`
-	CreatedAt            time.Time         `json:"created_at"`
-	UpdatedAt            time.Time         `json:"updated_at"`
+	ErrorMessage          *string          `json:"error_message,omitempty"`
+	ModelFilePath         *string          `json:"model_file_path,omitempty"`
+	DeploymentVersion     *string          `json:"deployment_version,omitempty"`
+	CreatedAt             time.Time        `json:"created_at"`
+	UpdatedAt             time.Time        `json:"updated_at"`
 }
 
 // DeploymentStore manages deployment job storage in SQLite
@@ -420,4 +421,3 @@ type DeploymentFilters struct {
 	Limit    int
 	Offset   int
 }
-

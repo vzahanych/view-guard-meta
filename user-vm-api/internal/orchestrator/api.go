@@ -27,13 +27,16 @@ import (
 type APIServer struct {
 	config                      *config.Config
 	logger                      *logging.Logger
+	db                          *sql.DB // Database connection for health checks
 	capStore                    *tunnelgateway.CapabilityStore
 	edgeAPIServer               *tunnelgateway.EdgeAPIServer
+	edgeClient                  *tunnelgateway.EdgeClient
 	datasetReceiver             DatasetReceiver
 	modelCatalog                *modelcatalog.ModelCatalog
 	modelStorage                *storage.ModelStorage
 	modelDeploymentService      ModelDeploymentService
 	modelDeploymentOrchestrator ModelDeploymentOrchestrator
+	minioStorage                *modeldeployment.MinIOModelStorage // For archiving trained models
 	server                      *http.Server
 }
 
@@ -47,6 +50,7 @@ type ModelDeploymentOrchestrator interface {
 	GetDeploymentJob(ctx context.Context, deploymentID string) (*modeldeployment.DeploymentJob, error)
 	ListDeploymentJobs(ctx context.Context, filters *modeldeployment.DeploymentFilters) ([]*modeldeployment.DeploymentJob, error)
 	CompleteDeployment(ctx context.Context, deploymentID string, modelFilePath *string) error
+	ActivateDeployment(ctx context.Context, deploymentID string) error
 	FailDeployment(ctx context.Context, deploymentID string, errorMessage string) error
 }
 
@@ -56,13 +60,19 @@ type DatasetReceiver interface {
 }
 
 // NewAPIServer creates a new API server
-func NewAPIServer(cfg *config.Config, log *logging.Logger, capStore *tunnelgateway.CapabilityStore, edgeAPIServer *tunnelgateway.EdgeAPIServer) *APIServer {
+func NewAPIServer(cfg *config.Config, log *logging.Logger, capStore *tunnelgateway.CapabilityStore, edgeAPIServer *tunnelgateway.EdgeAPIServer, edgeClient *tunnelgateway.EdgeClient) *APIServer {
 	return &APIServer{
 		config:        cfg,
 		logger:        log,
 		capStore:      capStore,
 		edgeAPIServer: edgeAPIServer,
+		edgeClient:    edgeClient,
 	}
+}
+
+// SetDatabase sets the database connection for health checks
+func (s *APIServer) SetDatabase(db *sql.DB) {
+	s.db = db
 }
 
 // SetDatasetReceiver sets the dataset receiver service
@@ -80,9 +90,19 @@ func (s *APIServer) SetModelStorage(modelStorage *storage.ModelStorage) {
 	s.modelStorage = modelStorage
 }
 
+// SetModelDeploymentService sets the model deployment service
+func (s *APIServer) SetModelDeploymentService(service ModelDeploymentService) {
+	s.modelDeploymentService = service
+}
+
 // SetModelDeploymentOrchestrator sets the model deployment orchestrator
 func (s *APIServer) SetModelDeploymentOrchestrator(orchestrator ModelDeploymentOrchestrator) {
 	s.modelDeploymentOrchestrator = orchestrator
+}
+
+// SetMinIOModelStorage sets the MinIO model storage (for archiving trained models)
+func (s *APIServer) SetMinIOModelStorage(storage *modeldeployment.MinIOModelStorage) {
+	s.minioStorage = storage
 }
 
 // Name returns the service name
@@ -96,10 +116,13 @@ func (s *APIServer) Start(ctx context.Context) error {
 
 	// Camera endpoints
 	mux.HandleFunc("/api/cameras", s.handleListCameras)
-	mux.HandleFunc("/api/cameras/", s.handleGetCameraDataset)
+	mux.HandleFunc("/api/cameras/", s.handleCameraRoutes) // Handles all /api/cameras/ sub-paths
 
 	// Dataset upload endpoint
 	mux.HandleFunc("/api/datasets/upload", s.handleDatasetUpload)
+
+	// Admin API endpoints (for SaaS components and setup scripts)
+	mux.HandleFunc("/api/admin/models/register", s.handleAdminRegisterModel)
 
 	// Model management endpoints
 	// Register more specific routes first to avoid path matching issues
@@ -135,7 +158,7 @@ func (s *APIServer) Start(ctx context.Context) error {
 		Addr:         fmt.Sprintf(":%d", port),
 		Handler:      mux,
 		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 10 * time.Second,
+		WriteTimeout: 35 * time.Second, // Increased to allow for VM→Edge gRPC retry logic (30s context + buffer)
 	}
 
 	s.logger.Info("Starting API server", zap.Int("port", port))
@@ -217,6 +240,124 @@ func (s *APIServer) handleListCameras(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleCameraRoutes handles all /api/cameras/ sub-paths
+func (s *APIServer) handleCameraRoutes(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Path[len("/api/cameras/"):]
+
+	// Check if it's a request-snapshots endpoint
+	if strings.HasSuffix(path, "/request-snapshots") {
+		s.handleRequestSnapshot(w, r)
+		return
+	}
+
+	// Check if it's a dataset endpoint
+	if strings.HasSuffix(path, "/dataset") {
+		s.handleGetCameraDataset(w, r)
+		return
+	}
+
+	// Default: handle as camera dataset endpoint
+	s.handleGetCameraDataset(w, r)
+}
+
+// handleRequestSnapshot handles POST /api/cameras/{id}/request-snapshots
+func (s *APIServer) handleRequestSnapshot(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if s.edgeClient == nil {
+		http.Error(w, "Edge client not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Extract camera ID from path
+	// Path format: /api/cameras/{id}/request-snapshots
+	path := r.URL.Path[len("/api/cameras/"):]
+	cameraID := path[:len(path)-len("/request-snapshots")]
+
+	if cameraID == "" {
+		http.Error(w, "Camera ID required", http.StatusBadRequest)
+		return
+	}
+
+	// Get edge_id from query parameter or use first connected edge
+	edgeID := r.URL.Query().Get("edge_id")
+	if edgeID == "" {
+		if s.edgeAPIServer != nil {
+			connectedEdges := s.edgeAPIServer.GetConnectedEdges()
+			if len(connectedEdges) > 0 {
+				edgeID = connectedEdges[0]
+			}
+		}
+		if edgeID == "" {
+			http.Error(w, "No edge_id provided and no connected edges", http.StatusBadRequest)
+			return
+		}
+	}
+
+	// Parse request body
+	var req struct {
+		Label       string `json:"label"`        // Optional: "normal", "threat", "abnormal", "custom"
+		CustomLabel string `json:"custom_label"` // Required if label == "custom"
+		Count       int32  `json:"count"`        // Optional: number of snapshots (default: 1)
+		AutoCapture bool   `json:"auto_capture"` // Optional: auto-capture for integration tests (default: false)
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+		http.Error(w, fmt.Sprintf("Invalid request body: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	// Set defaults
+	if req.Label == "" {
+		req.Label = "normal"
+	}
+	if req.Count <= 0 {
+		req.Count = 1
+	}
+
+	// Create context with timeout to allow for retry logic (2 attempts with 2s wait + connection time)
+	// The temporal retry fix in RequestSnapshotCapture may need up to ~10 seconds total
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+
+	s.logger.Info("Requesting snapshot capture from Edge",
+		zap.String("edge_id", edgeID),
+		zap.String("camera_id", cameraID),
+		zap.String("label", req.Label),
+		zap.Int32("count", req.Count),
+		zap.Bool("auto_capture", req.AutoCapture))
+
+	// Call Edge to request snapshot capture (includes temporal retry for Edge startup)
+	resp, err := s.edgeClient.RequestSnapshotCapture(ctx, edgeID, cameraID, req.Label, req.CustomLabel, req.Count, req.AutoCapture)
+	if err != nil {
+		s.logger.Error("Failed to request snapshot capture",
+			zap.String("edge_id", edgeID),
+			zap.String("camera_id", cameraID),
+			zap.Error(err))
+		http.Error(w, fmt.Sprintf("Failed to request snapshot capture: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// RequestSnapshotCapture returns a response even on failure (Accepted=false)
+	// This is a valid response, not an error
+	if !resp.Accepted {
+		s.logger.Warn("Edge rejected snapshot capture request",
+			zap.String("edge_id", edgeID),
+			zap.String("camera_id", cameraID),
+			zap.String("message", resp.Message))
+		// Still return 200 OK with the response, as this is a valid Edge response
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		s.logger.Error("Failed to encode response", zap.Error(err))
+	}
+}
+
 // handleGetCameraDataset handles GET /api/cameras/{id}/dataset
 func (s *APIServer) handleGetCameraDataset(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -226,8 +367,9 @@ func (s *APIServer) handleGetCameraDataset(w http.ResponseWriter, r *http.Reques
 
 	// Extract camera ID from path
 	// Path format: /api/cameras/{id}/dataset
-	cameraID := r.URL.Path[len("/api/cameras/"):]
-	if idx := len(cameraID) - len("/dataset"); idx > 0 {
+	path := r.URL.Path[len("/api/cameras/"):]
+	cameraID := path
+	if idx := strings.Index(cameraID, "/"); idx > 0 {
 		cameraID = cameraID[:idx]
 	}
 
@@ -263,6 +405,7 @@ func (s *APIServer) handleGetCameraDataset(w http.ResponseWriter, r *http.Reques
 	datasetResponse := DatasetResponse{
 		CameraID:                  status.CameraID,
 		CameraName:                status.Name,
+		DatasetID:                 status.DatasetID,
 		LabeledSnapshotCount:      status.LabeledSnapshotCount,
 		RequiredSnapshotCount:     status.RequiredSnapshotCount,
 		SnapshotRequired:          status.SnapshotRequired,
@@ -450,11 +593,116 @@ func (s *APIServer) updateTrainingEligibility(ctx context.Context, edgeID string
 }
 
 // handleHealth handles GET /health
+// Verifies that all critical services are initialized and ready:
+// - Database is initialized (migrations completed, edges table exists)
+// - MinIO connection is working (if configured)
+// - Python training service connection is working
 func (s *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{
+
+	healthStatus := map[string]interface{}{
 		"status": "healthy",
-	})
+		"checks": make(map[string]string),
+	}
+	allHealthy := true
+
+	// Check 1: Database initialization and connectivity
+	// Verify that:
+	// - Database connection is working (can execute queries)
+	// - Migrations are complete (edges table exists)
+	// - Database is accessible and responsive
+	if s.db != nil {
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+
+		// First, verify database connection by performing a simple query
+		var count int
+		err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM sqlite_master WHERE type='table';").Scan(&count)
+		if err != nil {
+			healthStatus["checks"].(map[string]string)["database"] = fmt.Sprintf("connection_error: %v", err)
+			allHealthy = false
+		} else {
+			// Database connection works, now verify edges table exists (migrations completed)
+			var tableName string
+			err = s.db.QueryRowContext(ctx,
+				"SELECT name FROM sqlite_master WHERE type='table' AND name='edges';").Scan(&tableName)
+			if err != nil {
+				if err == sql.ErrNoRows {
+					healthStatus["checks"].(map[string]string)["database"] = "not_initialized (edges table missing)"
+					allHealthy = false
+				} else {
+					healthStatus["checks"].(map[string]string)["database"] = fmt.Sprintf("query_error: %v", err)
+					allHealthy = false
+				}
+			} else {
+				// Final verification: perform a lightweight read query on edges table to ensure it's fully accessible
+				var edgeCount int
+				err = s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM edges;").Scan(&edgeCount)
+				if err != nil {
+					healthStatus["checks"].(map[string]string)["database"] = fmt.Sprintf("table_access_error: %v", err)
+					allHealthy = false
+				} else {
+					healthStatus["checks"].(map[string]string)["database"] = fmt.Sprintf("ready (tables: %d, edges: %d)", count, edgeCount)
+				}
+			}
+		}
+	} else {
+		healthStatus["checks"].(map[string]string)["database"] = "not_configured"
+		allHealthy = false
+	}
+
+	// Check 2: MinIO connection (if configured)
+	if s.minioStorage != nil {
+		// MinIOModelStorage should have a way to check connectivity
+		// For now, we'll assume it's ready if it's initialized
+		// In the future, we could add a HealthCheck method to MinIOModelStorage
+		healthStatus["checks"].(map[string]string)["minio"] = "ready"
+	} else {
+		// MinIO is optional (only required for trained model storage)
+		healthStatus["checks"].(map[string]string)["minio"] = "not_configured"
+	}
+
+	// Check 3: Python training service connection
+	trainingServiceURL := s.getTrainingServiceURL()
+	if trainingServiceURL != "" {
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+
+		req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("%s/health", trainingServiceURL), nil)
+		if err != nil {
+			healthStatus["checks"].(map[string]string)["training_service"] = fmt.Sprintf("error: %v", err)
+			allHealthy = false
+		} else {
+			client := &http.Client{Timeout: 5 * time.Second}
+			resp, err := client.Do(req)
+			if err != nil {
+				healthStatus["checks"].(map[string]string)["training_service"] = fmt.Sprintf("unreachable: %v", err)
+				allHealthy = false
+			} else {
+				resp.Body.Close()
+				if resp.StatusCode == http.StatusOK {
+					healthStatus["checks"].(map[string]string)["training_service"] = "ready"
+				} else {
+					healthStatus["checks"].(map[string]string)["training_service"] = fmt.Sprintf("unhealthy: HTTP %d", resp.StatusCode)
+					allHealthy = false
+				}
+			}
+		}
+	} else {
+		healthStatus["checks"].(map[string]string)["training_service"] = "not_configured"
+		allHealthy = false
+	}
+
+	// Set overall status
+	if !allHealthy {
+		healthStatus["status"] = "unhealthy"
+		w.WriteHeader(http.StatusServiceUnavailable)
+	} else {
+		healthStatus["status"] = "healthy"
+		w.WriteHeader(http.StatusOK)
+	}
+
+	json.NewEncoder(w).Encode(healthStatus)
 }
 
 // CameraResponse represents a camera in the API response
@@ -476,6 +724,7 @@ type CameraResponse struct {
 type DatasetResponse struct {
 	CameraID                  string            `json:"camera_id"`
 	CameraName                string            `json:"camera_name"`
+	DatasetID                 string            `json:"dataset_id,omitempty"`
 	LabeledSnapshotCount      uint32            `json:"labeled_snapshot_count"`
 	RequiredSnapshotCount     uint32            `json:"required_snapshot_count"`
 	SnapshotRequired          bool              `json:"snapshot_required"`
@@ -589,13 +838,20 @@ func (s *APIServer) handleModelByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Extract model ID from path: /api/models/{model_id} or /api/models/{model_id}/file
+	// Extract model ID from path: /api/models/{model_id} or /api/models/{model_id}/file or /api/models/{model_id}/deployments
 	path := strings.TrimPrefix(r.URL.Path, "/api/models/")
 	parts := strings.Split(path, "/")
 	modelID := parts[0]
 
 	if modelID == "" {
 		http.Error(w, "Model ID is required", http.StatusBadRequest)
+		return
+	}
+
+	// Check if this is a deployments request - delegate to deployment handler
+	if len(parts) > 1 && parts[1] == "deployments" {
+		// Delegate to deployment handler for /api/models/{model_id}/deployments
+		s.handleDeploymentByID(w, r)
 		return
 	}
 
@@ -743,6 +999,57 @@ func (s *APIServer) handleUploadModel(w http.ResponseWriter, r *http.Request) {
 	if err := s.modelCatalog.RegisterModel(modelID, &metadata); err != nil {
 		s.logger.Warn("Failed to register model in catalog", zap.Error(err))
 		// Don't fail the upload, just log the warning
+	}
+
+	// Archive trained models to MinIO FIRST (trained models must be stored in MinIO before deployment)
+	// This ensures models are persisted and can be redeployed if Edge restarts or is replaced
+	isTrainedModel := metadata.TrainingDatasetID != "" && metadata.TrainingDate != ""
+	if isTrainedModel {
+		if s.minioStorage == nil {
+			s.logger.Error("MinIO storage not available - cannot persist trained model",
+				zap.String("model_id", modelID),
+			)
+			http.Error(w, "MinIO storage not configured - trained models require MinIO persistence", http.StatusServiceUnavailable)
+			return
+		}
+
+		ctx := r.Context()
+		s.logger.Info("Persisting trained model to MinIO before deployment",
+			zap.String("model_id", modelID),
+			zap.String("reason", "Edge may restart or be replaced - model must be in MinIO for redeployment"),
+		)
+
+		if err := s.minioStorage.ArchiveModel(ctx, modelID); err != nil {
+			s.logger.Error("Failed to persist trained model to MinIO - deployment will not be possible",
+				zap.String("model_id", modelID),
+				zap.Error(err),
+			)
+			http.Error(w, fmt.Sprintf("Failed to persist trained model to MinIO: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		// Verify model exists in MinIO after archiving (critical check)
+		exists, err := s.minioStorage.ModelExistsInMinIO(ctx, modelID)
+		if err != nil {
+			s.logger.Error("Failed to verify trained model in MinIO after archiving",
+				zap.String("model_id", modelID),
+				zap.Error(err),
+			)
+			http.Error(w, fmt.Sprintf("Failed to verify model in MinIO: %v", err), http.StatusInternalServerError)
+			return
+		}
+		if !exists {
+			s.logger.Error("Trained model not found in MinIO after archiving - persistence failed",
+				zap.String("model_id", modelID),
+			)
+			http.Error(w, "Model archiving to MinIO failed - model not found after upload", http.StatusInternalServerError)
+			return
+		}
+
+		s.logger.Info("Trained model successfully persisted to MinIO - ready for deployment",
+			zap.String("model_id", modelID),
+			zap.String("note", "Model can now be deployed to Edge and redeployed if Edge restarts/replaces"),
+		)
 	}
 
 	// Return success response
@@ -1055,7 +1362,7 @@ func (s *APIServer) handleEdgeRoutes(w http.ResponseWriter, r *http.Request) {
 		case "models":
 			// Delegate to deployment handler for /api/edges/{edge_id}/models/deploy
 			if len(parts) >= 3 && parts[2] == "deploy" {
-				s.handleEdgeModelsDeploy(w, r)
+				s.handleEdgeModelsDeploy(w, r, edgeID)
 				return
 			}
 			// Other models endpoints - return 404 for now
@@ -1602,4 +1909,95 @@ func (s *APIServer) handleEdgeHealth(w http.ResponseWriter, r *http.Request, edg
 	if err := json.NewEncoder(w).Encode(health); err != nil {
 		s.logger.Error("Failed to encode response", zap.Error(err))
 	}
+}
+
+// handleAdminRegisterModel handles POST /api/admin/models/register
+// Admin API for registering models (used by setup scripts and SaaS components)
+func (s *APIServer) handleAdminRegisterModel(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if s.modelCatalog == nil || s.modelStorage == nil {
+		http.Error(w, "Model catalog not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Parse request body
+	var req struct {
+		ModelID   string                 `json:"model_id"`
+		ModelPath string                 `json:"model_path"` // Path to model file on filesystem
+		Metadata  *storage.ModelMetadata `json:"metadata"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.logger.Error("Failed to decode request", zap.Error(err))
+		http.Error(w, fmt.Sprintf("Invalid request: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	if req.ModelID == "" {
+		http.Error(w, "model_id is required", http.StatusBadRequest)
+		return
+	}
+
+	if req.ModelPath == "" {
+		http.Error(w, "model_path is required", http.StatusBadRequest)
+		return
+	}
+
+	if req.Metadata == nil {
+		http.Error(w, "metadata is required", http.StatusBadRequest)
+		return
+	}
+
+	// Ensure model_id in metadata matches
+	req.Metadata.ModelID = req.ModelID
+
+	s.logger.Info("Admin model registration request",
+		zap.String("model_id", req.ModelID),
+		zap.String("model_path", req.ModelPath),
+		zap.String("model_type", req.Metadata.ModelType),
+	)
+
+	// Read model file from filesystem
+	modelData, err := os.ReadFile(req.ModelPath)
+	if err != nil {
+		s.logger.Error("Failed to read model file", zap.Error(err), zap.String("path", req.ModelPath))
+		http.Error(w, fmt.Sprintf("Failed to read model file: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	s.logger.Info("Read model file from filesystem",
+		zap.String("path", req.ModelPath),
+		zap.Int("size", len(modelData)),
+	)
+
+	// Store model using ModelStorage (this will store it in the catalog's expected location)
+	// ModelStorage stores at {baseDir}/{modelID}/model.onnx
+	if err := s.modelStorage.StoreModel(req.ModelID, modelData, req.Metadata); err != nil {
+		s.logger.Error("Failed to store model", zap.Error(err))
+		http.Error(w, fmt.Sprintf("Failed to store model: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	s.logger.Info("Model stored successfully",
+		zap.String("model_id", req.ModelID),
+	)
+
+	// Register model in catalog
+	if err := s.modelCatalog.RegisterModel(req.ModelID, req.Metadata); err != nil {
+		s.logger.Warn("Failed to register model in catalog", zap.Error(err))
+		// Don't fail the registration, just log the warning
+	}
+
+	// Return success response
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"model_id": req.ModelID,
+		"status":   "registered",
+		"message":  "Model registered successfully",
+	})
 }

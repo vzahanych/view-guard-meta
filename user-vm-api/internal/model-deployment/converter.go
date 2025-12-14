@@ -3,7 +3,7 @@ package modeldeployment
 import (
 	"fmt"
 
-	"github.com/vzahanych/view-guard-meta/user-vm-api/internal/model-catalog"
+	modelcatalog "github.com/vzahanych/view-guard-meta/user-vm-api/internal/model-catalog"
 	"github.com/vzahanych/view-guard-meta/user-vm-api/internal/shared/logging"
 	"github.com/vzahanych/view-guard-meta/user-vm-api/internal/shared/storage"
 	"go.uber.org/zap"
@@ -46,11 +46,11 @@ func NewModelConverter(
 
 // ValidationResult contains validation results
 type ValidationResult struct {
-	Valid      bool     `json:"valid"`
-	Errors     []string `json:"errors,omitempty"`
-	Warnings   []string `json:"warnings,omitempty"`
-	ModelSize  int64    `json:"model_size,omitempty"`
-	ModelFormat string  `json:"model_format,omitempty"`
+	Valid       bool     `json:"valid"`
+	Errors      []string `json:"errors,omitempty"`
+	Warnings    []string `json:"warnings,omitempty"`
+	ModelSize   int64    `json:"model_size,omitempty"`
+	ModelFormat string   `json:"model_format,omitempty"`
 }
 
 // PrepareModelForDeployment validates and prepares a model for Edge deployment
@@ -127,11 +127,10 @@ func (mc *ModelConverter) validateModelFormat(modelInfo *storage.ModelInfo, resu
 		return fmt.Errorf("ONNX file not specified in model metadata")
 	}
 
-	// Check if ONNX file exists
-	modelPath := mc.modelStorage.GetModelPath(modelInfo.ModelID)
-	onnxPath := fmt.Sprintf("%s/%s", modelPath, metadata.ONNXFile)
+	// Check if model file exists (ModelExists checks the ONNX file at GetModelFilePath)
 	if !mc.modelStorage.ModelExists(modelInfo.ModelID) {
-		return fmt.Errorf("ONNX file not found: %s", onnxPath)
+		modelFilePath := mc.modelStorage.GetModelFilePath(modelInfo.ModelID)
+		return fmt.Errorf("ONNX file not found: %s", modelFilePath)
 	}
 
 	return nil
@@ -194,7 +193,7 @@ func (mc *ModelConverter) validateModelMetadata(modelInfo *storage.ModelInfo, re
 		}
 	}
 
-	// Validate model type is supported
+	// Validate model type is supported (for Edge deployment)
 	supportedTypes := []string{"yolov8n", "yolo", "cae"}
 	isSupported := false
 	for _, t := range supportedTypes {
@@ -206,6 +205,20 @@ func (mc *ModelConverter) validateModelMetadata(modelInfo *storage.ModelInfo, re
 	if !isSupported {
 		result.Warnings = append(result.Warnings,
 			fmt.Sprintf("model type %s may not be fully supported on Edge (supported: %v)", metadata.ModelType, supportedTypes))
+	}
+
+	// Validate output classes information (if available in metadata)
+	// For YOLOv8 models, we expect class information for proper inference
+	if metadata.ModelType == "yolov8n" || metadata.ModelType == "yolo" {
+		// Check if preprocessing contains class information
+		if metadata.Preprocessing != nil {
+			if classes, ok := metadata.Preprocessing["classes"].([]interface{}); ok {
+				if len(classes) == 0 {
+					result.Warnings = append(result.Warnings,
+						"model preprocessing missing class definitions (may affect inference accuracy)")
+				}
+			}
+		}
 	}
 
 	return nil
@@ -243,4 +256,3 @@ func (mc *ModelConverter) QuantizeModel(modelID string, precision string) error 
 	// For PoC, return error indicating quantization is not implemented
 	return fmt.Errorf("model quantization is deferred to post-PoC")
 }
-

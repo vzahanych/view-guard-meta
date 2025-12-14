@@ -1,9 +1,12 @@
 package modelcatalog
 
 import (
+	"context"
 	"fmt"
 	"strings"
+	"time"
 
+	"github.com/vzahanych/view-guard-meta/user-vm-api/internal/shared/database"
 	"github.com/vzahanych/view-guard-meta/user-vm-api/internal/shared/storage"
 )
 
@@ -22,10 +25,11 @@ const (
 type ModelCatalog struct {
 	modelStorage *storage.ModelStorage
 	baseDir      string
+	db           *database.DB // Database for ai_models table (for foreign key constraints)
 }
 
 // NewModelCatalog creates a new model catalog
-func NewModelCatalog(modelStorage *storage.ModelStorage, baseDir string) (*ModelCatalog, error) {
+func NewModelCatalog(modelStorage *storage.ModelStorage, baseDir string, db *database.DB) (*ModelCatalog, error) {
 	if modelStorage == nil {
 		return nil, fmt.Errorf("model storage is required")
 	}
@@ -36,6 +40,7 @@ func NewModelCatalog(modelStorage *storage.ModelStorage, baseDir string) (*Model
 	return &ModelCatalog{
 		modelStorage: modelStorage,
 		baseDir:      baseDir,
+		db:           db,
 	}, nil
 }
 
@@ -67,9 +72,92 @@ func (mc *ModelCatalog) RegisterModel(modelID string, metadata *storage.ModelMet
 		return fmt.Errorf("model %s does not exist in storage", modelID)
 	}
 
-	// Model is already registered if it exists in storage and has metadata
-	// The catalog indexes models by scanning the filesystem
-	// No additional registration step needed - models are auto-indexed
+	// Insert or update model in ai_models table (required for foreign key constraints in model_deployments)
+	if mc.db != nil {
+		ctx := context.Background()
+		now := time.Now().Unix()
+		
+		// Get model paths
+		modelPath := mc.modelStorage.GetModelPath(modelID)
+		modelFilePath := fmt.Sprintf("%s/model.onnx", modelPath)
+		metadataFilePath := fmt.Sprintf("%s/metadata.json", modelPath)
+		
+		// Determine model name (use model_id if name not available)
+		modelName := modelID
+		if metadata.ModelID != "" {
+			modelName = metadata.ModelID
+		}
+		
+		// Determine model type
+		modelType := metadata.ModelType
+		if modelType == "" {
+			modelType = "yolo" // Default
+		}
+		
+		// Determine version
+		version := metadata.Version
+		if version == "" {
+			version = "1.0"
+		}
+		
+		// Determine status
+		status := "ready"
+		if strings.HasPrefix(modelID, "baseline-") {
+			status = "baseline"
+		} else if metadata.TrainingDatasetID != "" && metadata.TrainingDate == "" {
+			status = "training"
+		} else if metadata.TrainingDatasetID != "" && metadata.TrainingDate != "" {
+			status = "ready"
+		}
+		
+		// Insert or update in ai_models table (ON CONFLICT updates existing)
+		query := `
+			INSERT INTO ai_models (
+				model_id, name, version, type, base_model, training_dataset_id,
+				model_file_path, metadata_file_path, status, created_at, updated_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(model_id) DO UPDATE SET
+				name = excluded.name,
+				version = excluded.version,
+				type = excluded.type,
+				base_model = excluded.base_model,
+				training_dataset_id = excluded.training_dataset_id,
+				model_file_path = excluded.model_file_path,
+				metadata_file_path = excluded.metadata_file_path,
+				status = excluded.status,
+				updated_at = excluded.updated_at
+		`
+		
+		var baseModel interface{}
+		if metadata.ModelID != "" && !strings.HasPrefix(modelID, "baseline-") {
+			// Extract baseline model ID from metadata if available
+			baseModel = "baseline-yolov8n" // Default, could be extracted from metadata
+		}
+		
+		var trainingDatasetID interface{}
+		if metadata.TrainingDatasetID != "" {
+			trainingDatasetID = metadata.TrainingDatasetID
+		}
+		
+		_, err := mc.db.ExecContext(ctx, query,
+			modelID,
+			modelName,
+			version,
+			modelType,
+			baseModel,
+			trainingDatasetID,
+			modelFilePath,
+			metadataFilePath,
+			status,
+			now,
+			now,
+		)
+		if err != nil {
+			return fmt.Errorf("failed to register model in ai_models table: %w", err)
+		}
+	}
+
+	// Model is now registered in both storage and database
 	return nil
 }
 

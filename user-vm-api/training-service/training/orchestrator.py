@@ -430,32 +430,33 @@ class TrainingOrchestrator:
             # Step 6: Save trained model to ONNX format
             logger.info(f"[Job {job.job_id}] Step 6: Exporting trained model to ONNX")
             trained_model_id = f"{job.baseline_model_id}-{job.dataset_id}-{datetime.now().strftime('%Y%m%d%H%M%S')}"
-            model_output_dir = config.get_model_path(trained_model_id)
-            os.makedirs(model_output_dir, exist_ok=True)
             
-            # Export to ONNX
-            onnx_path = os.path.join(model_output_dir, "model.onnx")
+            # Export to ONNX (Ultralytics saves it in the training output directory)
             model.export(format="onnx", imgsz=job.training_config.image_size)
             
             # Find the exported ONNX file (Ultralytics saves it in the training output directory)
             training_output_dir = os.path.join(config.TRAINING_OUTPUT_DIR, job.job_id, "train", "weights")
             exported_onnx = os.path.join(training_output_dir, "best.onnx")
             
-            if os.path.exists(exported_onnx):
-                shutil.copy2(exported_onnx, onnx_path)
-                logger.info(f"[Job {job.job_id}] Model exported to {onnx_path}")
-            else:
+            if not os.path.exists(exported_onnx):
                 # Try to find any .onnx file in the weights directory
                 weights_dir = Path(training_output_dir)
                 onnx_files = list(weights_dir.glob("*.onnx"))
                 if onnx_files:
-                    shutil.copy2(str(onnx_files[0]), onnx_path)
-                    logger.info(f"[Job {job.job_id}] Model exported to {onnx_path}")
+                    exported_onnx = str(onnx_files[0])
                 else:
                     raise ValueError(f"Exported ONNX file not found in {training_output_dir}")
             
+            # Save trained model to a writable location (training output directory)
+            # The shared models directory is read-only, so we'll store it in the training output
+            writable_model_dir = os.path.join(config.TRAINING_OUTPUT_DIR, job.job_id, "model")
+            os.makedirs(writable_model_dir, exist_ok=True)
+            onnx_path = os.path.join(writable_model_dir, "model.onnx")
+            shutil.copy2(exported_onnx, onnx_path)
+            logger.info(f"[Job {job.job_id}] Model exported to {onnx_path}")
+            
             job.trained_model_id = trained_model_id
-            job._output_dir = model_output_dir
+            job._output_dir = writable_model_dir
             
             # Step 7: Generate model metadata and register in catalog
             logger.info(f"[Job {job.job_id}] Step 7: Generating model metadata and registering in catalog")

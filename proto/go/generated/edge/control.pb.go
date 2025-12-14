@@ -530,6 +530,453 @@ func (x *SyncCapabilitiesResponse) GetErrorMessage() string {
 	return ""
 }
 
+// RequestSnapshotCaptureRequest requests Edge to capture labeled snapshots
+type RequestSnapshotCaptureRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	CameraId      string                 `protobuf:"bytes,1,opt,name=camera_id,json=cameraId,proto3" json:"camera_id,omitempty"`           // Camera to capture from (required)
+	Label         string                 `protobuf:"bytes,2,opt,name=label,proto3" json:"label,omitempty"`                                 // Label to apply: "normal", "threat", "abnormal", "custom" (optional, default: "normal")
+	CustomLabel   string                 `protobuf:"bytes,3,opt,name=custom_label,json=customLabel,proto3" json:"custom_label,omitempty"`  // Required if label == "custom"
+	Count         int32                  `protobuf:"varint,4,opt,name=count,proto3" json:"count,omitempty"`                                // Number of snapshots to capture (optional, default: 1)
+	AutoCapture   bool                   `protobuf:"varint,5,opt,name=auto_capture,json=autoCapture,proto3" json:"auto_capture,omitempty"` // If true, Edge auto-captures without user interaction (for integration tests)
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RequestSnapshotCaptureRequest) Reset() {
+	*x = RequestSnapshotCaptureRequest{}
+	mi := &file_edge_control_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RequestSnapshotCaptureRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RequestSnapshotCaptureRequest) ProtoMessage() {}
+
+func (x *RequestSnapshotCaptureRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_edge_control_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RequestSnapshotCaptureRequest.ProtoReflect.Descriptor instead.
+func (*RequestSnapshotCaptureRequest) Descriptor() ([]byte, []int) {
+	return file_edge_control_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *RequestSnapshotCaptureRequest) GetCameraId() string {
+	if x != nil {
+		return x.CameraId
+	}
+	return ""
+}
+
+func (x *RequestSnapshotCaptureRequest) GetLabel() string {
+	if x != nil {
+		return x.Label
+	}
+	return ""
+}
+
+func (x *RequestSnapshotCaptureRequest) GetCustomLabel() string {
+	if x != nil {
+		return x.CustomLabel
+	}
+	return ""
+}
+
+func (x *RequestSnapshotCaptureRequest) GetCount() int32 {
+	if x != nil {
+		return x.Count
+	}
+	return 0
+}
+
+func (x *RequestSnapshotCaptureRequest) GetAutoCapture() bool {
+	if x != nil {
+		return x.AutoCapture
+	}
+	return false
+}
+
+// RequestSnapshotCaptureResponse contains the result of snapshot capture request
+type RequestSnapshotCaptureResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Accepted      bool                   `protobuf:"varint,1,opt,name=accepted,proto3" json:"accepted,omitempty"`                         // Whether request was accepted
+	Message       string                 `protobuf:"bytes,2,opt,name=message,proto3" json:"message,omitempty"`                            // Status message
+	SnapshotIds   []string               `protobuf:"bytes,3,rep,name=snapshot_ids,json=snapshotIds,proto3" json:"snapshot_ids,omitempty"` // If auto_capture=true, returns captured snapshot IDs
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RequestSnapshotCaptureResponse) Reset() {
+	*x = RequestSnapshotCaptureResponse{}
+	mi := &file_edge_control_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RequestSnapshotCaptureResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RequestSnapshotCaptureResponse) ProtoMessage() {}
+
+func (x *RequestSnapshotCaptureResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_edge_control_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RequestSnapshotCaptureResponse.ProtoReflect.Descriptor instead.
+func (*RequestSnapshotCaptureResponse) Descriptor() ([]byte, []int) {
+	return file_edge_control_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *RequestSnapshotCaptureResponse) GetAccepted() bool {
+	if x != nil {
+		return x.Accepted
+	}
+	return false
+}
+
+func (x *RequestSnapshotCaptureResponse) GetMessage() string {
+	if x != nil {
+		return x.Message
+	}
+	return ""
+}
+
+func (x *RequestSnapshotCaptureResponse) GetSnapshotIds() []string {
+	if x != nil {
+		return x.SnapshotIds
+	}
+	return nil
+}
+
+// DeployModelChunk contains a chunk of model data or metadata (server-side streaming: VM → Edge)
+type DeployModelChunk struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Types that are valid to be assigned to Payload:
+	//
+	//	*DeployModelChunk_Header
+	//	*DeployModelChunk_Data
+	Payload       isDeployModelChunk_Payload `protobuf_oneof:"payload"`
+	Offset        int64                      `protobuf:"varint,3,opt,name=offset,proto3" json:"offset,omitempty"`                                // Byte offset in the model file
+	Eof           bool                       `protobuf:"varint,4,opt,name=eof,proto3" json:"eof,omitempty"`                                      // End of file flag
+	ErrorMessage  string                     `protobuf:"bytes,5,opt,name=error_message,json=errorMessage,proto3" json:"error_message,omitempty"` // Error message if transfer failed
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeployModelChunk) Reset() {
+	*x = DeployModelChunk{}
+	mi := &file_edge_control_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeployModelChunk) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeployModelChunk) ProtoMessage() {}
+
+func (x *DeployModelChunk) ProtoReflect() protoreflect.Message {
+	mi := &file_edge_control_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeployModelChunk.ProtoReflect.Descriptor instead.
+func (*DeployModelChunk) Descriptor() ([]byte, []int) {
+	return file_edge_control_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *DeployModelChunk) GetPayload() isDeployModelChunk_Payload {
+	if x != nil {
+		return x.Payload
+	}
+	return nil
+}
+
+func (x *DeployModelChunk) GetHeader() *DeployModelHeader {
+	if x != nil {
+		if x, ok := x.Payload.(*DeployModelChunk_Header); ok {
+			return x.Header
+		}
+	}
+	return nil
+}
+
+func (x *DeployModelChunk) GetData() []byte {
+	if x != nil {
+		if x, ok := x.Payload.(*DeployModelChunk_Data); ok {
+			return x.Data
+		}
+	}
+	return nil
+}
+
+func (x *DeployModelChunk) GetOffset() int64 {
+	if x != nil {
+		return x.Offset
+	}
+	return 0
+}
+
+func (x *DeployModelChunk) GetEof() bool {
+	if x != nil {
+		return x.Eof
+	}
+	return false
+}
+
+func (x *DeployModelChunk) GetErrorMessage() string {
+	if x != nil {
+		return x.ErrorMessage
+	}
+	return ""
+}
+
+type isDeployModelChunk_Payload interface {
+	isDeployModelChunk_Payload()
+}
+
+type DeployModelChunk_Header struct {
+	Header *DeployModelHeader `protobuf:"bytes,1,opt,name=header,proto3,oneof"` // First chunk: header with metadata
+}
+
+type DeployModelChunk_Data struct {
+	Data []byte `protobuf:"bytes,2,opt,name=data,proto3,oneof"` // Subsequent chunks: model file data
+}
+
+func (*DeployModelChunk_Header) isDeployModelChunk_Payload() {}
+
+func (*DeployModelChunk_Data) isDeployModelChunk_Payload() {}
+
+// DeployModelHeader contains metadata for the model deployment
+type DeployModelHeader struct {
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	DeploymentId      string                 `protobuf:"bytes,1,opt,name=deployment_id,json=deploymentId,proto3" json:"deployment_id,omitempty"`                                                          // Deployment ID for tracking
+	ModelId           string                 `protobuf:"bytes,2,opt,name=model_id,json=modelId,proto3" json:"model_id,omitempty"`                                                                         // Model ID
+	Version           string                 `protobuf:"bytes,3,opt,name=version,proto3" json:"version,omitempty"`                                                                                        // Model version
+	ModelType         string                 `protobuf:"bytes,4,opt,name=model_type,json=modelType,proto3" json:"model_type,omitempty"`                                                                   // Model type (yolo, cae, etc.)
+	CameraId          string                 `protobuf:"bytes,5,opt,name=camera_id,json=cameraId,proto3" json:"camera_id,omitempty"`                                                                      // Target camera ID (required for camera-specific deployment)
+	Framework         string                 `protobuf:"bytes,6,opt,name=framework,proto3" json:"framework,omitempty"`                                                                                    // Framework (onnx, openvino, etc.)
+	TrainingDatasetId string                 `protobuf:"bytes,7,opt,name=training_dataset_id,json=trainingDatasetId,proto3" json:"training_dataset_id,omitempty"`                                         // Training dataset ID (if trained model)
+	TrainingDate      string                 `protobuf:"bytes,8,opt,name=training_date,json=trainingDate,proto3" json:"training_date,omitempty"`                                                          // Training date
+	InputShape        []int32                `protobuf:"varint,9,rep,packed,name=input_shape,json=inputShape,proto3" json:"input_shape,omitempty"`                                                        // Input shape (e.g., [1, 3, 640, 640])
+	Preprocessing     map[string]string      `protobuf:"bytes,10,rep,name=preprocessing,proto3" json:"preprocessing,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"` // Preprocessing configuration (JSON-encoded values)
+	MetadataJson      string                 `protobuf:"bytes,11,opt,name=metadata_json,json=metadataJson,proto3" json:"metadata_json,omitempty"`                                                         // Full metadata JSON for Edge reference
+	TotalSize         uint64                 `protobuf:"varint,12,opt,name=total_size,json=totalSize,proto3" json:"total_size,omitempty"`                                                                 // Total size of the model file in bytes
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *DeployModelHeader) Reset() {
+	*x = DeployModelHeader{}
+	mi := &file_edge_control_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeployModelHeader) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeployModelHeader) ProtoMessage() {}
+
+func (x *DeployModelHeader) ProtoReflect() protoreflect.Message {
+	mi := &file_edge_control_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeployModelHeader.ProtoReflect.Descriptor instead.
+func (*DeployModelHeader) Descriptor() ([]byte, []int) {
+	return file_edge_control_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *DeployModelHeader) GetDeploymentId() string {
+	if x != nil {
+		return x.DeploymentId
+	}
+	return ""
+}
+
+func (x *DeployModelHeader) GetModelId() string {
+	if x != nil {
+		return x.ModelId
+	}
+	return ""
+}
+
+func (x *DeployModelHeader) GetVersion() string {
+	if x != nil {
+		return x.Version
+	}
+	return ""
+}
+
+func (x *DeployModelHeader) GetModelType() string {
+	if x != nil {
+		return x.ModelType
+	}
+	return ""
+}
+
+func (x *DeployModelHeader) GetCameraId() string {
+	if x != nil {
+		return x.CameraId
+	}
+	return ""
+}
+
+func (x *DeployModelHeader) GetFramework() string {
+	if x != nil {
+		return x.Framework
+	}
+	return ""
+}
+
+func (x *DeployModelHeader) GetTrainingDatasetId() string {
+	if x != nil {
+		return x.TrainingDatasetId
+	}
+	return ""
+}
+
+func (x *DeployModelHeader) GetTrainingDate() string {
+	if x != nil {
+		return x.TrainingDate
+	}
+	return ""
+}
+
+func (x *DeployModelHeader) GetInputShape() []int32 {
+	if x != nil {
+		return x.InputShape
+	}
+	return nil
+}
+
+func (x *DeployModelHeader) GetPreprocessing() map[string]string {
+	if x != nil {
+		return x.Preprocessing
+	}
+	return nil
+}
+
+func (x *DeployModelHeader) GetMetadataJson() string {
+	if x != nil {
+		return x.MetadataJson
+	}
+	return ""
+}
+
+func (x *DeployModelHeader) GetTotalSize() uint64 {
+	if x != nil {
+		return x.TotalSize
+	}
+	return 0
+}
+
+// DeployModelResponse contains the result of model deployment
+type DeployModelResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Success       bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
+	ModelFilePath string                 `protobuf:"bytes,2,opt,name=model_file_path,json=modelFilePath,proto3" json:"model_file_path,omitempty"` // Path to deployed model file on Edge
+	Message       string                 `protobuf:"bytes,3,opt,name=message,proto3" json:"message,omitempty"`                                    // Status message
+	ErrorMessage  string                 `protobuf:"bytes,4,opt,name=error_message,json=errorMessage,proto3" json:"error_message,omitempty"`      // Error message if deployment failed
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeployModelResponse) Reset() {
+	*x = DeployModelResponse{}
+	mi := &file_edge_control_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeployModelResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeployModelResponse) ProtoMessage() {}
+
+func (x *DeployModelResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_edge_control_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeployModelResponse.ProtoReflect.Descriptor instead.
+func (*DeployModelResponse) Descriptor() ([]byte, []int) {
+	return file_edge_control_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *DeployModelResponse) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
+func (x *DeployModelResponse) GetModelFilePath() string {
+	if x != nil {
+		return x.ModelFilePath
+	}
+	return ""
+}
+
+func (x *DeployModelResponse) GetMessage() string {
+	if x != nil {
+		return x.Message
+	}
+	return ""
+}
+
+func (x *DeployModelResponse) GetErrorMessage() string {
+	if x != nil {
+		return x.ErrorMessage
+	}
+	return ""
+}
+
 var File_edge_control_proto protoreflect.FileDescriptor
 
 const file_edge_control_proto_rawDesc = "" +
@@ -570,12 +1017,56 @@ const file_edge_control_proto_rawDesc = "" +
 	"\x05value\x18\x02 \x01(\rR\x05value:\x028\x01\"Y\n" +
 	"\x18SyncCapabilitiesResponse\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12#\n" +
-	"\rerror_message\x18\x02 \x01(\tR\ferrorMessage2\xf5\x02\n" +
+	"\rerror_message\x18\x02 \x01(\tR\ferrorMessage\"\xae\x01\n" +
+	"\x1dRequestSnapshotCaptureRequest\x12\x1b\n" +
+	"\tcamera_id\x18\x01 \x01(\tR\bcameraId\x12\x14\n" +
+	"\x05label\x18\x02 \x01(\tR\x05label\x12!\n" +
+	"\fcustom_label\x18\x03 \x01(\tR\vcustomLabel\x12\x14\n" +
+	"\x05count\x18\x04 \x01(\x05R\x05count\x12!\n" +
+	"\fauto_capture\x18\x05 \x01(\bR\vautoCapture\"y\n" +
+	"\x1eRequestSnapshotCaptureResponse\x12\x1a\n" +
+	"\baccepted\x18\x01 \x01(\bR\baccepted\x12\x18\n" +
+	"\amessage\x18\x02 \x01(\tR\amessage\x12!\n" +
+	"\fsnapshot_ids\x18\x03 \x03(\tR\vsnapshotIds\"\xbd\x01\n" +
+	"\x10DeployModelChunk\x129\n" +
+	"\x06header\x18\x01 \x01(\v2\x1f.edge.control.DeployModelHeaderH\x00R\x06header\x12\x14\n" +
+	"\x04data\x18\x02 \x01(\fH\x00R\x04data\x12\x16\n" +
+	"\x06offset\x18\x03 \x01(\x03R\x06offset\x12\x10\n" +
+	"\x03eof\x18\x04 \x01(\bR\x03eof\x12#\n" +
+	"\rerror_message\x18\x05 \x01(\tR\ferrorMessageB\t\n" +
+	"\apayload\"\x9d\x04\n" +
+	"\x11DeployModelHeader\x12#\n" +
+	"\rdeployment_id\x18\x01 \x01(\tR\fdeploymentId\x12\x19\n" +
+	"\bmodel_id\x18\x02 \x01(\tR\amodelId\x12\x18\n" +
+	"\aversion\x18\x03 \x01(\tR\aversion\x12\x1d\n" +
+	"\n" +
+	"model_type\x18\x04 \x01(\tR\tmodelType\x12\x1b\n" +
+	"\tcamera_id\x18\x05 \x01(\tR\bcameraId\x12\x1c\n" +
+	"\tframework\x18\x06 \x01(\tR\tframework\x12.\n" +
+	"\x13training_dataset_id\x18\a \x01(\tR\x11trainingDatasetId\x12#\n" +
+	"\rtraining_date\x18\b \x01(\tR\ftrainingDate\x12\x1f\n" +
+	"\vinput_shape\x18\t \x03(\x05R\n" +
+	"inputShape\x12X\n" +
+	"\rpreprocessing\x18\n" +
+	" \x03(\v22.edge.control.DeployModelHeader.PreprocessingEntryR\rpreprocessing\x12#\n" +
+	"\rmetadata_json\x18\v \x01(\tR\fmetadataJson\x12\x1d\n" +
+	"\n" +
+	"total_size\x18\f \x01(\x04R\ttotalSize\x1a@\n" +
+	"\x12PreprocessingEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x96\x01\n" +
+	"\x13DeployModelResponse\x12\x18\n" +
+	"\asuccess\x18\x01 \x01(\bR\asuccess\x12&\n" +
+	"\x0fmodel_file_path\x18\x02 \x01(\tR\rmodelFilePath\x12\x18\n" +
+	"\amessage\x18\x03 \x01(\tR\amessage\x12#\n" +
+	"\rerror_message\x18\x04 \x01(\tR\ferrorMessage2\xbe\x04\n" +
 	"\x0eControlService\x12L\n" +
 	"\tGetConfig\x12\x1e.edge.control.GetConfigRequest\x1a\x1f.edge.control.GetConfigResponse\x12U\n" +
 	"\fUpdateConfig\x12!.edge.control.UpdateConfigRequest\x1a\".edge.control.UpdateConfigResponse\x12[\n" +
 	"\x0eRestartService\x12#.edge.control.RestartServiceRequest\x1a$.edge.control.RestartServiceResponse\x12a\n" +
-	"\x10SyncCapabilities\x12%.edge.control.SyncCapabilitiesRequest\x1a&.edge.control.SyncCapabilitiesResponseB>Z<github.com/vzahanych/view-guard-meta/proto/go/generated/edgeb\x06proto3"
+	"\x10SyncCapabilities\x12%.edge.control.SyncCapabilitiesRequest\x1a&.edge.control.SyncCapabilitiesResponse\x12s\n" +
+	"\x16RequestSnapshotCapture\x12+.edge.control.RequestSnapshotCaptureRequest\x1a,.edge.control.RequestSnapshotCaptureResponse\x12R\n" +
+	"\vDeployModel\x12\x1e.edge.control.DeployModelChunk\x1a!.edge.control.DeployModelResponse(\x01B>Z<github.com/vzahanych/view-guard-meta/proto/go/generated/edgeb\x06proto3"
 
 var (
 	file_edge_control_proto_rawDescOnce sync.Once
@@ -589,35 +1080,47 @@ func file_edge_control_proto_rawDescGZIP() []byte {
 	return file_edge_control_proto_rawDescData
 }
 
-var file_edge_control_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
+var file_edge_control_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
 var file_edge_control_proto_goTypes = []any{
-	(*GetConfigRequest)(nil),         // 0: edge.control.GetConfigRequest
-	(*GetConfigResponse)(nil),        // 1: edge.control.GetConfigResponse
-	(*UpdateConfigRequest)(nil),      // 2: edge.control.UpdateConfigRequest
-	(*UpdateConfigResponse)(nil),     // 3: edge.control.UpdateConfigResponse
-	(*RestartServiceRequest)(nil),    // 4: edge.control.RestartServiceRequest
-	(*RestartServiceResponse)(nil),   // 5: edge.control.RestartServiceResponse
-	(*SyncCapabilitiesRequest)(nil),  // 6: edge.control.SyncCapabilitiesRequest
-	(*CameraCapability)(nil),         // 7: edge.control.CameraCapability
-	(*SyncCapabilitiesResponse)(nil), // 8: edge.control.SyncCapabilitiesResponse
-	nil,                              // 9: edge.control.CameraCapability.LabelCountsEntry
+	(*GetConfigRequest)(nil),               // 0: edge.control.GetConfigRequest
+	(*GetConfigResponse)(nil),              // 1: edge.control.GetConfigResponse
+	(*UpdateConfigRequest)(nil),            // 2: edge.control.UpdateConfigRequest
+	(*UpdateConfigResponse)(nil),           // 3: edge.control.UpdateConfigResponse
+	(*RestartServiceRequest)(nil),          // 4: edge.control.RestartServiceRequest
+	(*RestartServiceResponse)(nil),         // 5: edge.control.RestartServiceResponse
+	(*SyncCapabilitiesRequest)(nil),        // 6: edge.control.SyncCapabilitiesRequest
+	(*CameraCapability)(nil),               // 7: edge.control.CameraCapability
+	(*SyncCapabilitiesResponse)(nil),       // 8: edge.control.SyncCapabilitiesResponse
+	(*RequestSnapshotCaptureRequest)(nil),  // 9: edge.control.RequestSnapshotCaptureRequest
+	(*RequestSnapshotCaptureResponse)(nil), // 10: edge.control.RequestSnapshotCaptureResponse
+	(*DeployModelChunk)(nil),               // 11: edge.control.DeployModelChunk
+	(*DeployModelHeader)(nil),              // 12: edge.control.DeployModelHeader
+	(*DeployModelResponse)(nil),            // 13: edge.control.DeployModelResponse
+	nil,                                    // 14: edge.control.CameraCapability.LabelCountsEntry
+	nil,                                    // 15: edge.control.DeployModelHeader.PreprocessingEntry
 }
 var file_edge_control_proto_depIdxs = []int32{
-	7, // 0: edge.control.SyncCapabilitiesRequest.cameras:type_name -> edge.control.CameraCapability
-	9, // 1: edge.control.CameraCapability.label_counts:type_name -> edge.control.CameraCapability.LabelCountsEntry
-	0, // 2: edge.control.ControlService.GetConfig:input_type -> edge.control.GetConfigRequest
-	2, // 3: edge.control.ControlService.UpdateConfig:input_type -> edge.control.UpdateConfigRequest
-	4, // 4: edge.control.ControlService.RestartService:input_type -> edge.control.RestartServiceRequest
-	6, // 5: edge.control.ControlService.SyncCapabilities:input_type -> edge.control.SyncCapabilitiesRequest
-	1, // 6: edge.control.ControlService.GetConfig:output_type -> edge.control.GetConfigResponse
-	3, // 7: edge.control.ControlService.UpdateConfig:output_type -> edge.control.UpdateConfigResponse
-	5, // 8: edge.control.ControlService.RestartService:output_type -> edge.control.RestartServiceResponse
-	8, // 9: edge.control.ControlService.SyncCapabilities:output_type -> edge.control.SyncCapabilitiesResponse
-	6, // [6:10] is the sub-list for method output_type
-	2, // [2:6] is the sub-list for method input_type
-	2, // [2:2] is the sub-list for extension type_name
-	2, // [2:2] is the sub-list for extension extendee
-	0, // [0:2] is the sub-list for field type_name
+	7,  // 0: edge.control.SyncCapabilitiesRequest.cameras:type_name -> edge.control.CameraCapability
+	14, // 1: edge.control.CameraCapability.label_counts:type_name -> edge.control.CameraCapability.LabelCountsEntry
+	12, // 2: edge.control.DeployModelChunk.header:type_name -> edge.control.DeployModelHeader
+	15, // 3: edge.control.DeployModelHeader.preprocessing:type_name -> edge.control.DeployModelHeader.PreprocessingEntry
+	0,  // 4: edge.control.ControlService.GetConfig:input_type -> edge.control.GetConfigRequest
+	2,  // 5: edge.control.ControlService.UpdateConfig:input_type -> edge.control.UpdateConfigRequest
+	4,  // 6: edge.control.ControlService.RestartService:input_type -> edge.control.RestartServiceRequest
+	6,  // 7: edge.control.ControlService.SyncCapabilities:input_type -> edge.control.SyncCapabilitiesRequest
+	9,  // 8: edge.control.ControlService.RequestSnapshotCapture:input_type -> edge.control.RequestSnapshotCaptureRequest
+	11, // 9: edge.control.ControlService.DeployModel:input_type -> edge.control.DeployModelChunk
+	1,  // 10: edge.control.ControlService.GetConfig:output_type -> edge.control.GetConfigResponse
+	3,  // 11: edge.control.ControlService.UpdateConfig:output_type -> edge.control.UpdateConfigResponse
+	5,  // 12: edge.control.ControlService.RestartService:output_type -> edge.control.RestartServiceResponse
+	8,  // 13: edge.control.ControlService.SyncCapabilities:output_type -> edge.control.SyncCapabilitiesResponse
+	10, // 14: edge.control.ControlService.RequestSnapshotCapture:output_type -> edge.control.RequestSnapshotCaptureResponse
+	13, // 15: edge.control.ControlService.DeployModel:output_type -> edge.control.DeployModelResponse
+	10, // [10:16] is the sub-list for method output_type
+	4,  // [4:10] is the sub-list for method input_type
+	4,  // [4:4] is the sub-list for extension type_name
+	4,  // [4:4] is the sub-list for extension extendee
+	0,  // [0:4] is the sub-list for field type_name
 }
 
 func init() { file_edge_control_proto_init() }
@@ -625,13 +1128,17 @@ func file_edge_control_proto_init() {
 	if File_edge_control_proto != nil {
 		return
 	}
+	file_edge_control_proto_msgTypes[11].OneofWrappers = []any{
+		(*DeployModelChunk_Header)(nil),
+		(*DeployModelChunk_Data)(nil),
+	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_edge_control_proto_rawDesc), len(file_edge_control_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   10,
+			NumMessages:   16,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

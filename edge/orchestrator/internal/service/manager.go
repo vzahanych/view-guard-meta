@@ -55,11 +55,11 @@ func (m *Manager) Register(svc Service) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.services = append(m.services, svc)
-	
+
 	// Initialize status tracking
 	status := NewServiceStatus(svc.Name())
 	m.statuses[svc.Name()] = status
-	
+
 	// Set event bus if service supports it
 	if svcWithEvents, ok := svc.(ServiceWithEvents); ok {
 		svcWithEvents.SetEventBus(m.eventBus)
@@ -76,17 +76,20 @@ func (m *Manager) Start(ctx context.Context, cfg *config.Config) error {
 	// Start event bus monitoring
 	m.startEventMonitoring(ctx)
 
+	// Channel to collect errors from critical services
+	criticalErrors := make(chan error, 1)
+
 	for _, svc := range m.services {
 		svc := svc // capture loop variable
 		status := m.statuses[svc.Name()]
-		
+
 		status.SetStatus(StatusStarting)
 		m.startOrder = append(m.startOrder, svc.Name())
-		
+
 		m.wg.Add(1)
 		go func() {
 			defer m.wg.Done()
-			
+
 			// Publish service starting event
 			m.eventBus.Publish(Event{
 				Type:   EventTypeServiceStarted,
@@ -95,7 +98,7 @@ func (m *Manager) Start(ctx context.Context, cfg *config.Config) error {
 					"service": svc.Name(),
 				},
 			})
-			
+
 			if err := svc.Start(ctx); err != nil {
 				status.SetError(err)
 				m.logger.Error("Service failed to start",
@@ -109,11 +112,32 @@ func (m *Manager) Start(ctx context.Context, cfg *config.Config) error {
 						"error": err.Error(),
 					},
 				})
+				// Critical services (like gRPC server) must start - fail fast
+				if svc.Name() == "grpc-server" {
+					m.logger.Error("Critical service (gRPC server) failed to start - Edge cannot operate without it",
+						"service", svc.Name(),
+						"error", err,
+					)
+					select {
+					case criticalErrors <- fmt.Errorf("critical service %s failed to start: %w", svc.Name(), err):
+					default:
+						// Channel already has an error, don't block
+					}
+				}
 			} else {
 				status.SetStatus(StatusRunning)
 				m.logger.Info("Service started", "service", svc.Name())
 			}
 		}()
+	}
+
+	// Wait a short time for critical services to start, then check for errors
+	// This allows us to fail fast if gRPC server doesn't start
+	select {
+	case err := <-criticalErrors:
+		return err
+	case <-time.After(2 * time.Second):
+		// No critical errors within 2 seconds, continue
 	}
 
 	// Give services a moment to start
@@ -162,7 +186,7 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 		for i := len(m.startOrder) - 1; i >= 0; i-- {
 			serviceName := m.startOrder[i]
 			status := m.statuses[serviceName]
-			
+
 			// Find service by name
 			var svc Service
 			for _, s := range m.services {
@@ -171,7 +195,7 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 					break
 				}
 			}
-			
+
 			if svc == nil {
 				continue
 			}
@@ -191,7 +215,7 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 				m.logger.Info("Service stopped", "service", svc.Name())
 			}
 			cancel()
-			
+
 			// Publish service stopped event
 			m.eventBus.Publish(Event{
 				Type:   EventTypeServiceStopped,
@@ -235,11 +259,10 @@ func (m *Manager) GetServiceStatus(serviceName string) *ServiceStatus {
 func (m *Manager) GetAllStatuses() map[string]*ServiceStatus {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	
+
 	statuses := make(map[string]*ServiceStatus)
 	for name, status := range m.statuses {
 		statuses[name] = status
 	}
 	return statuses
 }
-

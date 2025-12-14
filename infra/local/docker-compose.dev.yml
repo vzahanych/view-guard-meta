@@ -1,0 +1,312 @@
+version: '3.8'
+
+# Development docker-compose with source code mounted
+# Usage: docker compose -f docker-compose.dev.yml up
+# This mounts source code directly, so changes are immediately available without rebuilding
+#
+# Hot-reload: Services use 'air' for automatic reload on file changes
+# Install air: go install github.com/cosmtrek/air@latest
+
+services:
+  # =========================
+  # WireGuard config setup (same as production)
+  # =========================
+  wg-setup:
+    image: alpine:latest
+    container_name: view-guard-wg-setup
+    volumes:
+      - ./wg:/wg
+    command: >
+      sh -c " apk add --no-cache wireguard-tools bash openssl && echo '[wg-setup] Running generate-keys.sh...' && bash /wg/generate-keys.sh && echo '[wg-setup] Running generate-configs.sh...' && bash /wg/generate-configs.sh && echo '[wg-setup] Running generate-certs.sh...' && bash /wg/generate-certs.sh && echo '[wg-setup] Done generating keys, configs, and certificates' "
+    restart: "no"
+
+  # =========================
+  # Edge AI Service (can use production image or dev mount)
+  # =========================
+  edge-ai-service:
+    build:
+      context: ../../edge/ai-service
+      dockerfile: Dockerfile
+    container_name: view-guard-edge-ai
+    ports:
+      - "8180:8080"
+    environment:
+      - LOG_LEVEL=info
+      - LOG_FORMAT=json
+      - API_HOST=0.0.0.0
+      - API_PORT=8080
+      - AI_MODEL_NAME=yolov8n
+      - AI_MODEL_DIR=/app/models
+      - AI_MODEL_FORMAT=openvino
+      - AI_DEVICE=CPU
+    volumes:
+      - ai-models:/app/models
+      - ai-data:/app/data
+    networks:
+      - view-guard-edge
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8080/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+  # =========================
+  # User VM API - Development Mode with Hot Reload
+  # =========================
+  user-vm-api:
+    image: golang:1.25-alpine
+    container_name: view-guard-user-vm-api
+    depends_on:
+      wg-setup:
+        condition: service_completed_successfully
+    working_dir: /workspace/user-vm-api
+    # Mount source code directly - work from mounted directory
+    volumes:
+      - ../../:/workspace:cached # Cached mount for better performance
+      - user-vm-api-data:/app/data
+      - baseline-models:/app/data/models/baseline # Mount baseline models for model catalog
+      - user-vm-api-go-cache:/go/pkg/mod # Cache Go modules
+      - ./wg/config/server-wg0.conf:/etc/wireguard/wg0.conf:ro
+      - ./wg/certs/vm-server.crt:/etc/ssl/certs/vm-server.crt:ro
+      - ./wg/certs/vm-server.key:/etc/ssl/private/vm-server.key:ro
+      - ./wg/certs/vm-client.crt:/etc/ssl/certs/vm-client.crt:ro
+      - ./wg/certs/vm-client.key:/etc/ssl/private/vm-client.key:ro
+      - ./wg/certs/vm-db.crt:/etc/ssl/certs/vm-db.crt:ro
+      - ./wg/certs/vm-db.key:/etc/ssl/private/vm-db.key:ro
+      - ./wg/certs/ca.crt:/etc/ssl/certs/ca.crt:ro
+      - ./user-vm-config.yaml:/app/config/config.yaml:ro
+    command: >
+      sh -c "
+        apk add --no-cache git make wireguard-tools iproute2 sqlite ca-certificates tzdata &&
+        cd /workspace/user-vm-api &&
+        go mod download &&
+        # For now, use go run directly (hot-reload can be added later with air)
+        go run ./cmd/server -config /app/config/config.yaml
+      "
+    ports:
+      - "8280:8280" # Stream relay / API Gateway port
+      - "51820:51820/udp" # WireGuard server port
+    environment:
+      - USER_VM_API_DATA_DIR=/app/data
+      - USER_VM_API_WIREGUARD_ENABLED=true
+      - USER_VM_API_WIREGUARD_INTERFACE=wg0
+      - USER_VM_API_WIREGUARD_LISTEN_PORT=51820
+      - USER_VM_API_EVENT_CACHE_ENABLED=true
+      - USER_VM_API_EVENT_CACHE_DATABASE_PATH=/app/data/events.db
+      - USER_VM_API_STREAM_RELAY_ENABLED=true
+      - USER_VM_API_STREAM_RELAY_LISTEN_ADDR=:8080
+    networks:
+      - view-guard-edge
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    sysctls:
+      - net.ipv4.ip_forward=1
+    devices:
+      - /dev/net/tun
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8280/health" ]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  # =========================
+  # Edge Orchestrator - Development Mode with Hot Reload
+  # =========================
+  edge-orchestrator:
+    image: golang:1.25-alpine
+    container_name: view-guard-edge-orchestrator
+    depends_on:
+      wg-setup:
+        condition: service_completed_successfully
+      user-vm-api:
+        condition: service_healthy
+      edge-ai-service:
+        condition: service_healthy
+    working_dir: /workspace/edge/orchestrator
+    # Mount source code directly - work from mounted directory
+    volumes:
+      - ../../:/workspace:cached # Cached mount for better performance
+      - edge-orchestrator-data:/app/data
+      - edge-orchestrator-go-cache:/go/pkg/mod # Cache Go modules
+      - edge-orchestrator-node-modules:/workspace/edge/orchestrator/internal/web/frontend/node_modules # Cache node_modules
+      - ./wg/config/edge-wg0.conf:/etc/wireguard/wg0.conf:ro
+      - ./wg/certs/edge-server.crt:/etc/ssl/certs/edge-server.crt:ro
+      - ./wg/certs/edge-server.key:/etc/ssl/private/edge-server.key:ro
+      - ./wg/certs/edge-client.crt:/etc/ssl/certs/edge-client.crt:ro
+      - ./wg/certs/edge-client.key:/etc/ssl/private/edge-client.key:ro
+      - ./wg/certs/edge-db.crt:/etc/ssl/certs/edge-db.crt:ro
+      - ./wg/certs/edge-db.key:/etc/ssl/private/edge-db.key:ro
+      - ./wg/certs/ca.crt:/etc/ssl/certs/ca.crt:ro
+      - ./config.docker.yaml:/app/config/config.yaml:ro
+    # Install dependencies and run with hot-reload
+    command: >
+      sh -c "
+        apk add --no-cache git gcc musl-dev sqlite-dev ca-certificates ffmpeg sqlite v4l-utils wget bash coreutils wireguard-tools iproute2 nodejs npm &&
+        cd /workspace/edge/orchestrator &&
+        # Build frontend (only if node_modules doesn't exist or package.json changed)
+        if [ ! -d internal/web/frontend/node_modules ] || [ internal/web/frontend/package.json -nt internal/web/frontend/node_modules ]; then
+          cd internal/web/frontend &&
+          npm install &&
+          npm run build
+        else
+          echo 'Frontend dependencies up to date, skipping npm install'
+        fi &&
+        cd /workspace/edge/orchestrator &&
+        go mod download &&
+        # For now, use go run directly (hot-reload can be added later with air)
+        go run . -config /app/config/config.yaml
+      "
+    ports:
+      - "8181:8081" # Web UI port
+      - "8182:8080" # Health check port
+    environment:
+      - EDGE_AI_SERVICE_URL=http://edge-ai-service:8080
+      - EDGE_DATA_DIR=/app/data
+      - EDGE_STORAGE_CLIPS_DIR=/app/data/clips
+      - EDGE_STORAGE_SNAPSHOTS_DIR=/app/data/snapshots
+      - EDGE_WIREGUARD_ENABLED=true
+      - EDGE_WIREGUARD_KVM_ENDPOINT=http://10.0.0.1:8280
+      - EDGE_TELEMETRY_ENABLED=true
+      - EDGE_WEB_ENABLED=true
+      - EDGE_WEB_HOST=0.0.0.0
+      - EDGE_WEB_PORT=8081
+      - EDGE_ID=poc-edge-1
+    networks:
+      - view-guard-edge
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    sysctls:
+      - net.ipv4.ip_forward=1
+    devices:
+      - /dev/net/tun
+      - /dev/video0:/dev/video0 # USB cameras
+      - /dev/video1:/dev/video1
+      - /dev/video2:/dev/video2
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health" ]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+  # =========================
+  # Python AI Service (Training Service)
+  # =========================
+  python-ai-service:
+    build:
+      context: ../..
+      dockerfile: user-vm-api/training-service/Dockerfile
+    container_name: view-guard-python-ai-service
+    depends_on:
+      - minio
+    ports:
+      - "8000:8000"
+    environment:
+      - LOG_LEVEL=info
+      - API_HOST=0.0.0.0
+      - API_PORT=8000
+      - MINIO_ENDPOINT=https://minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
+      - MINIO_BUCKET_NAME=models
+      - MINIO_USE_SSL=true
+      - MODELS_DIR=/app/shared-models/models # Use shared models directory from user-vm-api (volume contains /app/data, so models are at /models)
+      - DATASETS_DIR=/app/shared-models/datasets # Use shared datasets directory from user-vm-api
+    volumes:
+      - training-models:/app/models
+      - training-data:/app/data
+      - user-vm-api-data:/app/shared-models:ro # Share models and datasets from user-vm-api (volume contains /app/data)
+    networks:
+      - view-guard-edge
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8000/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # =========================
+  # MinIO (Object Storage)
+  # =========================
+  minio:
+    image: minio/minio:latest
+    container_name: view-guard-minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
+      # Enable TLS for MinIO
+      - MINIO_SERVER_URL=https://minio:9000
+    volumes:
+      - minio-data:/data
+      # Mount certificates for TLS
+      - ./wg/certs/vm-server.crt:/root/.minio/certs/public.crt:ro
+      - ./wg/certs/vm-server.key:/root/.minio/certs/private.key:ro
+      - ./wg/certs/ca.crt:/root/.minio/certs/CAs/ca.crt:ro
+    command: server /data --address ":9000" --console-address ":9001"
+    networks:
+      - view-guard-edge
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "-k", "https://localhost:9000/minio/health/live" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # =========================
+  # Baseline Model Setup (runs once)
+  # =========================
+  baseline-model-setup:
+    image: alpine:latest
+    container_name: view-guard-baseline-setup
+    depends_on:
+      minio:
+        condition: service_started
+      user-vm-api:
+        condition: service_healthy
+    volumes:
+      - ../../:/workspace:ro
+      - baseline-models:/models
+    networks:
+      - view-guard-edge
+    environment:
+      - VM_API_URL=http://user-vm-api:8280
+    command: >
+      sh -c "
+        apk add --no-cache curl bash python3 py3-pip &&
+        echo '[baseline-setup] Downloading baseline models...' &&
+        bash /workspace/infra/local/setup-baseline-models.sh /models http://minio:9000 minioadmin minioadmin models
+      "
+    restart: "no"
+
+networks:
+  view-guard-edge:
+    driver: bridge
+    # Use default bridge network or let Docker assign subnet to avoid conflicts
+    # ipam:
+    #   config:
+    #     - subnet: 172.20.0.0/16
+
+volumes:
+  ai-models:
+  ai-data:
+  user-vm-api-data:
+  user-vm-api-go-cache: # Go module cache for faster builds
+  edge-orchestrator-data:
+  edge-orchestrator-go-cache: # Go module cache for faster builds
+  edge-orchestrator-node-modules: # Node modules cache for faster frontend builds
+  training-models:
+  training-data:
+  minio-data:
+  baseline-models:

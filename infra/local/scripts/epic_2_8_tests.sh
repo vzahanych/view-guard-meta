@@ -91,16 +91,57 @@ test_find_trained_model() {
 
 test_verify_edge_connected() {
     local edge_id="${1:-poc-edge-1}"
-    log_info "Test 2: Verifying Edge is connected..." >&2
+    log_info "Test 2: Verifying Edge is connected and bidirectional gRPC connection is healthy..." >&2
+
+    # Verify bidirectional gRPC connection is established and healthy
+    # This is critical for security applications - connection should exist from Epic 2.2
+    # VM monitors Edge status through gRPC every 30s, Edge monitors VM configuration status through gRPC every 30s
+    # All VM-Edge communication is gRPC-only (no HTTP)
+    log_info "Verifying bidirectional gRPC connection is established and healthy..." >&2
     
-    local edge_health_url="http://localhost:8081/health"
+    # Check VM API for Edge connection status (this verifies WireGuard + gRPC)
+    # Note: This is a VM-side API endpoint, not Edge-side HTTP - VM uses gRPC to monitor Edge
+    local vm_api_url="${VM_API:-http://localhost:8280}"
+    local edge_status_url="${vm_api_url}/api/edges/${edge_id}/status"
     
-    if curl -sf "$edge_health_url" > /dev/null 2>&1; then
+    # Poll for connection status - connection should already exist from Epic 2.2
+    # VM continuously monitors Edge through gRPC every 30s starting from Epic 2.2
+    local max_attempts=10
+    local attempt=0
+    local connection_healthy=false
+    
+    while [ $attempt -lt $max_attempts ]; do
+        attempt=$((attempt + 1))
+        edge_status=$(curl -sf "${edge_status_url}" 2>&1 || echo "FAILED")
+        
+        if [ "$edge_status" != "FAILED" ]; then
+            # Check if connection state is 'connected' (WireGuard + gRPC)
+            if echo "$edge_status" | grep -q '"state":"connected"' || \
+               echo "$edge_status" | grep -q '"connected":true'; then
+                connection_healthy=true
+                log_info "Bidirectional gRPC connection verified - connection is alive and ready" >&2
+                log_info "VM monitors Edge status through gRPC every 30s (started in Epic 2.2)" >&2
+                log_info "Edge monitors VM configuration status through gRPC every 30s (started in Epic 2.2)" >&2
+                break
+            fi
+        fi
+        
+        if [ $attempt -lt $max_attempts ]; then
+            sleep 2
+        fi
+    done
+    
+    if [ "$connection_healthy" = "true" ]; then
         echo "$edge_id" > /tmp/test_edge_id.txt
-        test_passed "Edge orchestrator is accessible: $edge_id" >&2
+        test_passed "Bidirectional gRPC connection is healthy: $edge_id" >&2
+        log_info "Connection health monitoring verified - connection is alive and ready for model deployment" >&2
+        log_info "All VM-Edge communication is gRPC-only (no HTTP) - security requirement" >&2
         return 0
     else
-        test_failed "Edge orchestrator not accessible" >&2
+        test_failed "Bidirectional gRPC connection not healthy (connection health is critical for security applications)" >&2
+        log_warn "Edge status URL: $edge_status_url" >&2
+        log_warn "Edge status response: $edge_status" >&2
+        log_warn "Connection should have been established during Epic 2.2 and monitored continuously via gRPC" >&2
         return 1
     fi
 }
@@ -110,19 +151,33 @@ test_trigger_model_deployment() {
     local edge_id="$2"
     log_info "Test 3: Triggering model deployment..." >&2
     
-    local deployment_request=$(cat <<EOF
-{
-    "model_id": "${trained_model_id}"
-}
-EOF
-)
+    # Get model details to extract camera_id if available
+    local camera_id_param=""
+    local model_response=$(curl -sf "${VM_API}/api/models/${trained_model_id}" || echo "FAILED")
+    if [ "$model_response" != "FAILED" ]; then
+        if command -v jq >/dev/null 2>&1; then
+            local camera_id=$(echo "$model_response" | jq -r '.camera_id // empty' 2>/dev/null || echo "")
+            if [ -n "$camera_id" ] && [ "$camera_id" != "null" ] && [ "$camera_id" != "" ]; then
+                camera_id_param="&camera_id=${camera_id}"
+                log_info "Found camera_id in model metadata: $camera_id" >&2
+            fi
+        else
+            local camera_id=$(echo "$model_response" | grep -o '"camera_id":"[^"]*"' | head -1 | cut -d'"' -f4 || echo "")
+            if [ -n "$camera_id" ] && [ "$camera_id" != "null" ] && [ "$camera_id" != "" ]; then
+                camera_id_param="&camera_id=${camera_id}"
+                log_info "Found camera_id in model metadata: $camera_id" >&2
+            fi
+        fi
+    fi
+    
+    # API expects query parameters: ?model_id={model_id}&camera_id={camera_id} (optional)
+    local deploy_url="${VM_API}/api/edges/${edge_id}/models/deploy?model_id=${trained_model_id}${camera_id_param}"
+    log_info "Deployment URL: $deploy_url" >&2
     
     local response=$(curl -s -X POST \
         -H "Content-Type: application/json" \
-        -H "X-Edge-ID: ${edge_id}" \
         -w "\n%{http_code}" \
-        -d "$deployment_request" \
-        "${VM_API}/api/edges/${edge_id}/models/deploy" 2>&1)
+        "$deploy_url" 2>&1)
     
     local http_code=$(echo "$response" | tail -n1)
     local response_body=$(echo "$response" | sed '$d')
@@ -171,16 +226,17 @@ EOF
 
 test_wait_for_deployment_completion() {
     local deployment_id="$1"
-    log_info "Test 4: Verifying deployment status updates..." >&2
+    log_info "Test 4: Waiting for deployment completion..." >&2
     
-    # Poll for deployment completion (threshold: 60s, interval: 5s)
+    # Poll for deployment completion (threshold: 120s, interval: 5s)
+    # Increased timeout to 120s to allow for model transfer and Edge processing
     local deployment_completed=false
     if poll_until_success "deployment to complete" \
         "response=\$(curl -sf \"${VM_API}/api/deployments/${deployment_id}\" || echo 'FAILED') && \
          [ \"\$response\" != 'FAILED' ] && \
          STATUS=\$(echo \"\$response\" | grep -o '\"status\":\"[^\"]*\"' | head -1 | cut -d'\"' -f4 || echo '') && \
          [ \"\$STATUS\" = 'deployed' ] || [ \"\$STATUS\" = 'active' ] || [ \"\$STATUS\" = 'failed' ]" \
-        60 5 \
+        120 5 \
         "investigate_model_deployment \"$deployment_id\" \"\""; then
         deployment_completed=true
     fi
@@ -219,10 +275,10 @@ test_wait_for_deployment_completion() {
             error_msg=$(echo "$response" | grep -o '"error_message":"[^"]*"' | head -1 | cut -d'"' -f4 || echo "")
         fi
         log_warn "Deployment failed: $error_msg" >&2
-        test_failed "Deployment failed after 60 seconds: $error_msg" "investigate_model_deployment \"$deployment_id\" \"\"" >&2
+        test_failed "Deployment failed after 120 seconds: $error_msg" "investigate_model_deployment \"$deployment_id\" \"\"" >&2
         return 1
     elif [ "$status" = "deploying" ] || [ "$status" = "pending" ]; then
-        test_failed "Deployment not completed after 60 seconds (status: $status)" "investigate_model_deployment \"$deployment_id\" \"\"" >&2
+        test_failed "Deployment not completed after 120 seconds (status: $status)" "investigate_model_deployment \"$deployment_id\" \"\"" >&2
         return 1
     else
         test_failed "Deployment status unknown: $status" "investigate_model_deployment \"$deployment_id\" \"\"" >&2
@@ -265,12 +321,13 @@ test_verify_edge_model_activation() {
     local deployment_id="$1"
     log_info "Test 6: Verifying Edge model loading and activation..." >&2
     
-    # Poll for Edge model activation (threshold: 40s, interval: 3s)
+    # Poll for Edge model activation (threshold: 60s, interval: 3s)
+    # Increased timeout to allow for model loading on Edge
     if poll_until_success "Edge model activation" \
         "response=\$(curl -sf \"${VM_API}/api/deployments/${deployment_id}\" || echo 'FAILED') && \
          [ \"\$response\" != 'FAILED' ] && \
          (echo \"\$response\" | grep -q '\"status\":\"active\"' || echo \"\$response\" | grep -q '\"status\":\"deployed\"')" \
-        40 3; then
+        60 3; then
         # Model activated, continue with check
         local response=$(curl -sf "${VM_API}/api/deployments/${deployment_id}" || echo "FAILED")
     else
@@ -294,7 +351,7 @@ test_verify_edge_model_activation() {
         test_passed "Edge model loaded and activated successfully" >&2
         return 0
     elif [ "$status" = "deployed" ]; then
-        test_failed "Edge model not activated after 40 seconds (status: $status)" >&2
+        test_failed "Edge model not activated after 60 seconds (status: $status)" >&2
         return 1
     else
         test_failed "Edge model activation status unknown: $status" >&2

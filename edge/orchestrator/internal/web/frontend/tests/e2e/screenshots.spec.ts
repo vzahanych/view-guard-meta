@@ -165,7 +165,7 @@ test.describe('Screenshots page - capture, dataset progress, sync, and error han
     await expect(readyText).toBeVisible()
 
     // Sync button should now be enabled
-    const syncButton = page.getByTestId('sync-dataset-status-button')
+    const syncButton = page.getByTestId('train-model-button')
     await expect(syncButton).toBeVisible({ timeout: 5_000 })
     await expect(syncButton).toBeEnabled({ timeout: 5_000 })
 
@@ -282,7 +282,7 @@ test.describe('Screenshots page - capture, dataset progress, sync, and error han
     const isReady = await readyText.isVisible().catch(() => false)
     const isInProgress = await inProgressText.isVisible().catch(() => false)
     
-    const syncButton = page.getByTestId('sync-dataset-status-button')
+    const syncButton = page.getByTestId('train-model-button')
     
     if (await syncButton.count()) {
       await expect(syncButton).toBeVisible({ timeout: 5_000 })

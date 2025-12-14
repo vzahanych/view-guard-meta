@@ -34,7 +34,16 @@ class Config:
             cls.TRAINING_OUTPUT_DIR,
         ]
         for directory in directories:
-            Path(directory).mkdir(parents=True, exist_ok=True)
+            try:
+                Path(directory).mkdir(parents=True, exist_ok=True)
+            except OSError as e:
+                # If directory is read-only (e.g., mounted volume), just verify it exists or will be created later
+                if e.errno == 30:  # Read-only file system
+                    # For read-only mounts, the directory will be created by the data source (e.g., dataset upload)
+                    # We can't create it here, but that's OK - it will exist when needed
+                    pass  # Skip creation, directory will be created when data is uploaded
+                else:
+                    raise
     
     @classmethod
     def get_dataset_path(cls, edge_id: str, camera_id: str, dataset_id: str) -> str:

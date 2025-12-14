@@ -16,9 +16,9 @@ const (
 	EventTypeServiceError   EventType = "service.error"
 
 	// Camera events
-	EventTypeCameraDiscovered EventType = "camera.discovered"
-	EventTypeCameraRegistered EventType = "camera.registered"
-	EventTypeCameraConnected   EventType = "camera.connected"
+	EventTypeCameraDiscovered   EventType = "camera.discovered"
+	EventTypeCameraRegistered   EventType = "camera.registered"
+	EventTypeCameraConnected    EventType = "camera.connected"
 	EventTypeCameraDisconnected EventType = "camera.disconnected"
 
 	// Video events
@@ -39,14 +39,15 @@ const (
 
 	// Screenshot events
 	EventTypeScreenshotSaved   EventType = "screenshot.saved"
-	EventTypeScreenshotUpdated  EventType = "screenshot.updated"
-	EventTypeScreenshotDeleted  EventType = "screenshot.deleted"
+	EventTypeScreenshotUpdated EventType = "screenshot.updated"
+	EventTypeScreenshotDeleted EventType = "screenshot.deleted"
+	EventTypeSnapshotRequested EventType = "snapshot.requested"
 )
 
 // Event represents an event in the system
 type Event struct {
 	Type      EventType
-	Source    string                 // Service that emitted the event
+	Source    string // Service that emitted the event
 	Timestamp time.Time
 	Data      map[string]interface{} // Event-specific data
 }
@@ -166,4 +167,3 @@ func (eb *EventBus) SubscribeWithHandler(ctx context.Context, eventType EventTyp
 		}
 	}()
 }
-

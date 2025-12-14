@@ -6,10 +6,10 @@ import (
 	"sync"
 	"time"
 
-	"go.uber.org/zap"
-	"github.com/vzahanych/view-guard-meta/user-vm-api/internal/model-catalog"
+	modelcatalog "github.com/vzahanych/view-guard-meta/user-vm-api/internal/model-catalog"
 	"github.com/vzahanych/view-guard-meta/user-vm-api/internal/shared/logging"
 	"github.com/vzahanych/view-guard-meta/user-vm-api/internal/shared/service"
+	"go.uber.org/zap"
 )
 
 // ModelDeploymentService monitors model catalog and triggers deployments
@@ -59,8 +59,13 @@ func NewModelDeploymentService(
 	}, nil
 }
 
+// Name returns the service name
+func (s *ModelDeploymentService) Name() string {
+	return "model-deployment-service"
+}
+
 // Start starts the deployment service
-func (s *ModelDeploymentService) Start() error {
+func (s *ModelDeploymentService) Start(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -86,7 +91,7 @@ func (s *ModelDeploymentService) Start() error {
 }
 
 // Stop stops the deployment service
-func (s *ModelDeploymentService) Stop() error {
+func (s *ModelDeploymentService) Stop(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -263,4 +268,3 @@ func (s *ModelDeploymentService) ManualDeploy(ctx context.Context, modelID strin
 
 	return job, nil
 }
-

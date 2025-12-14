@@ -1240,21 +1240,21 @@ export default function Screenshots() {
                       </p>
                       <Button
                         size="sm"
-                        data-testid="sync-dataset-status-button"
+                        data-testid="train-model-button"
                         onClick={async () => {
                           if (!selectedCameraId || !isComplete || syncing) return
                           try {
                             setSyncing(true)
                             setError(null)
-                            showToast('Syncing dataset to VM...', 'info')
-                            
+                            showToast('Uploading dataset to VM for training...', 'info')
+
                             const response = await api.post<{
                               camera_id: string
                               dataset_synced: boolean
                               dataset_id?: string
                               message?: string
                             }>(`/cameras/${selectedCameraId}/dataset/sync`)
-                            
+
                             if (response.dataset_synced) {
                               showToast(
                                 response.dataset_id
@@ -1274,9 +1274,9 @@ export default function Screenshots() {
                             }
                           } catch (err) {
                             const message =
-                              err instanceof Error ? err.message : 'Failed to sync dataset status'
+                              err instanceof Error ? err.message : 'Failed to upload dataset for training'
                             setError(message)
-                            
+
                             // Show appropriate error message based on error type
                             if (message.includes('Connection') || message.includes('network') || message.includes('unavailable')) {
                               showToast('Connection unavailable. Please check WireGuard tunnel.', 'error')
@@ -1290,10 +1290,11 @@ export default function Screenshots() {
                           }
                         }}
                         disabled={!isComplete || syncing}
-                        aria-label={syncing ? 'Syncing dataset...' : 'Sync dataset status'}
+                        aria-label={syncing ? 'Uploading dataset for training...' : 'Train Model'}
+                        title="Upload dataset to VM and prepare for model training"
                       >
                         <RefreshCw className={`w-3 h-3 mr-1 ${syncing ? 'animate-spin' : ''}`} />
-                        {syncing ? 'Uploading dataset...' : 'Sync Dataset Status'}
+                        {syncing ? 'Uploading dataset...' : 'Train Model'}
                       </Button>
                     </div>
 

@@ -4,15 +4,18 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	datasetstorage "github.com/vzahanych/view-guard-meta/user-vm-api/internal/dataset-storage"
 	modelcatalog "github.com/vzahanych/view-guard-meta/user-vm-api/internal/model-catalog"
+	modeldeployment "github.com/vzahanych/view-guard-meta/user-vm-api/internal/model-deployment"
 	"github.com/vzahanych/view-guard-meta/user-vm-api/internal/shared/config"
 	"github.com/vzahanych/view-guard-meta/user-vm-api/internal/shared/database"
 	"github.com/vzahanych/view-guard-meta/user-vm-api/internal/shared/database/migrations"
 	"github.com/vzahanych/view-guard-meta/user-vm-api/internal/shared/logging"
 	"github.com/vzahanych/view-guard-meta/user-vm-api/internal/shared/service"
 	"github.com/vzahanych/view-guard-meta/user-vm-api/internal/shared/storage"
+	storagesync "github.com/vzahanych/view-guard-meta/user-vm-api/internal/storage-sync"
 	tunnelgateway "github.com/vzahanych/view-guard-meta/user-vm-api/internal/tunnel-gateway"
 	"go.uber.org/zap"
 )
@@ -59,11 +62,13 @@ func (s *Server) Start(ctx context.Context) error {
 
 	var edgeAPIServer *tunnelgateway.EdgeAPIServer
 	var capStore *tunnelgateway.CapabilityStore
+	var wgServer *tunnelgateway.WireGuardServer
+	var edgeClient *tunnelgateway.EdgeClient
 
 	// Register Tunnel Gateway / WireGuard services when enabled
 	if s.config.UserVMAPI.WireGuardServer.Enabled {
 		// WireGuard server (acts as KVM-side tunnel endpoint)
-		wgServer, err := tunnelgateway.NewWireGuardServer(s.config, s.logger, db)
+		wgServer, err = tunnelgateway.NewWireGuardServer(s.config, s.logger, db)
 		if err != nil {
 			s.logger.Error("Failed to create WireGuard server", zap.Error(err))
 			return fmt.Errorf("failed to create WireGuard server: %w", err)
@@ -86,6 +91,19 @@ func (s *Server) Start(ctx context.Context) error {
 		telemetryHandler := tunnelgateway.NewDefaultTelemetryHandler(s.logger.Logger)
 		edgeAPIServer.SetTelemetryHandler(telemetryHandler)
 		s.manager.Register(edgeAPIServer)
+
+		// Create Edge client for VM → Edge calls (like RequestSnapshotCapture)
+		edgeClient = tunnelgateway.NewEdgeClient(wgServer, s.logger)
+		// Set EdgeAPIServer for better edge lookup
+		if edgeAPIServer != nil {
+			edgeClient.SetEdgeAPIServer(edgeAPIServer)
+			// Create connection monitor with EdgeClient for active gRPC health checks
+			// VM monitors Edge status through gRPC every 30s (security requirement)
+			connectionMonitor := tunnelgateway.NewConnectionMonitor(s.config, s.logger, db, edgeAPIServer, wgServer, edgeClient)
+			connectionMonitor.SetEventBus(eventBus)
+			edgeAPIServer.SetConnectionMonitor(connectionMonitor)
+		}
+		s.logger.Info("Edge client initialized (for VM → Edge calls)")
 	}
 
 	// Register Dataset Storage service
@@ -98,7 +116,8 @@ func (s *Server) Start(ctx context.Context) error {
 
 	// Register API Gateway when enabled
 	if s.config.UserVMAPI.APIGateway.Enabled {
-		apiServer := NewAPIServer(s.config, s.logger, capStore, edgeAPIServer)
+		apiServer := NewAPIServer(s.config, s.logger, capStore, edgeAPIServer, edgeClient)
+		apiServer.SetDatabase(db.GetDB()) // Set database for health checks (GetDB returns *sql.DB)
 		if datasetReceiver != nil {
 			apiServer.SetDatasetReceiver(datasetReceiver)
 		}
@@ -112,16 +131,155 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 		apiServer.SetModelStorage(modelStorage)
 
-		modelCatalog, err := modelcatalog.NewModelCatalog(modelStorage, modelsDir)
+		modelCatalog, err := modelcatalog.NewModelCatalog(modelStorage, modelsDir, db)
 		if err != nil {
 			s.logger.Error("Failed to create model catalog", zap.Error(err))
 			return fmt.Errorf("failed to create model catalog: %w", err)
 		}
-		// Scan models on initialization
-		if err := modelCatalog.ScanModels(); err != nil {
-			s.logger.Warn("Failed to scan models on initialization", zap.Error(err))
-		}
+		// Note: Models are registered via admin API instead of filesystem scanning
+		// This allows SaaS components to manage models through the API
+		// ScanModels is kept for backward compatibility but not called on startup
 		apiServer.SetModelCatalog(modelCatalog)
+
+		// Initialize Model Deployment Service (Epic 2.8)
+		// Model deployment service is always initialized, MinIO is required for trained models
+		var minioStorage *modeldeployment.MinIOModelStorage
+		if s.config.UserVMAPI.StorageSync.Enabled && s.config.UserVMAPI.StorageSync.Provider == "s3" {
+			// Initialize MinIO S3 client for model archiving
+			providerConfig := s.config.UserVMAPI.StorageSync.ProviderConfig
+			endpoint, _ := providerConfig["endpoint"].(string)
+			accessKey, _ := providerConfig["access_key_id"].(string)
+			secretKey, _ := providerConfig["secret_access_key"].(string)
+			useSSL, _ := providerConfig["use_ssl"].(bool)
+
+			// Validate required config values
+			if endpoint == "" {
+				s.logger.Error("MinIO endpoint not configured in storage_sync.provider_config.endpoint")
+				return fmt.Errorf("MinIO endpoint is required for model storage (configured in storage_sync.provider_config.endpoint)")
+			}
+			if accessKey == "" {
+				s.logger.Error("MinIO access key not configured in storage_sync.provider_config.access_key_id")
+				return fmt.Errorf("MinIO access key is required for model storage")
+			}
+			if secretKey == "" {
+				s.logger.Error("MinIO secret key not configured in storage_sync.provider_config.secret_access_key")
+				return fmt.Errorf("MinIO secret key is required for model storage")
+			}
+
+			// Parse endpoint URL to extract host:port (MinIO client doesn't accept http:// prefix)
+			// Remove http:// or https:// prefix if present
+			endpointHostPort := endpoint
+			if strings.HasPrefix(endpoint, "http://") {
+				endpointHostPort = strings.TrimPrefix(endpoint, "http://")
+				useSSL = false
+			} else if strings.HasPrefix(endpoint, "https://") {
+				endpointHostPort = strings.TrimPrefix(endpoint, "https://")
+				useSSL = true
+			}
+
+			s.logger.Info("Initializing MinIO client for model storage",
+				zap.String("endpoint", endpointHostPort),
+				zap.String("bucket", "models"),
+				zap.Bool("use_ssl", useSSL),
+			)
+
+			// Use "models" bucket for model storage (separate from camera buckets)
+			// Get CA certificate path from config (for TLS verification)
+			caCertPath, _ := providerConfig["ca_cert_path"].(string)
+			// Default CA cert path if not specified
+			if caCertPath == "" && useSSL {
+				caCertPath = "/etc/ssl/certs/ca.crt"
+			}
+
+			s3Config := storagesync.S3Config{
+				Endpoint:   endpointHostPort, // Use parsed host:port (no http:// prefix)
+				AccessKey:  accessKey,
+				SecretKey:  secretKey,
+				BucketName: "models",
+				UseSSL:     useSSL,
+				CACertPath: caCertPath, // CA certificate for TLS verification
+			}
+
+			s3Client, err := storagesync.NewS3Client(s3Config, s.logger.Logger)
+			if err != nil {
+				s.logger.Error("Failed to initialize MinIO client for model storage - trained models require MinIO",
+					zap.Error(err),
+					zap.String("endpoint", endpointHostPort),
+					zap.String("original_endpoint", endpoint),
+				)
+				// For trained models, MinIO is required - fail initialization
+				return fmt.Errorf("failed to initialize MinIO client (required for trained model storage): %w", err)
+			}
+
+			// Initialize MinIO model storage
+			minioStorage, err = modeldeployment.NewMinIOModelStorage(s3Client, modelStorage, s.logger)
+			if err != nil {
+				s.logger.Error("Failed to initialize MinIO model storage - trained models require MinIO",
+					zap.Error(err),
+				)
+				// For trained models, MinIO is required - fail initialization
+				return fmt.Errorf("failed to initialize MinIO model storage (required for trained model storage): %w", err)
+			}
+
+			s.logger.Info("MinIO model storage initialized",
+				zap.String("endpoint", endpointHostPort),
+				zap.String("bucket", "models"),
+			)
+		}
+
+		// Initialize Model Deployment components (always, even without MinIO)
+		deploymentStore, err := modeldeployment.NewDeploymentStore(db)
+		if err != nil {
+			s.logger.Error("Failed to create deployment store", zap.Error(err))
+			return fmt.Errorf("failed to create deployment store: %w", err)
+		}
+
+		modelConverter, err := modeldeployment.NewModelConverter(modelStorage, modelCatalog, s.logger)
+		if err != nil {
+			s.logger.Error("Failed to create model converter", zap.Error(err))
+			return fmt.Errorf("failed to create model converter: %w", err)
+		}
+		transferService, err := modeldeployment.NewModelTransferService(modelStorage, minioStorage, modelCatalog, edgeAPIServer, edgeClient, s.logger)
+		if err != nil {
+			s.logger.Error("Failed to create model transfer service", zap.Error(err))
+			return fmt.Errorf("failed to create model transfer service: %w", err)
+		}
+
+		deploymentOrchestrator, err := modeldeployment.NewModelDeploymentOrchestrator(
+			deploymentStore,
+			modelCatalog,
+			modelStorage,
+			modelConverter,
+			transferService,
+			minioStorage, // Can be nil if MinIO is not available
+			edgeAPIServer,
+			s.logger,
+		)
+		if err != nil {
+			s.logger.Error("Failed to create model deployment orchestrator", zap.Error(err))
+			return fmt.Errorf("failed to create model deployment orchestrator: %w", err)
+		}
+
+		deploymentService, err := modeldeployment.NewModelDeploymentService(
+			deploymentOrchestrator,
+			modelCatalog,
+			eventBus,
+			s.logger,
+		)
+		if err != nil {
+			s.logger.Error("Failed to create model deployment service", zap.Error(err))
+			return fmt.Errorf("failed to create model deployment service: %w", err)
+		}
+
+		// Register deployment service (will be started by manager)
+		s.manager.Register(deploymentService)
+
+		// Wire deployment service and orchestrator to API server
+		apiServer.SetModelDeploymentService(deploymentService)
+		apiServer.SetModelDeploymentOrchestrator(deploymentOrchestrator)
+		apiServer.SetMinIOModelStorage(minioStorage) // For archiving trained models on upload
+
+		s.logger.Info("Model deployment service initialized and started")
 
 		s.manager.Register(apiServer)
 		s.logger.Info("API Gateway registered")

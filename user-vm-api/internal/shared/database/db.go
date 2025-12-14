@@ -8,6 +8,16 @@ import (
 	"time"
 
 	_ "modernc.org/sqlite" // SQLite driver
+	// Note: SQLite is a local file-based database and does not support TLS/SSL connections.
+	// Security for SQLite databases is provided through:
+	// 1. File system permissions (restrictive file permissions on database files)
+	// 2. Database file encryption (using SQLCipher or similar)
+	// 3. Network isolation (database files are not exposed over network)
+	// 4. Application-level encryption (encrypt sensitive data before storing)
+	// For zero-trust security, ensure database files are:
+	// - Stored in secure, isolated volumes
+	// - Protected by file system permissions (read/write only by application user)
+	// - Encrypted at rest if required (using filesystem encryption or SQLCipher)
 )
 
 // DB wraps a SQLite database connection with connection pool management
@@ -19,9 +29,9 @@ type DB struct {
 
 // Config contains database configuration
 type Config struct {
-	DatabasePath string
-	MaxOpenConns int           // Maximum open connections
-	MaxIdleConns int           // Maximum idle connections
+	DatabasePath    string
+	MaxOpenConns    int           // Maximum open connections
+	MaxIdleConns    int           // Maximum idle connections
 	ConnMaxLifetime time.Duration // Connection max lifetime
 	ConnMaxIdleTime time.Duration // Connection max idle time
 }
@@ -190,4 +200,3 @@ func (d *DB) BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error) 
 
 	return d.db.BeginTx(ctx, opts)
 }
-
