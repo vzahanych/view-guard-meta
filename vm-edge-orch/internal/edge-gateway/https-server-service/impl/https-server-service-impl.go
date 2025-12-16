@@ -16,24 +16,25 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/vzahanych/view-guard-meta/vm-edge-orch/internal/edge-gateway/https-server-service"
+	"github.com/vzahanych/view-guard-meta/vm-edge-orch/config"
+	httpsserver "github.com/vzahanych/view-guard-meta/vm-edge-orch/internal/edge-gateway/https-server-service"
 )
 
 // httpsServerService implements the HTTPSServerService interface
 type httpsServerService struct {
-	wgServer   interface{} // WireGuard server (optional, for interface verification)
 	httpServer *http.Server
 	listener   net.Listener
 	mu         sync.RWMutex
 	logger     *zap.Logger // Simple logger, can be nil
 	ctx        context.Context
 	cancel     context.CancelFunc
+	tlsConfig  config.TLSConfig
 }
 
 // NewHTTPSServerService creates a new HTTPS server service implementation.
-// wgServer is interface{} to avoid dependencies on non-existent packages.
+// cfg is interface{} to avoid tight coupling to the config package.
 // For now, we use simple defaults: listen on 10.0.0.1:8443.
-func NewHTTPSServerService(wgServer interface{}, log interface{}) (httpsserver.HTTPSServerService, error) {
+func NewHTTPSServerService(cfg interface{}, log interface{}) (httpsserver.HTTPSServerService, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Try to extract logger if it's a zap.Logger
@@ -45,11 +46,17 @@ func NewHTTPSServerService(wgServer interface{}, log interface{}) (httpsserver.H
 		logger, _ = zap.NewDevelopment()
 	}
 
+	// Extract TLS configuration from application config if available.
+	var tlsCfg config.TLSConfig
+	if appCfg, ok := cfg.(*config.Config); ok && appCfg != nil {
+		tlsCfg = appCfg.TLS
+	}
+
 	server := &httpsServerService{
-		wgServer: wgServer,
-		ctx:      ctx,
-		cancel:   cancel,
-		logger:   logger,
+		ctx:       ctx,
+		cancel:    cancel,
+		logger:    logger,
+		tlsConfig: tlsCfg,
 	}
 
 	return server, nil
@@ -74,18 +81,10 @@ func (s *httpsServerService) Start(ctx context.Context) error {
 		s.logger.Info("Starting HTTPS server", zap.String("address", listenAddr))
 	}
 
-	// Verify WireGuard interface is ready (optional check)
-	if s.wgServer != nil {
-		if !s.isWireGuardInterfaceReady("10.0.0.1") {
-			if s.logger != nil {
-				s.logger.Warn("WireGuard interface may not be ready, attempting to bind anyway",
-					zap.String("address", listenAddr))
-			}
-		} else {
-			if s.logger != nil {
-				s.logger.Info("WireGuard interface verified", zap.String("address", listenAddr))
-			}
-		}
+	// Optionally verify WireGuard interface is ready.
+	if !s.isWireGuardInterfaceReady("10.0.0.1") && s.logger != nil {
+		s.logger.Warn("WireGuard interface may not be ready, attempting to bind anyway",
+			zap.String("address", listenAddr))
 	}
 
 	listener, err := net.Listen("tcp", listenAddr)
@@ -94,10 +93,21 @@ func (s *httpsServerService) Start(ctx context.Context) error {
 	}
 	s.listener = listener
 
-	// Load TLS credentials for mTLS (zero-trust security)
-	serverCertPath := "/etc/ssl/certs/vm-server.crt"
-	serverKeyPath := "/etc/ssl/private/vm-server.key"
-	caCertPath := "/etc/ssl/certs/ca.crt"
+	// Load TLS credentials for mTLS (zero-trust security).
+	// Use configured paths if provided, otherwise fall back to system defaults.
+	serverCertPath := s.tlsConfig.ServerCert
+	serverKeyPath := s.tlsConfig.ServerKey
+	caCertPath := s.tlsConfig.CACert
+
+	if serverCertPath == "" {
+		serverCertPath = "/etc/ssl/certs/vm-server.crt"
+	}
+	if serverKeyPath == "" {
+		serverKeyPath = "/etc/ssl/private/vm-server.key"
+	}
+	if caCertPath == "" {
+		caCertPath = "/etc/ssl/certs/ca.crt"
+	}
 
 	cert, err := tls.LoadX509KeyPair(serverCertPath, serverKeyPath)
 	if err != nil {
@@ -401,4 +411,3 @@ func loadCACertificate(caCertPath string) (*x509.CertPool, error) {
 	}
 	return caCertPool, nil
 }
-

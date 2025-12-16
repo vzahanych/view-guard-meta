@@ -8,22 +8,22 @@ import (
 	"go.uber.org/zap"
 
 	edgegateway "github.com/vzahanych/view-guard-meta/vm-edge-orch/internal/edge-gateway"
-	"github.com/vzahanych/view-guard-meta/vm-edge-orch/internal/edge-gateway/https-client-service"
+	httpsclient "github.com/vzahanych/view-guard-meta/vm-edge-orch/internal/edge-gateway/https-client-service"
 	httpsclientimpl "github.com/vzahanych/view-guard-meta/vm-edge-orch/internal/edge-gateway/https-client-service/impl"
-	"github.com/vzahanych/view-guard-meta/vm-edge-orch/internal/edge-gateway/https-server-service"
+	httpsserver "github.com/vzahanych/view-guard-meta/vm-edge-orch/internal/edge-gateway/https-server-service"
 	httpsserverimpl "github.com/vzahanych/view-guard-meta/vm-edge-orch/internal/edge-gateway/https-server-service/impl"
-	"github.com/vzahanych/view-guard-meta/vm-edge-orch/internal/edge-gateway/wg-server-service"
+	wgserver "github.com/vzahanych/view-guard-meta/vm-edge-orch/internal/edge-gateway/wg-server-service"
 	wgserverimpl "github.com/vzahanych/view-guard-meta/vm-edge-orch/internal/edge-gateway/wg-server-service/impl"
 )
 
 // edgeGateway implements the EdgeGateway interface
 type edgeGateway struct {
-	wgServerService   wgserver.WGServerService
+	wgServerService    wgserver.WGServerService
 	httpsServerService httpsserver.HTTPSServerService
 	httpsClientService httpsclient.HTTPSClientService
-	logger            *zap.Logger
-	mu                sync.RWMutex
-	started           bool
+	logger             *zap.Logger
+	mu                 sync.RWMutex
+	started            bool
 }
 
 // NewEdgeGateway creates a new EdgeGateway implementation that composes
@@ -45,23 +45,23 @@ func NewEdgeGateway(cfg interface{}, log interface{}, db interface{}) (edgegatew
 		return nil, fmt.Errorf("failed to create WireGuard server service: %w", err)
 	}
 
-	// Create HTTPS server service (depends on WireGuard server)
-	httpsServer, err := httpsserverimpl.NewHTTPSServerService(wgServer, log)
+	// Create HTTPS server service (uses config for TLS paths)
+	httpsServer, err := httpsserverimpl.NewHTTPSServerService(cfg, log)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create HTTPS server service: %w", err)
 	}
 
-	// Create HTTPS client service (depends on WireGuard server)
-	httpsClient, err := httpsclientimpl.NewHTTPSClientService(wgServer, log)
+	// Create HTTPS client service (uses config for TLS paths)
+	httpsClient, err := httpsclientimpl.NewHTTPSClientService(cfg, log)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create HTTPS client service: %w", err)
 	}
 
 	return &edgeGateway{
-		wgServerService:   wgServer,
+		wgServerService:    wgServer,
 		httpsServerService: httpsServer,
 		httpsClientService: httpsClient,
-		logger:            logger,
+		logger:             logger,
 	}, nil
 }
 
@@ -196,4 +196,3 @@ func (g *edgeGateway) GetHTTPSClientService() interface{} {
 	defer g.mu.RUnlock()
 	return g.httpsClientService
 }
-

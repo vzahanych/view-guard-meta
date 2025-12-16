@@ -6,8 +6,11 @@ import (
 	"net/http"
 	"time"
 
-	saasgateway "github.com/vzahanych/view-guard-meta/vm-edge-orch/internal/saas-gateway"
 	"go.uber.org/zap"
+
+	eventbus "github.com/vzahanych/view-guard-meta/vm-edge-orch/internal/event-bus"
+	metastorage "github.com/vzahanych/view-guard-meta/vm-edge-orch/internal/meta-storage"
+	saasgateway "github.com/vzahanych/view-guard-meta/vm-edge-orch/internal/saas-gateway"
 )
 
 // Config provides configuration for the SaaS gateway.
@@ -24,14 +27,16 @@ type Logger interface {
 }
 
 type saasGateway struct {
-	config Config
-	logger Logger
-	server *http.Server
+	config    Config
+	logger    Logger
+	server    *http.Server
+	metaStore metastorage.MetaDataStore
+	eventBus  eventbus.EventBus
 }
 
 // NewSaaSGateway creates a new SaaS gateway implementation.
 // The gateway provides HTTP endpoints for SaaS components to interact with the VM application.
-func NewSaaSGateway(cfg Config, log Logger) (saasgateway.SaaSGateway, error) {
+func NewSaaSGateway(cfg Config, log Logger, metaStore metastorage.MetaDataStore, eventBus eventbus.EventBus) (saasgateway.SaaSGateway, error) {
 	if log == nil {
 		return nil, fmt.Errorf("logger is required")
 	}
@@ -42,8 +47,10 @@ func NewSaaSGateway(cfg Config, log Logger) (saasgateway.SaaSGateway, error) {
 	}
 
 	return &saasGateway{
-		config: cfg,
-		logger: log,
+		config:    cfg,
+		logger:    log,
+		metaStore: metaStore,
+		eventBus:  eventBus,
 	}, nil
 }
 
@@ -103,4 +110,8 @@ func (s *saasGateway) registerRoutes(mux *http.ServeMux) {
 	// Admin API endpoints for SaaS components
 	mux.HandleFunc("/api/admin/status", s.handleAdminStatus)
 	mux.HandleFunc("/api/admin/info", s.handleAdminInfo)
+
+	// Edge management endpoints (RESTful)
+	mux.HandleFunc("/api/admin/edges", s.handleEdges)     // GET (list) or POST (create)
+	mux.HandleFunc("/api/admin/edges/", s.handleEdgeByID) // GET, PUT, DELETE by ID
 }

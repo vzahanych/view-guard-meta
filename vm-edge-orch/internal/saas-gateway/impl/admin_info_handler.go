@@ -27,6 +27,11 @@ func (s *saasGateway) handleAdminInfo(w http.ResponseWriter, r *http.Request) {
 				"/health",
 				"/api/admin/status",
 				"/api/admin/info",
+				"GET /api/admin/edges",
+				"POST /api/admin/edges",
+				"GET /api/admin/edges/{id}",
+				"PUT /api/admin/edges/{id}",
+				"DELETE /api/admin/edges/{id}",
 			},
 		},
 	}

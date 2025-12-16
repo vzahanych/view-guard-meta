@@ -12,23 +12,24 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/vzahanych/view-guard-meta/vm-edge-orch/internal/edge-gateway/https-client-service"
+	"github.com/vzahanych/view-guard-meta/vm-edge-orch/config"
+	httpsclient "github.com/vzahanych/view-guard-meta/vm-edge-orch/internal/edge-gateway/https-client-service"
 )
 
 // httpsClientService implements the HTTPSClientService interface
 type httpsClientService struct {
-	wgServer interface{} // WireGuard server (optional, for getting Edge IPs)
-	client   *http.Client
-	mu       sync.RWMutex
-	logger   *zap.Logger // Simple logger, can be nil
-	ctx      context.Context
-	cancel   context.CancelFunc
+	client    *http.Client
+	mu        sync.RWMutex
+	logger    *zap.Logger // Simple logger, can be nil
+	ctx       context.Context
+	cancel    context.CancelFunc
+	tlsConfig config.TLSConfig
 }
 
 // NewHTTPSClientService creates a new HTTPS client service implementation.
-// wgServer is interface{} to avoid dependencies on non-existent packages.
+// cfg is interface{} to avoid tight coupling to the config package.
 // The client is used for VM → Edge communication over WireGuard.
-func NewHTTPSClientService(wgServer interface{}, log interface{}) (httpsclient.HTTPSClientService, error) {
+func NewHTTPSClientService(cfg interface{}, log interface{}) (httpsclient.HTTPSClientService, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Try to extract logger if it's a zap.Logger
@@ -40,10 +41,26 @@ func NewHTTPSClientService(wgServer interface{}, log interface{}) (httpsclient.H
 		logger, _ = zap.NewDevelopment()
 	}
 
-	// Load client certificate for mTLS
-	clientCertPath := "/etc/ssl/certs/vm-client.crt"
-	clientKeyPath := "/etc/ssl/private/vm-client.key"
-	caCertPath := "/etc/ssl/certs/ca.crt"
+	// Load client certificate for mTLS.
+	// Use configured paths if provided, otherwise fall back to system defaults.
+	var tlsCfg config.TLSConfig
+	if appCfg, ok := cfg.(*config.Config); ok && appCfg != nil {
+		tlsCfg = appCfg.TLS
+	}
+
+	clientCertPath := tlsCfg.ClientCert
+	clientKeyPath := tlsCfg.ClientKey
+	caCertPath := tlsCfg.CACert
+
+	if clientCertPath == "" {
+		clientCertPath = "/etc/ssl/certs/vm-client.crt"
+	}
+	if clientKeyPath == "" {
+		clientKeyPath = "/etc/ssl/private/vm-client.key"
+	}
+	if caCertPath == "" {
+		caCertPath = "/etc/ssl/certs/ca.crt"
+	}
 
 	// Load client certificate
 	cert, err := tls.LoadX509KeyPair(clientCertPath, clientKeyPath)
@@ -91,11 +108,11 @@ func NewHTTPSClientService(wgServer interface{}, log interface{}) (httpsclient.H
 	}
 
 	service := &httpsClientService{
-		wgServer: wgServer,
-		client:   client,
-		ctx:      ctx,
-		cancel:   cancel,
-		logger:   logger,
+		client:    client,
+		ctx:       ctx,
+		cancel:    cancel,
+		logger:    logger,
+		tlsConfig: tlsCfg,
 	}
 
 	return service, nil
@@ -200,4 +217,3 @@ func loadCACertificate(caCertPath string) (*x509.CertPool, error) {
 	}
 	return caCertPool, nil
 }
-

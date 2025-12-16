@@ -15,6 +15,8 @@ import (
 	inmemorybus "github.com/vzahanych/view-guard-meta/vm-edge-orch/internal/event-bus/inmemory"
 	metastorage "github.com/vzahanych/view-guard-meta/vm-edge-orch/internal/meta-storage"
 	bboltimp "github.com/vzahanych/view-guard-meta/vm-edge-orch/internal/meta-storage/bbolt-imp"
+	saasgateway "github.com/vzahanych/view-guard-meta/vm-edge-orch/internal/saas-gateway"
+	saasimpl "github.com/vzahanych/view-guard-meta/vm-edge-orch/internal/saas-gateway/impl"
 	statemng "github.com/vzahanych/view-guard-meta/vm-edge-orch/internal/state-mng"
 	statemngimpl "github.com/vzahanych/view-guard-meta/vm-edge-orch/internal/state-mng/impl"
 )
@@ -33,6 +35,9 @@ type Server struct {
 
 	// Edge gateway: encapsulates VM↔Edge networking (WireGuard, HTTPS server/client)
 	edgeGateway edgegateway.EdgeGateway
+
+	// SaaS gateway: admin/control-plane HTTP API for external SaaS components.
+	saasGateway saasgateway.SaaSGateway
 
 	// Orchestrator-wide state manager (edge lifecycle & tasks)
 	stateManager statemng.StateManager
@@ -92,6 +97,15 @@ func (s *Server) Init(cfg *config.Config) error {
 	}
 	s.edgeGateway = gateway
 
+	// 5. SaaS gateway: admin/control-plane HTTP API.
+	// Pass meta-storage and event-bus so it can manage edges.
+	saasCfg := saasimpl.Config{}
+	sgw, err := saasimpl.NewSaaSGateway(saasCfg, s.logger, s.metaStore, s.eventBus)
+	if err != nil {
+		return fmt.Errorf("failed to create saas gateway: %w", err)
+	}
+	s.saasGateway = sgw
+
 	return nil
 }
 
@@ -112,6 +126,14 @@ func (s *Server) Start(ctx context.Context) error {
 			return fmt.Errorf("failed to start edge gateway: %w", err)
 		}
 		s.logger.Info("Edge gateway started")
+	}
+
+	// Start SaaS gateway (admin/control-plane HTTP API).
+	if s.saasGateway != nil {
+		if err := s.saasGateway.Start(ctx); err != nil {
+			return fmt.Errorf("failed to start saas gateway: %w", err)
+		}
+		s.logger.Info("SaaS gateway started")
 	}
 
 	// Start state manager (subscribes to event bus and reacts to events).
@@ -136,6 +158,13 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	if s.stateManager != nil {
 		if err := s.stateManager.Stop(ctx); err != nil && firstErr == nil {
 			firstErr = fmt.Errorf("failed to stop state manager: %w", err)
+		}
+	}
+
+	// Stop SaaS gateway (admin/control-plane HTTP API).
+	if s.saasGateway != nil {
+		if err := s.saasGateway.Stop(ctx); err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("failed to stop saas gateway: %w", err)
 		}
 	}
 

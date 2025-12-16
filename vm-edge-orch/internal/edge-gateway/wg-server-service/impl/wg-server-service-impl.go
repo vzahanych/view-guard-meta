@@ -15,6 +15,7 @@ import (
 	"golang.zx2c4.com/wireguard/wgctrl"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
+	"github.com/vzahanych/view-guard-meta/vm-edge-orch/config"
 	wgserver "github.com/vzahanych/view-guard-meta/vm-edge-orch/internal/edge-gateway/wg-server-service"
 	"github.com/vzahanych/view-guard-meta/vm-edge-orch/internal/edge-gateway/wg-server-service/types"
 )
@@ -24,6 +25,7 @@ type wgServerService struct {
 	client     *wgctrl.Client
 	iface      string
 	listenPort int
+	configPath string
 	privateKey wgtypes.Key
 	publicKey  wgtypes.Key
 	mu         sync.RWMutex
@@ -32,6 +34,7 @@ type wgServerService struct {
 	ctx        context.Context
 	cancel     context.CancelFunc
 	logger     *zap.Logger // Simple logger, can be nil
+	disabled   bool        // When true, skips WireGuard OS interactions (dev env)
 }
 
 // NewWGServerService creates a new WireGuard server service implementation.
@@ -55,20 +58,46 @@ func NewWGServerService(cfg interface{}, log interface{}, db interface{}) (wgser
 		logger, _ = zap.NewDevelopment()
 	}
 
+	iface := "wg0"      // Default interface name
+	listenPort := 51820 // Default WireGuard port
+	configPath := "/etc/wireguard/wg0.conf"
+
+	// Try to extract Wireguard configuration from application config, if provided.
+	if appCfg, ok := cfg.(*config.Config); ok && appCfg != nil {
+		if appCfg.Wireguard.Interface != "" {
+			iface = appCfg.Wireguard.Interface
+		}
+		if appCfg.Wireguard.ListenPort != 0 {
+			listenPort = appCfg.Wireguard.ListenPort
+		}
+		if appCfg.Wireguard.ConfigPath != "" {
+			configPath = appCfg.Wireguard.ConfigPath
+		}
+	}
+
 	server := &wgServerService{
 		client:     client,
-		iface:      "wg0", // Default interface name
-		listenPort: 51820, // Default WireGuard port
+		iface:      iface,
+		listenPort: listenPort,
+		configPath: configPath,
 		peers:      make(map[string]*types.PeerInfo),
 		ctx:        ctx,
 		cancel:     cancel,
 		logger:     logger,
 	}
 
-	// Load or generate server keys
-	if err := server.loadOrGenerateKeys(); err != nil {
-		client.Close()
-		return nil, fmt.Errorf("failed to load or generate keys: %w", err)
+	// Detect dev environment and disable WireGuard OS interactions if so.
+	if appCfg, ok := cfg.(*config.Config); ok && appCfg != nil && appCfg.Env == "dev" {
+		server.disabled = true
+		if server.logger != nil {
+			server.logger.Info("WireGuard server service disabled for dev environment; skipping OS configuration")
+		}
+	} else {
+		// Load or generate server keys only when not disabled.
+		if err := server.loadOrGenerateKeys(); err != nil {
+			client.Close()
+			return nil, fmt.Errorf("failed to load or generate keys: %w", err)
+		}
 	}
 
 	return server, nil
@@ -86,6 +115,13 @@ func (w *wgServerService) SetEventBus(bus interface{}) {
 
 // Start starts the WireGuard server
 func (w *wgServerService) Start(ctx context.Context) error {
+	if w.disabled {
+		if w.logger != nil {
+			w.logger.Info("WireGuard server service is disabled in this environment; skipping start")
+		}
+		return nil
+	}
+
 	if w.logger != nil {
 		w.logger.Info("Starting WireGuard server",
 			zap.String("interface", w.iface),
@@ -129,8 +165,11 @@ func (w *wgServerService) Stop(ctx context.Context) error {
 
 // loadOrGenerateKeys loads server keys from config file or generates new ones
 func (w *wgServerService) loadOrGenerateKeys() error {
-	// Try to load from default config file location
-	configPath := "/etc/wireguard/wg0.conf"
+	// Try to load from configured config file location (if any), falling back to default.
+	configPath := w.configPath
+	if configPath == "" {
+		configPath = "/etc/wireguard/wg0.conf"
+	}
 	if _, err := os.Stat(configPath); err == nil {
 		configData, err := os.ReadFile(configPath)
 		if err == nil {
@@ -211,12 +250,26 @@ ListenPort = %d
 func (w *wgServerService) configureInterface() error {
 	// Check if interface already exists
 	dev, err := w.client.Device(w.iface)
-	if err == nil && dev != nil {
+	if err != nil {
+		// In dev we might not have CAP_NET_ADMIN; treat lack of access as
+		// "assume preconfigured" instead of a hard failure.
+		if w.logger != nil {
+			w.logger.Warn("WireGuard device not accessible, assuming preconfigured interface",
+				zap.String("interface", w.iface),
+				zap.Error(err))
+		}
+		return nil
+	}
+
+	if dev != nil {
 		if w.logger != nil {
 			w.logger.Info("WireGuard interface already exists", zap.String("interface", w.iface))
 		}
 		// If interface exists, try to reload config from file if available
-		configPath := "/etc/wireguard/wg0.conf"
+		configPath := w.configPath
+		if configPath == "" {
+			configPath = "/etc/wireguard/wg0.conf"
+		}
 		if _, err := os.Stat(configPath); err == nil {
 			if err := w.loadConfigFromFile(configPath); err != nil {
 				if w.logger != nil {
@@ -229,63 +282,13 @@ func (w *wgServerService) configureInterface() error {
 		return w.updateInterfaceConfig()
 	}
 
-	// If the device does not exist yet, create it using iproute2.
+	// Device does not exist: this is considered a critical VM configuration error.
 	if w.logger != nil {
-		w.logger.Info("Creating WireGuard interface", zap.String("interface", w.iface))
+		w.logger.Error("WireGuard interface not found",
+			zap.String("interface", w.iface),
+			zap.Error(err))
 	}
-
-	cmd := exec.Command("ip", "link", "add", "dev", w.iface, "type", "wireguard")
-	if output, cmdErr := cmd.CombinedOutput(); cmdErr != nil {
-		// Ignore "File exists" error
-		if !strings.Contains(string(output), "File exists") {
-			return fmt.Errorf("failed to create WireGuard interface %s: %w (output: %s)", w.iface, cmdErr, string(output))
-		}
-	}
-
-	// Try to load configuration from default file location
-	configPath := "/etc/wireguard/wg0.conf"
-	if _, err := os.Stat(configPath); err == nil {
-		if err := w.loadConfigFromFile(configPath); err != nil {
-			if w.logger != nil {
-				w.logger.Warn("Failed to load config from file, using programmatic config", zap.Error(err))
-			}
-			if err := w.updateInterfaceConfig(); err != nil {
-				return err
-			}
-		} else {
-			if w.logger != nil {
-				w.logger.Info("Loaded WireGuard config from file", zap.String("config_path", configPath))
-			}
-		}
-	} else {
-		// No config file, use programmatic configuration
-		if w.logger != nil {
-			w.logger.Info("No config file specified, using programmatic configuration")
-		}
-		if err := w.updateInterfaceConfig(); err != nil {
-			return err
-		}
-	}
-
-	// Add IP address to the interface (wg setconf doesn't set Address)
-	addrCmd := exec.Command("ip", "addr", "add", "10.0.0.1/24", "dev", w.iface)
-	if output, cmdErr := addrCmd.CombinedOutput(); cmdErr != nil {
-		// Ignore "File exists" error (address already assigned)
-		if !strings.Contains(string(output), "File exists") && !strings.Contains(string(output), "already assigned") {
-			return fmt.Errorf("failed to add IP address to WireGuard interface %s: %w (output: %s)", w.iface, cmdErr, string(output))
-		}
-	}
-
-	// Bring the interface up so it can start accepting traffic.
-	upCmd := exec.Command("ip", "link", "set", "up", "dev", w.iface)
-	if output, cmdErr := upCmd.CombinedOutput(); cmdErr != nil {
-		return fmt.Errorf("failed to bring WireGuard interface %s up: %w (output: %s)", w.iface, cmdErr, string(output))
-	}
-
-	if w.logger != nil {
-		w.logger.Info("WireGuard interface configured and up", zap.String("interface", w.iface), zap.String("address", "10.0.0.1/24"))
-	}
-	return nil
+	return fmt.Errorf("wireguard interface %s not found; ensure it is created before starting the orchestrator", w.iface)
 }
 
 // parseWireGuardConfig parses a WireGuard config file and returns the configuration values
