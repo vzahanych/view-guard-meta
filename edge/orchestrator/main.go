@@ -18,7 +18,8 @@ import (
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/dataset"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/deployment"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/events"
-	grpcclient "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/grpc"
+
+	// grpcclient "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/grpc" // Migrated to HTTPS
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/health"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/logger"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/service"
@@ -207,17 +208,31 @@ func main() {
 		log.Info("WireGuard client registered")
 	}
 
-	// Initialize gRPC client (communicates with User VM over WireGuard)
-	var grpcClient *grpcclient.Client
-	log.Info("DEBUG: About to check WireGuard.Enabled", "enabled", cfg.Edge.WireGuard.Enabled)
+	// Initialize HTTPS client (communicates with User VM over WireGuard)
+	// Migrated from gRPC to HTTPS/HTTP2 (see Epic 2.0.0 in IMPLEMENTATION_PLAN_PHASE2.md)
+	var httpsClient *web.HTTPSClient
 	if cfg.Edge.WireGuard.Enabled {
-		log.Info("DEBUG: WireGuard enabled, creating gRPC client")
-		grpcClient = grpcclient.NewClient(&cfg.Edge.WireGuard, wgClient, log)
-		log.Info("DEBUG: gRPC client created, registering")
-		svcMgr.Register(grpcClient)
-		log.Info("gRPC client registered")
+		log.Info("WireGuard enabled, creating HTTPS client")
+
+		// Determine edge ID - use consistent ID for test environments
+		// Priority: 1) EDGE_ID env var, 2) Default "poc-edge-1" for test environments
+		edgeID := "poc-edge-1" // Default for PoC/test environment
+		if envEdgeID := os.Getenv("EDGE_ID"); envEdgeID != "" {
+			edgeID = envEdgeID
+		}
+
+		var httpsErr error
+		httpsClient, httpsErr = web.NewHTTPSClient(&cfg.Edge.WireGuard, wgClient, edgeID, log)
+		if httpsErr != nil {
+			log.Error("Failed to create HTTPS client", "error", httpsErr)
+			log.Error("Continuing without HTTPS client - some features will be unavailable")
+			// Don't return error - allow service to start without HTTPS client
+			httpsClient = nil
+		}
+		svcMgr.Register(httpsClient)
+		log.Info("HTTPS client registered", "edge_id", edgeID)
 	} else {
-		log.Info("DEBUG: WireGuard disabled, skipping gRPC client")
+		log.Info("WireGuard disabled, skipping HTTPS client")
 	}
 
 	// Initialize telemetry collector
@@ -235,10 +250,11 @@ func main() {
 		log.Info("Telemetry collector registered")
 	}
 
-	// Initialize telemetry sender (sends telemetry/heartbeat via gRPC)
+	// Initialize telemetry sender (sends telemetry/heartbeat via HTTPS)
 	// This triggers edge auto-registration when it sends the first heartbeat
+	// Migrated from gRPC to HTTPS/HTTP2 (see Epic 2.0.0 in IMPLEMENTATION_PLAN_PHASE2.md)
 	var telemetrySender *telemetry.Sender
-	if cfg.Edge.Telemetry.Enabled && grpcClient != nil {
+	if cfg.Edge.Telemetry.Enabled && httpsClient != nil {
 		// Determine edge ID - use consistent ID for test environments
 		// Priority: 1) EDGE_ID env var, 2) Default "poc-edge-1" for test environments
 		// In production, EDGE_ID should be explicitly set
@@ -249,13 +265,13 @@ func main() {
 		// Note: We don't use hostname by default to ensure consistency in test environments
 		// where container hostnames may be Docker container IDs
 
-		// Create gRPC telemetry sender wrapper
-		grpcTelemetrySender := grpcclient.NewTelemetrySender(grpcClient, log)
+		// Create HTTPS telemetry sender adapter (implements TelemetryClient interface)
+		httpsTelemetrySender := web.NewHTTPSTelemetrySender(httpsClient, log)
 
 		// Create telemetry sender service
 		telemetrySender = telemetry.NewSender(
 			telemetryCollector,
-			grpcTelemetrySender,
+			httpsTelemetrySender,
 			&cfg.Edge.Telemetry,
 			edgeID,
 			log,
@@ -322,7 +338,7 @@ func main() {
 
 	// Register capability sync service first (reports camera dataset readiness to VM)
 	// This must be created before web server so we can pass it to web server
-	capabilitySync := capabilities.NewSyncService(cfg, cameraMgr, screenshotSvc, grpcClient, log)
+	capabilitySync := capabilities.NewSyncService(cfg, cameraMgr, screenshotSvc, httpsClient, log)
 	svcMgr.Register(capabilitySync)
 	log.Info("Capability sync service registered")
 
@@ -438,18 +454,23 @@ func main() {
 		}
 	}
 
-	// Register Edge gRPC server (for VM → Edge calls like RequestSnapshotCapture and DeployModel)
-	var grpcServer *grpcclient.Server
+	// Register Edge HTTPS server (for VM → Edge calls like RequestSnapshotCapture and DeployModel)
+	var httpsServer *web.HTTPServer
 	if cfg.Edge.WireGuard.Enabled && snapshotRequestSvc != nil {
-		grpcServer = grpcclient.NewServer(&cfg.Edge.WireGuard, log, snapshotRequestSvc)
-		svcMgr.Register(grpcServer)
-		log.Info("Edge gRPC server registered (for VM → Edge calls)")
+		// Get EdgeID (same logic as telemetry sender for consistency)
+		edgeID := "poc-edge-1" // Default for PoC/test environment
+		if envEdgeID := os.Getenv("EDGE_ID"); envEdgeID != "" {
+			edgeID = envEdgeID
+		}
+		httpsServer = web.NewHTTPServer(&cfg.Edge.WireGuard, log, snapshotRequestSvc, edgeID, wgClient)
+		svcMgr.Register(httpsServer)
+		log.Info("Edge HTTPS server registered (for VM → Edge calls)", "edge_id", edgeID)
 	}
 
-	// Wire model storage to gRPC server for model deployment (if both are available)
-	if grpcServer != nil && modelStorage != nil {
-		grpcServer.SetModelStorage(modelStorage)
-		log.Info("Model storage service wired to gRPC server for model deployment")
+	// Wire model storage to HTTPS server for model deployment (if both are available)
+	if httpsServer != nil && modelStorage != nil {
+		httpsServer.SetModelStorage(modelStorage)
+		log.Info("Model storage service wired to HTTPS server for model deployment")
 	}
 
 	// Create health check manager

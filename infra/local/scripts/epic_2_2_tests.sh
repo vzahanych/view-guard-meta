@@ -113,117 +113,86 @@ test_wireguard_functionality() {
     return 0
 }
 
-test_grpc_connection() {
+test_https_connection() {
     local edge_id="$1"
-    log_info "Test 6: Verifying bidirectional gRPC connection is established..."
+    log_info "Test 6: Verifying HTTPS servers are listening and reachable..."
     
-    # First verify Edge → VM gRPC connection (Edge connects to VM on port 50051)
-    local status_response=$(get_edge_status "$edge_id")
-    local grpc_connected=$(get_json_bool "$status_response" ".grpc_connection.connected")
+    # HTTPS is stateless - we just need to verify servers are listening on port 8443
+    # No need to maintain persistent connections like gRPC
     
-    if [ "$grpc_connected" != "true" ]; then
-        log_warn "Edge → VM gRPC connection not yet established (may be connecting)"
-        # Don't fail yet - wait a bit for connection
+    # Step 1: Verify VM HTTPS server is listening on port 8443 (Edge → VM)
+    log_info "Checking if VM HTTPS server is listening on port 8443..."
+    local vm_https_listening=false
+    if docker compose -f "${SCRIPT_DIR}/docker-compose.yml" exec -T user-vm-api sh -c "netstat -tlnp 2>/dev/null | grep -q ':8443' || ss -tlnp 2>/dev/null | grep -q ':8443'" 2>/dev/null; then
+        vm_https_listening=true
+        test_passed "VM HTTPS server is listening on port 8443 (ready for Edge → VM calls)"
+    else
+        log_warn "VM HTTPS server not yet listening on port 8443"
+        # Wait a bit and retry
         sleep 5
-        status_response=$(get_edge_status "$edge_id")
-        grpc_connected=$(get_json_bool "$status_response" ".grpc_connection.connected")
-        if [ "$grpc_connected" != "true" ]; then
-            test_failed "Edge → VM gRPC connection not established" "investigate_grpc_connection \"$edge_id\""
+        if docker compose -f "${SCRIPT_DIR}/docker-compose.yml" exec -T user-vm-api sh -c "netstat -tlnp 2>/dev/null | grep -q ':8443' || ss -tlnp 2>/dev/null | grep -q ':8443'" 2>/dev/null; then
+            vm_https_listening=true
+            test_passed "VM HTTPS server is listening on port 8443 (ready for Edge → VM calls)"
+        else
+            test_failed "VM HTTPS server not listening on port 8443" "investigate_vm_https_server"
             return 1
         fi
     fi
     
-    test_passed "Edge → VM gRPC connection is established (Edge connects to VM on port 50051)"
-    
-    # Now verify VM → Edge gRPC connection (VM connects to Edge on port 50052)
-    # This is critical - VM must be able to call Edge's gRPC server
-    # We establish this connection by making a test gRPC call (GetConfig is simplest)
-    # This ensures the connection is in the pool and ready for subsequent operations
-    log_info "Establishing VM → Edge gRPC connection (VM connects to Edge on port 50052)..."
-    log_info "Making test gRPC call to establish and verify VM → Edge connection..."
-    
-    # The connection will be established when we make any VM → Edge gRPC call
-    # We use the gRPC connection health verification which internally calls GetOrCreateConnection
-    # This ensures the connection is established and stored in the connection pool
-    # Note: test_verify_grpc_connection_health uses VM API which internally uses gRPC
-    # But we need to actually establish the connection by making a real gRPC call
-    # So we'll wait for cameras to be available and make a lightweight test call
-    
-    # Wait a bit for cameras to be discovered (they may not be ready immediately)
-    log_info "Waiting for cameras to be available for VM → Edge connection test..."
-    local camera_id=""
-    local max_wait=30
-    local waited=0
-    while [ $waited -lt $max_wait ]; do
-        local cameras_response=$(call_api "${VM_API}/api/cameras?edge_id=${edge_id}")
-        if [ "$cameras_response" != "FAILED" ]; then
-            if command -v jq >/dev/null 2>&1; then
-                camera_id=$(echo "$cameras_response" | jq -r '.cameras[0].id // empty' 2>/dev/null || echo "")
-            else
-                camera_id=$(echo "$cameras_response" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4 || echo "")
-            fi
-            if [ -n "$camera_id" ] && [ "$camera_id" != "null" ]; then
-                break
-            fi
-        fi
-        sleep 2
-        waited=$((waited + 2))
-    done
-    
-    if [ -n "$camera_id" ] && [ "$camera_id" != "null" ]; then
-        # Make a test RequestSnapshotCapture call with count=0 to establish VM → Edge connection
-        # This ensures the connection is established and stored in the connection pool
-        log_info "Making test gRPC call to establish VM → Edge connection (camera: $camera_id)..."
-        local test_request_json="/tmp/test_grpc_connection_$$.json"
-        cat > "$test_request_json" <<EOF
-{
-    "label": "normal",
-    "count": 0,
-    "auto_capture": true
-}
-EOF
-        
-        local test_response=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
-            "${VM_API}/api/cameras/${camera_id}/request-snapshots?edge_id=${edge_id}" \
-            -H "Content-Type: application/json" \
-            -d "@$test_request_json" 2>&1 || echo "FAILED")
-        rm -f "$test_request_json"
-        
-        local http_code=$(echo "$test_response" | grep -o "HTTP_CODE:[0-9]*" | tail -1 | cut -d: -f2 || echo "")
-        test_response=$(echo "$test_response" | sed 's/HTTP_CODE:[0-9]*$//' | sed 's/^[[:space:]]*$//' | sed '/^$/d' || echo "")
-        
-        if [ "$http_code" = "200" ] || [ "$http_code" = "201" ]; then
-            test_passed "VM → Edge gRPC connection established and verified (VM connects to Edge on port 50052)"
-            log_info "Bidirectional gRPC connection pool initialized - connection ready for reuse in subsequent steps"
-            log_info "VM → Edge connection (port 50052) is established and stored in connection pool"
-            return 0
-        else
-            log_warn "VM → Edge gRPC connection test call returned HTTP $http_code"
-            log_warn "Response: $test_response"
-            # Still try to verify connection health - connection might be established even if call failed
-            if test_verify_grpc_connection_health "$edge_id" 2>/dev/null; then
-                test_passed "VM → Edge gRPC connection established (connection health verified)"
-                return 0
-            else
-                test_failed "VM → Edge gRPC connection not established (test call failed: HTTP $http_code)" \
-                    "investigate_grpc_connection \"$edge_id\"; investigate_edge_grpc_server"
-                return 1
-            fi
-        fi
+    # Step 2: Verify Edge HTTPS server is listening on port 8443 (VM → Edge)
+    log_info "Checking if Edge HTTPS server is listening on port 8443..."
+    local edge_https_listening=false
+    if docker compose -f "${SCRIPT_DIR}/docker-compose.yml" exec -T edge-orchestrator sh -c "netstat -tlnp 2>/dev/null | grep -q ':8443' || ss -tlnp 2>/dev/null | grep -q ':8443'" 2>/dev/null; then
+        edge_https_listening=true
+        test_passed "Edge HTTPS server is listening on port 8443 (ready for VM → Edge calls)"
     else
-        # No cameras available yet - use connection health check which will establish connection if possible
-        log_warn "No cameras available for VM → Edge gRPC connection test, using connection health check..."
-        if test_verify_grpc_connection_health "$edge_id" 2>/dev/null; then
-            test_passed "VM → Edge gRPC connection established (connection health verified, cameras not yet available)"
-            log_info "Bidirectional gRPC connection pool initialized - connection ready for reuse in subsequent steps"
-            return 0
+        log_warn "Edge HTTPS server not yet listening on port 8443"
+        # Wait a bit and retry
+        sleep 5
+        if docker compose -f "${SCRIPT_DIR}/docker-compose.yml" exec -T edge-orchestrator sh -c "netstat -tlnp 2>/dev/null | grep -q ':8443' || ss -tlnp 2>/dev/null | grep -q ':8443'" 2>/dev/null; then
+            edge_https_listening=true
+            test_passed "Edge HTTPS server is listening on port 8443 (ready for VM → Edge calls)"
         else
-            log_warn "VM → Edge gRPC connection health check failed (cameras not available, connection may establish later)"
-            # Don't fail - connection might establish when cameras are available
-            test_passed "Edge → VM gRPC connection verified (VM → Edge connection will be established when cameras are available)"
-            return 0
+            test_failed "Edge HTTPS server not listening on port 8443" "investigate_edge_https_server"
+            return 1
         fi
     fi
+    
+    # Step 3: Verify servers can respond to HTTPS requests (functional check)
+    log_info "Verifying HTTPS servers can respond to requests..."
+    
+    # Test VM HTTPS server by making a health check request through WireGuard tunnel
+    # This verifies the server is accessible through the WireGuard tunnel (10.0.0.1:8443)
+    log_info "Testing VM HTTPS server health endpoint through WireGuard tunnel (10.0.0.1:8443)..."
+    local vm_health_test=$(docker compose -f "${SCRIPT_DIR}/docker-compose.yml" exec -T edge-orchestrator sh -c \
+        "timeout 5 wget --no-check-certificate -q -O- -T 5 https://10.0.0.1:8443/health 2>&1 | head -1 || echo 'FAILED'" 2>/dev/null || echo "FAILED")
+    
+    if echo "$vm_health_test" | grep -q "healthy\|status"; then
+        test_passed "VM HTTPS server is functional (health check successful through WireGuard tunnel)"
+    else
+        log_warn "VM HTTPS server health check returned: $vm_health_test (may need more time to start or wget not available)"
+        # Don't fail - server might still be initializing or wget might not be available
+    fi
+    
+    # Test Edge HTTPS server by making a health check request through WireGuard tunnel
+    # This verifies the server is accessible through the WireGuard tunnel (10.0.0.2:8443)
+    log_info "Testing Edge HTTPS server health endpoint through WireGuard tunnel (10.0.0.2:8443)..."
+    local edge_health_test=$(docker compose -f "${SCRIPT_DIR}/docker-compose.yml" exec -T user-vm-api sh -c \
+        "timeout 5 wget --no-check-certificate -q -O- -T 5 https://10.0.0.2:8443/health 2>&1 | head -1 || echo 'FAILED'" 2>/dev/null || echo "FAILED")
+    
+    if echo "$edge_health_test" | grep -q "healthy\|status"; then
+        test_passed "Edge HTTPS server is functional (health check successful through WireGuard tunnel)"
+    else
+        log_warn "Edge HTTPS server health check returned: $edge_health_test (may need more time to start or wget not available)"
+        # Don't fail - server might still be initializing or wget might not be available
+    fi
+    
+    # Both servers are listening - HTTPS connections can be made on-demand (stateless)
+    test_passed "Bidirectional HTTPS servers are listening and ready (VM: 8443, Edge: 8443)"
+    log_info "HTTPS is stateless - connections are made on-demand, no persistent connection needed"
+    log_info "Both servers verified: VM HTTPS server (port 8443) and Edge HTTPS server (port 8443)"
+    
+    return 0
 }
 
 test_connection_state() {
@@ -238,8 +207,23 @@ test_connection_state() {
          state=\$(get_json_value \"\$status\" '.connection_state') && \
          [ \"\$state\" = '$expected_state' ]" \
         60 2 \
-        "investigate_grpc_connection \"$edge_id\""; then
+        "investigate_https_connection \"$edge_id\""; then
         test_passed "Edge connection state is '$expected_state'"
+        
+        # Verify Edge state tracking is working (state snapshots in MinIO)
+        # This confirms VM→Edge connection is functional and state tracking is active
+        if [ "$expected_state" = "connected" ]; then
+            log_info "Verifying Edge state tracking (state snapshots in MinIO)..."
+            # Wait a bit for state tracking to produce first snapshot (tracking interval is 30s)
+            sleep 35
+            if test_verify_edge_state_in_minio "$edge_id" 90 2>/dev/null; then
+                log_info "Edge state tracking verified - snapshots stored in MinIO"
+            else
+                log_warn "Edge state tracking verification failed (may need more time for first snapshot)"
+                # Don't fail the test - state tracking might need more time
+            fi
+        fi
+        
         return 0
     fi
     
@@ -249,6 +233,18 @@ test_connection_state() {
     
     if [ "$connection_state" = "$expected_state" ]; then
         test_passed "Edge connection state is '$expected_state'"
+        
+        # Verify Edge state tracking if state is connected
+        if [ "$expected_state" = "connected" ]; then
+            log_info "Verifying Edge state tracking (state snapshots in MinIO)..."
+            sleep 35
+            if test_verify_edge_state_in_minio "$edge_id" 90 2>/dev/null; then
+                log_info "Edge state tracking verified - snapshots stored in MinIO"
+            else
+                log_warn "Edge state tracking verification failed (may need more time for first snapshot)"
+            fi
+        fi
+        
         return 0
     elif [ "$connection_state" = "connecting" ] || [ "$connection_state" = "reconnecting" ] || [ "$connection_state" = "registered" ]; then
         log_warn "Edge connection state is '$connection_state' (may transition to '$expected_state' after first heartbeat)"
@@ -262,7 +258,7 @@ test_connection_state() {
     fi
     
     test_failed "Edge connection state is '$connection_state' (expected '$expected_state')" \
-        "investigate_wireguard_tunnel \"$edge_id\"; investigate_grpc_connection \"$edge_id\""
+        "investigate_wireguard_tunnel \"$edge_id\"; investigate_https_connection \"$edge_id\""
     return 1
 }
 

@@ -8,19 +8,25 @@ import (
 
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/camera"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/config"
-	grpcclient "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/grpc"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/logger"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/service"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/web/screenshots"
 	edgeproto "github.com/vzahanych/view-guard-meta/proto/go/generated/edge"
 )
 
+// HTTPSClient interface for capability sync (supports both gRPC and HTTPS during migration)
+type HTTPSClient interface {
+	IsConnected() bool
+	SyncCapabilities(ctx context.Context, req *edgeproto.SyncCapabilitiesRequest) (*edgeproto.SyncCapabilitiesResponse, error)
+}
+
 // SyncService periodically reports camera/dataset readiness to the VM
+// Migrated from gRPC to HTTPS/HTTP2 (see Epic 2.0.0 in IMPLEMENTATION_PLAN_PHASE2.md)
 type SyncService struct {
 	*service.ServiceBase
 	cameraMgr     *camera.Manager
 	screenshotSvc *screenshots.Service
-	grpcClient    *grpcclient.Client
+	httpsClient   HTTPSClient // HTTPS client for Edge → VM calls (migrated from gRPC)
 	minSnapshots  int
 	interval      time.Duration
 	cancel        context.CancelFunc
@@ -29,7 +35,7 @@ type SyncService struct {
 }
 
 // NewSyncService creates a new capability sync service
-func NewSyncService(cfg *config.Config, camMgr *camera.Manager, screenshotSvc *screenshots.Service, grpcClient *grpcclient.Client, log *logger.Logger) *SyncService {
+func NewSyncService(cfg *config.Config, camMgr *camera.Manager, screenshotSvc *screenshots.Service, httpsClient HTTPSClient, log *logger.Logger) *SyncService {
 	minSnapshots := cfg.Edge.AI.MinNormalSnapshots
 	if minSnapshots <= 0 {
 		minSnapshots = 50
@@ -42,7 +48,7 @@ func NewSyncService(cfg *config.Config, camMgr *camera.Manager, screenshotSvc *s
 		ServiceBase:   service.NewServiceBase("capability-sync", log),
 		cameraMgr:     camMgr,
 		screenshotSvc: screenshotSvc,
-		grpcClient:    grpcClient,
+		httpsClient:   httpsClient,
 		minSnapshots:  minSnapshots,
 		interval:      interval,
 		syncTrigger:   make(chan struct{}, 1), // Buffered channel for immediate sync triggers
@@ -53,8 +59,8 @@ func NewSyncService(cfg *config.Config, camMgr *camera.Manager, screenshotSvc *s
 func (s *SyncService) Start(ctx context.Context) error {
 	s.GetStatus().SetStatus(service.StatusRunning)
 
-	if s.cameraMgr == nil || s.grpcClient == nil {
-		s.LogInfo("Capability sync disabled (missing camera manager or gRPC client)")
+	if s.cameraMgr == nil || s.httpsClient == nil {
+		s.LogInfo("Capability sync disabled (missing camera manager or HTTPS client)")
 		s.GetStatus().SetStatus(service.StatusStopped)
 		return nil
 	}
@@ -92,7 +98,7 @@ func (s *SyncService) Start(ctx context.Context) error {
 					}
 					// Camera discovered - mark as pending and attempt sync
 					s.pendingSync = true
-					s.LogDebug("Camera registered, checking gRPC connection for sync", "camera_id", event.Data["camera_id"])
+					s.LogDebug("Camera registered, checking HTTPS connection for sync", "camera_id", event.Data["camera_id"])
 
 					// Attempt sync - it will check gRPC connection and authentication
 					select {
@@ -220,16 +226,9 @@ func (s *SyncService) handleScreenshotSaved(ctx context.Context, ch <-chan servi
 
 func (s *SyncService) syncOnce(ctx context.Context) {
 	// Check gRPC connection first
-	if !s.grpcClient.IsConnected() {
-		s.LogDebug("Skipping capability sync - gRPC not connected (will retry when connection is ready)")
+	if !s.httpsClient.IsConnected() {
+		s.LogDebug("Skipping capability sync - HTTPS not connected (will retry when connection is ready)")
 		s.pendingSync = true // Mark as pending so we retry when connection is ready
-		return
-	}
-
-	controlClient := s.grpcClient.GetControlClient()
-	if controlClient == nil {
-		s.LogDebug("Skipping capability sync - control client unavailable (will retry)")
-		s.pendingSync = true
 		return
 	}
 
@@ -261,7 +260,7 @@ func (s *SyncService) syncOnce(ctx context.Context) {
 	callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	resp, err := controlClient.SyncCapabilities(callCtx, req)
+	resp, err := s.httpsClient.SyncCapabilities(callCtx, req)
 	if err != nil {
 		// Check if it's an authentication error - if so, mark as pending and retry later
 		if isAuthError(err) {
@@ -294,13 +293,8 @@ func (s *SyncService) syncOnce(ctx context.Context) {
 // SyncCameraCapabilities syncs capabilities for a single camera to the VM
 // This is used when a dataset is uploaded to immediately update the VM with the latest status
 func (s *SyncService) SyncCameraCapabilities(ctx context.Context, cameraID string) error {
-	if !s.grpcClient.IsConnected() {
-		return fmt.Errorf("gRPC not connected")
-	}
-
-	controlClient := s.grpcClient.GetControlClient()
-	if controlClient == nil {
-		return fmt.Errorf("control client unavailable")
+	if !s.httpsClient.IsConnected() {
+		return fmt.Errorf("HTTPS not connected")
 	}
 
 	// Get camera
@@ -328,7 +322,7 @@ func (s *SyncService) SyncCameraCapabilities(ctx context.Context, cameraID strin
 	callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	resp, err := controlClient.SyncCapabilities(callCtx, req)
+	resp, err := s.httpsClient.SyncCapabilities(callCtx, req)
 	if err != nil {
 		return fmt.Errorf("capability sync failed: %w", err)
 	}

@@ -15,6 +15,17 @@ cleanup() {
     
     CLEANUP_DONE=true
     
+    # Check if test failed - if so, keep containers running for log inspection
+    if [ "${TEST_FAILED:-false}" = "true" ]; then
+        log_section "Test failed - keeping containers running for log inspection"
+        log_info "Containers are still running. You can inspect logs with:"
+        log_info "  docker compose -f $COMPOSE_FILE logs <service-name>"
+        log_info "  docker compose -f $COMPOSE_FILE ps"
+        log_info "To stop containers manually: docker compose -f $COMPOSE_FILE down"
+        log_info "Cleanup skipped (containers kept running for debugging)"
+        return 0
+    fi
+    
     if [ "$CLEANUP_ON_EXIT" = "true" ]; then
         log_section "Cleaning up test environment"
         log_info "Stopping docker-compose services..."
@@ -35,8 +46,21 @@ cleanup_old_data() {
     
     cd "$SCRIPT_DIR"
     
-    log_info "Stopping any running docker-compose services..."
-    docker compose -f "$COMPOSE_FILE" down 2>/dev/null || true
+    # Check if containers are already running
+    RUNNING_CONTAINERS=$(docker compose -f "$COMPOSE_FILE" ps -q 2>/dev/null | wc -l || echo "0")
+    RUNNING_CONTAINERS=${RUNNING_CONTAINERS:-0}
+    
+    if [ "$RUNNING_CONTAINERS" -gt 0 ] && [ "${REBUILD:-false}" != "true" ]; then
+        log_info "Containers are already running ($RUNNING_CONTAINERS containers detected)"
+        log_info "Restarting containers to ensure clean state (rebuilding not required)..."
+        docker compose -f "$COMPOSE_FILE" restart 2>/dev/null || {
+            log_warn "Restart failed, stopping and starting containers..."
+            docker compose -f "$COMPOSE_FILE" down 2>/dev/null || true
+        }
+    else
+        log_info "Stopping any running docker-compose services..."
+        docker compose -f "$COMPOSE_FILE" down 2>/dev/null || true
+    fi
     
     # Check if volumes exist - only clean keys if we're actually removing volumes
     # Keys should persist across test runs unless volumes are cleaned

@@ -33,6 +33,50 @@ investigate_service_health() {
     fi
 }
 
+investigate_vm_https_server() {
+    log_info "Investigating VM HTTPS server..."
+    
+    # Check if port 8443 is listening
+    if docker compose -f "$COMPOSE_FILE" exec -T user-vm-api sh -c "netstat -tlnp 2>/dev/null | grep -q ':8443' || ss -tlnp 2>/dev/null | grep -q ':8443'" 2>/dev/null; then
+        log_info "  ✓ Port 8443 is listening in user-vm-api container"
+    else
+        log_error "  ✗ Port 8443 is not listening in user-vm-api container"
+    fi
+    
+    # Check VM API logs for HTTPS server
+    log_info "  Recent user-vm-api logs (HTTPS server):"
+    docker compose -f "$COMPOSE_FILE" logs --tail 30 user-vm-api 2>/dev/null | grep -E "(HTTPS|8443|https.*server|listening|error|ERROR)" | tail -20 | sed 's/^/    /' || true
+}
+
+investigate_edge_https_server() {
+    log_info "Investigating Edge HTTPS server..."
+    
+    # Check if port 8443 is listening
+    if docker compose -f "$COMPOSE_FILE" exec -T edge-orchestrator sh -c "netstat -tlnp 2>/dev/null | grep -q ':8443' || ss -tlnp 2>/dev/null | grep -q ':8443'" 2>/dev/null; then
+        log_info "  ✓ Port 8443 is listening in edge-orchestrator container"
+    else
+        log_error "  ✗ Port 8443 is not listening in edge-orchestrator container"
+    fi
+    
+    # Check Edge orchestrator logs for HTTPS server
+    log_info "  Recent edge-orchestrator logs (HTTPS server):"
+    docker compose -f "$COMPOSE_FILE" logs --tail 30 edge-orchestrator 2>/dev/null | grep -E "(HTTPS|8443|https.*server|listening|error|ERROR)" | tail -20 | sed 's/^/    /' || true
+}
+
+investigate_https_connection() {
+    local edge_id="${1:-poc-edge-1}"
+    log_info "Investigating HTTPS connection for Edge: $edge_id"
+    
+    # Check VM HTTPS server
+    investigate_vm_https_server
+    
+    # Check Edge HTTPS server
+    investigate_edge_https_server
+    
+    # Check WireGuard tunnel
+    investigate_wireguard_tunnel "$edge_id"
+}
+
 investigate_edge_registration() {
     log_info "Investigating Edge registration..."
     
@@ -47,7 +91,7 @@ investigate_edge_registration() {
     
     # Check edge orchestrator logs
     log_info "  Recent edge-orchestrator logs:"
-    docker compose -f "$COMPOSE_FILE" logs --tail 30 edge-orchestrator 2>/dev/null | grep -E "(telemetry|heartbeat|gRPC|WireGuard|register|error|ERROR)" | tail -20 | sed 's/^/    /' || true
+    docker compose -f "$COMPOSE_FILE" logs --tail 30 edge-orchestrator 2>/dev/null | grep -E "(telemetry|heartbeat|HTTPS|WireGuard|register|error|ERROR)" | tail -20 | sed 's/^/    /' || true
     
     # Check user-vm-api logs for edge registration
     log_info "  Recent user-vm-api logs (edge-related):"

@@ -71,10 +71,31 @@ step_2_0_generate_config() {
   
   EDGE_ID=$(cat "$EDGE_ID_FILE")
   echo "[start-local-env] EDGE_ID generated: $EDGE_ID"
-  
+
   # Export EDGE_ID for docker-compose
   export EDGE_ID
-  
+
+  # Detect WireGuard key rotation and reset state if keys changed
+  EDGE_PUB_FILE="${WG_DIR}/keys/edge.public"
+  SERVER_PUB_FILE="${WG_DIR}/keys/server.public"
+  KEY_FINGERPRINT_FILE="${WG_DIR}/keys/.last-key-fingerprint"
+
+  if [ -f "$EDGE_PUB_FILE" ] && [ -f "$SERVER_PUB_FILE" ]; then
+    current_fingerprint="$(cat "$EDGE_PUB_FILE" 2>/dev/null):$(cat "$SERVER_PUB_FILE" 2>/dev/null)"
+    previous_fingerprint=""
+    if [ -f "$KEY_FINGERPRINT_FILE" ]; then
+      previous_fingerprint="$(cat "$KEY_FINGERPRINT_FILE" 2>/dev/null || true)"
+    fi
+
+    if [ "$current_fingerprint" != "$previous_fingerprint" ]; then
+      echo "[start-local-env] Detected new WireGuard keys (fingerprint changed). Resetting state to avoid stale peer/db entries..."
+      # Remove containers and volumes so the user-vm-api DB and WireGuard state realign with the new keys
+      docker compose -f "$COMPOSE_FILE" down -v || true
+      echo "$current_fingerprint" > "$KEY_FINGERPRINT_FILE"
+      echo "[start-local-env] State reset complete. Volumes will be recreated on next start."
+    fi
+  fi
+
   echo "[start-local-env] Step 2.0 complete: WireGuard configuration and TLS/mTLS certificates generated"
 }
 

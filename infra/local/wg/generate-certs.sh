@@ -17,13 +17,13 @@ if ! command -v openssl >/dev/null 2>&1; then
     exit 1
 fi
 
-# Check if certificates already exist - if so, regenerate to include MinIO in SANs
-# (Previous certificates may not have included "minio" in Subject Alternative Names)
+# Check if certificates already exist - if so, regenerate to include required SANs
+# (Previous certificates may not have included all required names in Subject Alternative Names)
 REGENERATE=false
 if [ -f "${CERTS_DIR}/vm-server.crt" ]; then
-    # Check if certificate includes "minio" in SANs
-    if ! openssl x509 -in "${CERTS_DIR}/vm-server.crt" -noout -text 2>/dev/null | grep -q "DNS:minio"; then
-        echo "[generate-certs] Existing VM server certificate does not include 'minio' in SANs, regenerating..."
+    # Check if certificate includes "vm-server" in SANs (required for HTTPS client verification)
+    if ! openssl x509 -in "${CERTS_DIR}/vm-server.crt" -noout -text 2>/dev/null | grep -q "DNS:vm-server"; then
+        echo "[generate-certs] Existing VM server certificate does not include 'vm-server' in SANs, regenerating..."
         REGENERATE=true
     fi
 fi
@@ -163,8 +163,9 @@ extendedKeyUsage = serverAuth,clientAuth
 subjectAltName = @alt_names
 [alt_names]
 DNS.1 = user-vm-api
-DNS.2 = localhost
-DNS.3 = minio
+DNS.2 = vm-server
+DNS.3 = localhost
+DNS.4 = minio
 IP.1 = 127.0.0.1
 IP.2 = 10.0.0.1
 EOF

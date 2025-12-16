@@ -17,6 +17,10 @@ import (
 	edge "github.com/vzahanych/view-guard-meta/proto/go/generated/edge"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/health"
+	healthgrpc "google.golang.org/grpc/health/grpc_health_v1"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/keepalive"
 )
 
 // Server implements Edge-side gRPC server for VM to call Edge
@@ -28,6 +32,7 @@ type Server struct {
 	listener        net.Listener
 	snapshotService *snapshot_request.Service
 	modelStorage    ModelStorageService // Optional: for model deployment
+	edgeID          string              // Edge ID for GetConfig
 	mu              sync.RWMutex
 }
 
@@ -36,12 +41,14 @@ func NewServer(
 	cfg *config.WireGuardConfig,
 	log *logger.Logger,
 	snapshotService *snapshot_request.Service,
+	edgeID string, // Edge ID for GetConfig
 ) *Server {
 	return &Server{
 		ServiceBase:     service.NewServiceBase("grpc-server", log),
 		config:          cfg,
 		logger:          log,
 		snapshotService: snapshotService,
+		edgeID:          edgeID, // Store EdgeID for GetConfig
 	}
 }
 
@@ -118,17 +125,54 @@ func (s *Server) Start(ctx context.Context) error {
 		opts = append(opts, grpc.Creds(creds))
 	}
 
+	// Configure keepalive enforcement policy and server parameters
+	// This ensures connections are kept alive and dead connections are detected
+	// Matches the configuration on VM server for consistency
+	kaep := keepalive.EnforcementPolicy{
+		MinTime:             5 * time.Second, // Minimum time between client pings (prevent ping flooding)
+		PermitWithoutStream: true,            // Allow pings even when there are no active streams
+	}
+
+	kasp := keepalive.ServerParameters{
+		MaxConnectionIdle:     15 * time.Minute, // Close idle connections after 15 minutes
+		MaxConnectionAge:      30 * time.Minute, // Close connections after 30 minutes (connection rotation)
+		MaxConnectionAgeGrace: 5 * time.Second,  // Grace period for pending RPCs before closing
+		Time:                  30 * time.Second, // Ping client if idle for 30 seconds to verify liveness
+		Timeout:               5 * time.Second,  // Wait 5 seconds for ping ack before considering connection dead
+	}
+
+	opts = append(opts,
+		grpc.KeepaliveEnforcementPolicy(kaep),
+		grpc.KeepaliveParams(kasp),
+	)
+
 	s.grpcServer = grpc.NewServer(opts...)
+
+	// Register gRPC health checking service (standard gRPC health service)
+	// This allows clients to check server health using the standard gRPC health API
+	healthServer := health.NewServer()
+	healthgrpc.RegisterHealthServer(s.grpcServer, healthServer)
+
+	// Set initial health status to SERVING (empty string = overall system health)
+	healthServer.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
+
+	// Set health status for ControlService
+	healthServer.SetServingStatus("edge.ControlService", healthpb.HealthCheckResponse_SERVING)
 
 	// Register ControlService (for RequestSnapshotCapture and DeployModel)
 	s.mu.RLock()
 	modelStorage := s.modelStorage
 	s.mu.RUnlock()
 
+	s.mu.RLock()
+	edgeID := s.edgeID
+	s.mu.RUnlock()
+
 	edge.RegisterControlServiceServer(s.grpcServer, &controlServiceServer{
 		snapshotService: s.snapshotService,
 		modelStorage:    modelStorage,
 		logger:          s.logger,
+		edgeID:          edgeID,
 	})
 
 	// Start server in goroutine
@@ -179,11 +223,48 @@ type controlServiceServer struct {
 	snapshotService *snapshot_request.Service
 	modelStorage    ModelStorageService // Optional: for model deployment
 	logger          *logger.Logger
+	edgeID          string // Edge ID for GetConfig
 }
 
 // ModelStorageService interface for model storage (matches web.ModelStorageService)
 type ModelStorageService interface {
 	StoreModel(ctx context.Context, modelID string, deploymentID *string, edgeID string, cameraID *string, modelData []byte, metadata *storage.ModelMetadata) (*storage.DeployedModel, error)
+}
+
+// GetConfig retrieves current Edge configuration and state
+// Used by VM for state tracking and health monitoring
+func (s *controlServiceServer) GetConfig(ctx context.Context, req *edge.GetConfigRequest) (*edge.GetConfigResponse, error) {
+	// Build configuration JSON with Edge state information
+	config := map[string]interface{}{
+		"edge_id": s.edgeID,
+		"services": map[string]interface{}{
+			"edge_ai_service": map[string]interface{}{
+				"status": "healthy", // TODO: Query actual health from edge-ai-service
+			},
+			"edge_orchestrator": map[string]interface{}{
+				"status": "running",
+			},
+		},
+		"wireguard": map[string]interface{}{
+			"enabled":   true,
+			"interface": "wg0",
+		},
+		"timestamp": time.Now().Unix(),
+	}
+
+	configJSON, err := json.Marshal(config)
+	if err != nil {
+		s.logger.Error("Failed to marshal config", "error", err)
+		return &edge.GetConfigResponse{
+			Success:      false,
+			ErrorMessage: fmt.Sprintf("failed to marshal config: %v", err),
+		}, nil
+	}
+
+	return &edge.GetConfigResponse{
+		Success:    true,
+		ConfigJson: string(configJSON),
+	}, nil
 }
 
 // RequestSnapshotCapture handles snapshot capture requests from VM

@@ -71,6 +71,9 @@ EPIC_TESTS=0
 # Cleanup flag
 CLEANUP_DONE=false
 
+# Test failure flag (used to keep containers running on failure)
+TEST_FAILED=false
+
 # Test execution flags
 RUN_EPIC_2_0=false
 RUN_EPIC_2_1=false
@@ -336,26 +339,26 @@ test_epic_2_1() {
         return 1
     fi
     
-    # Check that gRPC TLS certificates are accessible
-    log_info "Verifying gRPC TLS certificate accessibility..."
+    # Check that HTTPS TLS certificates are accessible
+    log_info "Verifying HTTPS TLS certificate accessibility..."
     
-    # VM gRPC server certificates
+    # VM HTTPS server certificates
     if ! docker compose -f "$COMPOSE_FILE" run --rm --no-deps user-vm-api test -f /etc/ssl/certs/vm-server.crt 2>/dev/null; then
-        test_failed "VM gRPC server certificate not accessible"
+        test_failed "VM HTTPS server certificate not accessible"
         return 1
     fi
     if ! docker compose -f "$COMPOSE_FILE" run --rm --no-deps user-vm-api test -f /etc/ssl/private/vm-server.key 2>/dev/null; then
-        test_failed "VM gRPC server key not accessible"
+        test_failed "VM HTTPS server key not accessible"
         return 1
     fi
     
-    # VM gRPC client certificates
+    # VM HTTPS client certificates
     if ! docker compose -f "$COMPOSE_FILE" run --rm --no-deps user-vm-api test -f /etc/ssl/certs/vm-client.crt 2>/dev/null; then
-        test_failed "VM gRPC client certificate not accessible"
+        test_failed "VM HTTPS client certificate not accessible"
         return 1
     fi
     if ! docker compose -f "$COMPOSE_FILE" run --rm --no-deps user-vm-api test -f /etc/ssl/private/vm-client.key 2>/dev/null; then
-        test_failed "VM gRPC client key not accessible"
+        test_failed "VM HTTPS client key not accessible"
         return 1
     fi
     
@@ -365,8 +368,8 @@ test_epic_2_1() {
     log_info "✓ MinIO is healthy and ready (TLS enabled)"
     log_info "✓ Python AI Service is healthy and ready"
     log_info "✓ User VM API is healthy and fully initialized (database, MinIO with TLS, training service verified)"
-    log_info "✓ TLS certificates accessible from all containers (MinIO, gRPC server/client)"
-    log_info "✓ gRPC services configured for mTLS (zero-trust security)"
+    log_info "✓ TLS certificates accessible from all containers (MinIO, HTTPS server/client)"
+    log_info "✓ HTTPS services configured for mTLS (zero-trust security)"
     log_info "✓ SQLite database: Local file-based (TLS not applicable, secured via file permissions and volume isolation)"
     log_info "✓ Baseline model setup started"
     
@@ -378,6 +381,40 @@ test_epic_2_1() {
         # Check if edges table exists (indicates database is initialized)
         if docker compose -f "$COMPOSE_FILE" exec -T user-vm-api sqlite3 /app/data/events.db "SELECT name FROM sqlite_master WHERE type='table' AND name='edges';" 2>/dev/null | grep -q "edges"; then
             log_info "VM database configured - edges table exists"
+            
+            # Register/update Edge with WireGuard public key to ensure authentication will pass
+            # This ensures the Edge WireGuard public key is stored in the database before Edge connects
+            EDGE_ID_FILE="${SCRIPT_DIR}/wg/keys/edge-id"
+            EDGE_PUBLIC_KEY_FILE="${SCRIPT_DIR}/wg/keys/edge.public"
+            if [ -f "$EDGE_ID_FILE" ] && [ -f "$EDGE_PUBLIC_KEY_FILE" ]; then
+                EDGE_ID=$(cat "$EDGE_ID_FILE" | tr -d '\n\r')
+                EDGE_PUBLIC_KEY=$(cat "$EDGE_PUBLIC_KEY_FILE" | tr -d '\n\r')
+                
+                log_info "Registering/updating Edge $EDGE_ID with WireGuard public key in VM database..."
+                now=$(date +%s)
+                if docker compose -f "$COMPOSE_FILE" exec -T user-vm-api sqlite3 /app/data/events.db \
+                    "INSERT OR REPLACE INTO edges (edge_id, name, wireguard_public_key, last_seen, status, created_at, updated_at) \
+                     VALUES ('$EDGE_ID', 'PoC Edge 1', '$EDGE_PUBLIC_KEY', $now, 'active', $now, $now);" 2>&1; then
+                    log_info "Edge $EDGE_ID registered/updated in VM database with WireGuard public key"
+                    
+                    # Verify the registration
+                    registered_key=$(docker compose -f "$COMPOSE_FILE" exec -T user-vm-api sqlite3 /app/data/events.db \
+                        "SELECT wireguard_public_key FROM edges WHERE edge_id = '$EDGE_ID' AND status = 'active';" 2>/dev/null | tr -d '\n\r' || echo "")
+                    
+                    if [ "$registered_key" = "$EDGE_PUBLIC_KEY" ]; then
+                        log_info "Edge registration verified - WireGuard public key matches (${EDGE_PUBLIC_KEY:0:20}...)"
+                    else
+                        log_warn "Edge registration verification failed - public key mismatch"
+                        log_warn "Expected: $EDGE_PUBLIC_KEY"
+                        log_warn "Found: $registered_key"
+                    fi
+                else
+                    log_warn "Failed to register/update Edge in database, authentication may fail"
+                fi
+            else
+                log_warn "Edge ID or WireGuard public key file not found, skipping Edge registration"
+            fi
+            
             test_passed "VM database configured and ready"
             break
         fi
@@ -389,6 +426,53 @@ test_epic_2_1() {
         test_failed "VM database configuration failed - edges table not found after $max_wait seconds"
         return 1
     fi
+    
+    # Verify VM HTTPS server is fully started and listening before starting Edge services
+    # This ensures Edge can connect immediately when it starts, preventing connection timeouts
+    log_info "Verifying VM HTTPS server is fully started and listening on port 8443..."
+    max_wait=60
+    waited=0
+    https_ready=false
+    
+    while [ $waited -lt $max_wait ]; do
+        # Check if port 8443 is listening (most reliable indicator that HTTPS server is ready)
+        if docker compose -f "$COMPOSE_FILE" exec -T user-vm-api sh -c "netstat -tlnp 2>/dev/null | grep -q ':8443' || ss -tlnp 2>/dev/null | grep -q ':8443'" 2>/dev/null; then
+            log_info "VM HTTPS server is listening on port 8443"
+            https_ready=true
+            break
+        fi
+        sleep 2
+        waited=$((waited + 2))
+        if [ $((waited % 10)) -eq 0 ]; then
+            log_info "  Still waiting for VM HTTPS server to start... (${waited}/${max_wait}s)"
+        fi
+    done
+    
+    if [ "$https_ready" != "true" ]; then
+        log_error "VM HTTPS server failed to start after $max_wait seconds"
+        log_error "Checking VM API logs for HTTPS server startup..."
+        docker compose -f "$COMPOSE_FILE" logs user-vm-api 2>&1 | grep -iE "https|8443|listening|server.*start" | tail -20 || true
+        log_error "Checking if port 8443 is listening..."
+        docker compose -f "$COMPOSE_FILE" exec -T user-vm-api sh -c "netstat -tlnp 2>/dev/null || ss -tlnp 2>/dev/null" 2>&1 | grep -E "8443|LISTEN" || true
+        test_failed "VM HTTPS server is not ready - Edge services cannot connect"
+        return 1
+    fi
+    
+    # Additional verification: Try to connect to the HTTPS server from within the VM container
+    # This confirms the server is not just listening but also accepting connections
+    log_info "Verifying VM HTTPS server accepts connections..."
+    if docker compose -f "$COMPOSE_FILE" exec -T user-vm-api sh -c "timeout 2 nc -zv localhost 8443 2>&1 || timeout 2 telnet localhost 8443 2>&1 | head -1" 2>/dev/null | grep -qE "(open|Connected|succeeded)"; then
+        log_info "VM HTTPS server is accepting connections"
+    else
+        log_warn "Could not verify VM HTTPS server connection acceptance (nc/telnet may not be available, but port is listening)"
+    fi
+    
+    # Wait a bit more to ensure server is fully ready to accept HTTPS connections
+    # This gives the server time to complete initialization after port starts listening
+    log_info "Waiting for VM HTTPS server to be fully ready (2s grace period)..."
+    sleep 2
+    
+    test_passed "VM HTTPS server is ready and listening"
     
     # Start Edge services with proper certificates
     log_info "Starting Edge services with TLS/mTLS certificates..."
@@ -421,7 +505,48 @@ test_epic_2_1() {
     
     # Start Edge Orchestrator (main Edge service)
     log_info "Starting Edge Orchestrator service..."
+    
+    # Verify edge-ai-service is still healthy before starting edge-orchestrator
+    # This prevents the "No such container" error if edge-ai-service failed between checks
+    log_info "Verifying edge-ai-service is still healthy before starting edge-orchestrator..."
+    
+    # Check if container exists and is running
+    edge_ai_container=$(docker compose -f "$COMPOSE_FILE" ps -q edge-ai-service 2>/dev/null || echo "")
+    if [ -z "$edge_ai_container" ]; then
+        log_error "edge-ai-service container does not exist, cannot start edge-orchestrator"
+        log_error "Capturing edge-ai-service logs before failure..."
+        docker compose -f "$COMPOSE_FILE" logs edge-ai-service 2>&1 | tail -50 || true
+        test_failed "edge-ai-service container not found, cannot start edge-orchestrator"
+        return 1
+    fi
+    
+    # Check container status
+    edge_ai_status=$(docker inspect "$edge_ai_container" --format '{{.State.Status}}' 2>/dev/null || echo "unknown")
+    if [ "$edge_ai_status" != "running" ]; then
+        log_error "edge-ai-service is not running (status: $edge_ai_status), cannot start edge-orchestrator"
+        log_error "Capturing edge-ai-service logs before failure..."
+        docker compose -f "$COMPOSE_FILE" logs edge-ai-service 2>&1 | tail -50 || true
+        log_error "Container state details:"
+        docker inspect "$edge_ai_container" --format 'State: {{.State.Status}}, ExitCode: {{.State.ExitCode}}, Error: {{.State.Error}}' 2>/dev/null || true
+        test_failed "edge-ai-service is not running, cannot start edge-orchestrator"
+        return 1
+    fi
+    
+    # Double-check health endpoint
+    if ! curl -sf "http://localhost:8180/health" > /dev/null 2>&1; then
+        log_error "edge-ai-service health endpoint is not responding"
+        log_error "Capturing edge-ai-service logs..."
+        docker compose -f "$COMPOSE_FILE" logs edge-ai-service 2>&1 | tail -50 || true
+        test_failed "edge-ai-service health check failed, cannot start edge-orchestrator"
+        return 1
+    fi
+    
+    log_info "edge-ai-service verified healthy, starting edge-orchestrator..."
     if ! docker compose -f "$COMPOSE_FILE" up -d edge-orchestrator; then
+        log_error "Failed to start edge-orchestrator, checking container status..."
+        docker compose -f "$COMPOSE_FILE" ps -a 2>&1 | grep -E "edge-ai|edge-orchestrator" || true
+        log_error "Capturing edge-ai-service logs..."
+        docker compose -f "$COMPOSE_FILE" logs edge-ai-service 2>&1 | tail -50 || true
         test_failed "Failed to start Edge Orchestrator service"
         return 1
     fi
@@ -448,23 +573,23 @@ test_epic_2_1() {
     # Verify Edge services TLS certificates are accessible
     log_info "Verifying Edge services TLS certificate accessibility..."
     
-    # Check Edge gRPC server certificates
+    # Check Edge HTTPS server certificates
     if ! docker compose -f "$COMPOSE_FILE" run --rm --no-deps edge-orchestrator test -f /etc/ssl/certs/edge-server.crt 2>/dev/null; then
-        test_failed "Edge gRPC server certificate not accessible"
+        test_failed "Edge HTTPS server certificate not accessible"
         return 1
     fi
     if ! docker compose -f "$COMPOSE_FILE" run --rm --no-deps edge-orchestrator test -f /etc/ssl/private/edge-server.key 2>/dev/null; then
-        test_failed "Edge gRPC server key not accessible"
+        test_failed "Edge HTTPS server key not accessible"
         return 1
     fi
     
-    # Check Edge gRPC client certificates
+    # Check Edge HTTPS client certificates
     if ! docker compose -f "$COMPOSE_FILE" run --rm --no-deps edge-orchestrator test -f /etc/ssl/certs/edge-client.crt 2>/dev/null; then
-        test_failed "Edge gRPC client certificate not accessible"
+        test_failed "Edge HTTPS client certificate not accessible"
         return 1
     fi
     if ! docker compose -f "$COMPOSE_FILE" run --rm --no-deps edge-orchestrator test -f /etc/ssl/private/edge-client.key 2>/dev/null; then
-        test_failed "Edge gRPC client key not accessible"
+        test_failed "Edge HTTPS client key not accessible"
         return 1
     fi
     
@@ -479,7 +604,7 @@ test_epic_2_1() {
     log_info "✓ VM database configured and ready"
     log_info "✓ Edge AI Service started and healthy"
     log_info "✓ Edge Orchestrator started and healthy"
-    log_info "✓ Edge services TLS certificates accessible (gRPC server/client, CA)"
+    log_info "✓ Edge services TLS certificates accessible (HTTPS server/client, CA)"
     log_info "✓ Edge services ready for Epic 2.2"
     
     return 0
@@ -500,14 +625,14 @@ test_epic_2_2() {
     # Run all tests in sequence following the actual connection flow:
     # 1. Edge orchestrator is accessible (prerequisite)
     # 2. WireGuard tunnel is established (network layer)
-    # 3. gRPC connection is established through WireGuard tunnel (application layer)
-    # 4. Edge registration/validation happens via gRPC telemetry
+    # 3. HTTPS connection is established through WireGuard tunnel (application layer)
+    # 4. Edge registration/validation happens via HTTPS telemetry
     # 5. Connection state and monitoring
     
     test_edge_accessible "$edge_id" || return 1
     test_wireguard_tunnel "$edge_id" || return 1
     test_wireguard_functionality "$edge_id" || return 1
-    test_grpc_connection "$edge_id" || return 1
+    test_https_connection "$edge_id" || return 1
     test_edge_registered "$edge_id" || return 1
     local connection_state=$(test_edge_connection_status "$edge_id") || return 1
     test_connection_state "$edge_id" "connected" || return 1
@@ -517,14 +642,14 @@ test_epic_2_2() {
     log_info "Epic 2.2: $EPIC_TESTS tests completed"
     log_info "✓ Edge is registered and accessible"
     log_info "✓ WireGuard tunnel is established and functional"
-    log_info "✓ Bidirectional gRPC connection established (Edge → VM on 50051, VM → Edge on 50052)"
+    log_info "✓ Bidirectional HTTPS connection established (Edge → VM on 8443, VM → Edge on 8443)"
     log_info "✓ Connection pool initialized - connection ready for reuse in subsequent steps"
     log_info "✓ Connection monitoring and keepalive are working"
     
-    # Verify gRPC connection health at end of epic (critical for security)
-    log_info "Verifying gRPC connection health after Epic 2.2..." >&2
-    if ! test_verify_grpc_connection_health "$edge_id"; then
-        log_warn "gRPC connection health check failed after Epic 2.2" >&2
+    # Verify HTTPS connection health at end of epic (critical for security)
+    log_info "Verifying HTTPS connection health after Epic 2.2..." >&2
+    if ! test_verify_https_connection_health "$edge_id"; then
+        log_warn "HTTPS connection health check failed after Epic 2.2" >&2
         return 1
     fi
     
@@ -571,10 +696,10 @@ test_epic_2_3() {
     log_info "✓ Dataset status tracking functional"
     log_info "✓ Training eligibility status tracked"
     
-    # Verify gRPC connection health at end of epic (critical for security)
-    log_info "Verifying gRPC connection health after Epic 2.3..." >&2
-    if ! test_verify_grpc_connection_health "$edge_id"; then
-        log_warn "gRPC connection health check failed after Epic 2.3" >&2
+    # Verify HTTPS connection health at end of epic (critical for security)
+    log_info "Verifying HTTPS connection health after Epic 2.3..." >&2
+    if ! test_verify_https_connection_health "$edge_id"; then
+        log_warn "HTTPS connection health check failed after Epic 2.3" >&2
         return 1
     fi
     
@@ -818,10 +943,10 @@ EOF
     log_info "✓ Dataset progress tracking functional"
     log_info "✓ VM → Edge snapshot request flow working (auto and manual)"
     
-    # Verify gRPC connection health at end of epic (critical for security)
-    log_info "Verifying gRPC connection health after Epic 2.4..." >&2
-    if ! test_verify_grpc_connection_health "$edge_id"; then
-        log_warn "gRPC connection health check failed after Epic 2.4" >&2
+    # Verify HTTPS connection health at end of epic (critical for security)
+    log_info "Verifying HTTPS connection health after Epic 2.4..." >&2
+    if ! test_verify_https_connection_health "$edge_id"; then
+        log_warn "HTTPS connection health check failed after Epic 2.4" >&2
         return 1
     fi
     
@@ -913,10 +1038,10 @@ test_epic_2_5() {
     log_info "✓ Training eligibility status updated"
     log_info "✓ Dataset metadata stored"
     
-    # Verify gRPC connection health at end of epic (critical for security)
-    log_info "Verifying gRPC connection health after Epic 2.5..." >&2
-    if ! test_verify_grpc_connection_health "$edge_id"; then
-        log_warn "gRPC connection health check failed after Epic 2.5" >&2
+    # Verify HTTPS connection health at end of epic (critical for security)
+    log_info "Verifying HTTPS connection health after Epic 2.5..." >&2
+    if ! test_verify_https_connection_health "$edge_id"; then
+        log_warn "HTTPS connection health check failed after Epic 2.5" >&2
         return 1
     fi
     
@@ -947,11 +1072,11 @@ test_epic_2_6() {
     log_info "✓ Model storage and validation working"
     log_info "✓ Model selection for training ready"
     
-    # Verify gRPC connection health at end of epic (critical for security)
-    log_info "Verifying gRPC connection health after Epic 2.6..." >&2
+    # Verify HTTPS connection health at end of epic (critical for security)
+    log_info "Verifying HTTPS connection health after Epic 2.6..." >&2
     local edge_id="poc-edge-1"
-    if ! test_verify_grpc_connection_health "$edge_id"; then
-        log_warn "gRPC connection health check failed after Epic 2.6" >&2
+    if ! test_verify_https_connection_health "$edge_id"; then
+        log_warn "HTTPS connection health check failed after Epic 2.6" >&2
         return 1
     fi
     
@@ -988,10 +1113,10 @@ test_epic_2_7() {
     
     log_info "Epic 2.7: $EPIC_TESTS tests completed"
     
-    # Verify gRPC connection health at end of epic (critical for security)
-    log_info "Verifying gRPC connection health after Epic 2.7..." >&2
-    if ! test_verify_grpc_connection_health "$edge_id"; then
-        log_warn "gRPC connection health check failed after Epic 2.7" >&2
+    # Verify HTTPS connection health at end of epic (critical for security)
+    log_info "Verifying HTTPS connection health after Epic 2.7..." >&2
+    if ! test_verify_https_connection_health "$edge_id"; then
+        log_warn "HTTPS connection health check failed after Epic 2.7" >&2
         return 1
     fi
     
@@ -1056,10 +1181,10 @@ test_epic_2_8() {
     
     log_info "Epic 2.8: $EPIC_TESTS tests completed"
     
-    # Verify gRPC connection health at end of epic (critical for security)
-    log_info "Verifying gRPC connection health after Epic 2.8..." >&2
-    if ! test_verify_grpc_connection_health "$edge_id"; then
-        log_warn "gRPC connection health check failed after Epic 2.8" >&2
+    # Verify HTTPS connection health at end of epic (critical for security)
+    log_info "Verifying HTTPS connection health after Epic 2.8..." >&2
+    if ! test_verify_https_connection_health "$edge_id"; then
+        log_warn "HTTPS connection health check failed after Epic 2.8" >&2
         return 1
     fi
     return 0
@@ -1273,6 +1398,9 @@ main() {
             log_error "Epic 2.2 tests failed - WireGuard connection is required for all subsequent tests"
             if [ "$RUN_EPIC_2_3" = "true" ] || [ "$RUN_EPIC_2_7" = "true" ] || [ "$RUN_EPIC_2_8" = "true" ] || [ "$RUN_EPIC_2_9" = "true" ]; then
                 log_error "Cannot continue without Edge connection"
+                log_error "Test stopped - containers are still running for log inspection"
+                log_error "Inspect logs with: docker compose -f $COMPOSE_FILE logs <service-name>"
+                export TEST_FAILED=true
                 exit 1
             fi
         fi
@@ -1354,9 +1482,14 @@ main() {
     
     if [ $TESTS_FAILED -eq 0 ]; then
         log_info "All tests passed! ✓"
+        export TEST_FAILED=false
         exit 0
     else
         log_error "Some tests failed"
+        log_error "Test stopped - containers are still running for log inspection"
+        log_error "Inspect logs with: docker compose -f $COMPOSE_FILE logs <service-name>"
+        log_error "To stop containers: docker compose -f $COMPOSE_FILE down"
+        export TEST_FAILED=true
         exit 1
     fi
 }

@@ -94,11 +94,38 @@ connected:
 
 	c.LogInfo("Connecting to KVM VM", "endpoint", endpoint)
 
-	conn, err := c.connect(ctx, endpoint)
+	// Retry connection with exponential backoff to handle VM gRPC server startup timing
+	// VM gRPC server might be starting up when Edge tries to connect
+	maxRetries := 5
+	retryDelay := 2 * time.Second
+	var conn *grpc.ClientConn
+	var err error
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		conn, err = c.connect(ctx, endpoint)
+		if err == nil {
+			break
+		}
+
+		if attempt < maxRetries {
+			c.LogInfo("Connection attempt failed, retrying",
+				"attempt", attempt,
+				"max_retries", maxRetries,
+				"retry_delay", retryDelay,
+				"error", err.Error())
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(retryDelay):
+				retryDelay *= 2 // Exponential backoff: 2s, 4s, 8s, 16s
+			}
+		}
+	}
+
 	if err != nil {
 		c.GetStatus().SetError(err)
-		c.LogError("Failed to connect to KVM VM", err)
-		return fmt.Errorf("failed to connect: %w", err)
+		c.LogError("Failed to connect to KVM VM after retries", err)
+		return fmt.Errorf("failed to connect after %d attempts: %w", maxRetries, err)
 	}
 
 	c.conn = conn

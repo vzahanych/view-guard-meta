@@ -91,21 +91,21 @@ test_find_trained_model() {
 
 test_verify_edge_connected() {
     local edge_id="${1:-poc-edge-1}"
-    log_info "Test 2: Verifying Edge is connected and bidirectional gRPC connection is healthy..." >&2
+    log_info "Test 2: Verifying Edge is connected and bidirectional HTTPS connection is healthy..." >&2
 
-    # Verify bidirectional gRPC connection is established and healthy
+    # Verify bidirectional HTTPS connection is established and healthy
     # This is critical for security applications - connection should exist from Epic 2.2
-    # VM monitors Edge status through gRPC every 30s, Edge monitors VM configuration status through gRPC every 30s
-    # All VM-Edge communication is gRPC-only (no HTTP)
-    log_info "Verifying bidirectional gRPC connection is established and healthy..." >&2
+    # VM monitors Edge status through HTTPS every 30s, Edge monitors VM configuration status through HTTPS every 30s
+    # All VM-Edge communication is HTTPS/HTTP2 (migrated from gRPC - see Epic 2.0.0 in IMPLEMENTATION_PLAN_PHASE2.md)
+    log_info "Verifying bidirectional HTTPS connection is established and healthy..." >&2
     
-    # Check VM API for Edge connection status (this verifies WireGuard + gRPC)
-    # Note: This is a VM-side API endpoint, not Edge-side HTTP - VM uses gRPC to monitor Edge
+    # Check VM API for Edge connection status (this verifies WireGuard + HTTPS)
+    # Note: This is a VM-side API endpoint, not Edge-side HTTP - VM uses HTTPS to monitor Edge
     local vm_api_url="${VM_API:-http://localhost:8280}"
     local edge_status_url="${vm_api_url}/api/edges/${edge_id}/status"
     
     # Poll for connection status - connection should already exist from Epic 2.2
-    # VM continuously monitors Edge through gRPC every 30s starting from Epic 2.2
+    # VM continuously monitors Edge through HTTPS every 30s starting from Epic 2.2
     local max_attempts=10
     local attempt=0
     local connection_healthy=false
@@ -136,6 +136,17 @@ test_verify_edge_connected() {
         test_passed "Bidirectional gRPC connection is healthy: $edge_id" >&2
         log_info "Connection health monitoring verified - connection is alive and ready for model deployment" >&2
         log_info "All VM-Edge communication is gRPC-only (no HTTP) - security requirement" >&2
+        
+        # Verify Edge state tracking is working (state snapshots in MinIO)
+        # This confirms VM→Edge connection is functional and state tracking is active
+        log_info "Verifying Edge state tracking (state snapshots in MinIO)..." >&2
+        if test_verify_edge_state_in_minio "$edge_id" 90 2>/dev/null; then
+            log_info "Edge state tracking verified - snapshots stored in MinIO" >&2
+        else
+            log_warn "Edge state tracking verification failed (may indicate connection issue)" >&2
+            # Don't fail the test - state tracking might have stopped temporarily
+        fi
+        
         return 0
     else
         test_failed "Bidirectional gRPC connection not healthy (connection health is critical for security applications)" >&2

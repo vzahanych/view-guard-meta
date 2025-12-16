@@ -99,97 +99,124 @@ The User VM API Services architecture is organized into specialized **logical se
 
 ### Architecture Block Diagram
 
+#### VM Components Overview
+
 ```mermaid
 flowchart TB
-    subgraph UserVM["User VM API Services (Go)"]
-        Orchestrator["Orchestrator / API Gateway<br/>Service lifecycle, config & HTTP/gRPC API"]
+    subgraph VM["User VM API Services (Go Binary)"]
+        direction TB
         
-        subgraph Connectivity["Connectivity & Identity"]
-            TunnelGateway["Tunnel Gateway & Edge API<br/>• WireGuard control/termination<br/>• Edge auth & identity<br/>• Certificate validation"]
+        %% Top Level: Orchestration Layer
+        subgraph Orchestration["Orchestration Layer"]
+            Orchestrator["Orchestrator / API Gateway<br/>• Service lifecycle management<br/>• Component state management<br/>• Action queue with strict ordering<br/>• Race condition prevention<br/>• Configuration management<br/>• HTTP/gRPC API endpoints<br/>• Health checks"]
         end
         
+        %% Connectivity Layer
+        subgraph Connectivity["Connectivity & Identity"]
+            TunnelGateway["Tunnel Gateway & Edge API<br/>• WireGuard server management<br/>• Edge authentication & authorization<br/>• Certificate validation<br/>• HTTPS server (VM → Edge calls)"]
+            ConnectionMonitor["Connection Monitor<br/>• Edge connection state tracking<br/>• Health monitoring<br/>• Reconnection handling"]
+            EdgeStateTracker["Edge State Tracker<br/>• Query Edge state via HTTPS<br/>• Store state history in MinIO<br/>• Keep connection active"]
+        end
+        
+        %% Event Processing Pipeline
         subgraph EventProcessing["Event Processing Pipeline"]
-            EventCache["Event Cache Service<br/>• Receive events<br/>• Event ID & metadata store<br/>• Encryption handling"]
+            EventCache["Event Cache Service<br/>• Receive events from Edge<br/>• Event ID & metadata store<br/>• Encryption handling"]
             DeepAnalysis["Deep Analysis Service<br/>• Invoke Python AI / ONNX<br/>• Object detection<br/>• Activity recognition<br/>• Threat classification"]
             AnomalyReasoning["Anomaly Reasoning Service<br/>• Baseline comparison<br/>• Anomaly identification<br/>• Event correlation"]
             RiskScoring["Risk Scoring Service<br/>• Risk level calculation<br/>• Explanation generation"]
         end
         
+        %% Model Management
         subgraph ModelManagement["Model Management"]
             DatasetStorage["Dataset Storage Service<br/>• Receive labeled snapshots<br/>• Organize by label & camera<br/>• Metadata tracking"]
-            ModelCatalog["Model Catalog & Distribution Service<br/>• Model versioning<br/>• ONNX packaging<br/>• Distribution to Edge<br/>• Rollout/rollback"]
+            ModelCatalog["Model Catalog & Distribution<br/>• Model versioning<br/>• ONNX packaging<br/>• Distribution to Edge<br/>• Rollout/rollback"]
             BaselineInventory["Baseline Inventory Service<br/>• Process normal snapshots<br/>• Build object/behavior inventory<br/>• Track normal patterns"]
         end
         
+        %% Storage & Streaming
         subgraph Storage["Storage & Streaming"]
-            StorageSync["Storage Sync Service (MinIO)<br/>• Encrypted clip archiving only<br/>• Per-camera buckets<br/>• Quota enforcement<br/>• Object key metadata"]
-            StreamRelay["Stream Relay (logical)<br/>• Clip request handling<br/>• HTTP relay/proxy<br/>• Retrieve archived clips from MinIO"]
+            StorageSync["Storage Sync Service (MinIO)<br/>• Encrypted clip archiving<br/>• Per-camera buckets<br/>• Quota enforcement<br/>• Object key metadata"]
+            StreamRelay["Stream Relay Service<br/>• Clip request handling<br/>• HTTP relay/proxy<br/>• Retrieve archived clips"]
         end
         
-        TelemetryAgg["Telemetry Aggregator Service<br/>• Collect telemetry<br/>• Aggregate metrics<br/>• Health status & metrics export"]
+        %% Telemetry
+        TelemetryAgg["Telemetry Aggregator<br/>• Collect telemetry<br/>• Aggregate metrics<br/>• Health status export"]
     end
     
-    subgraph Infra["Shared Infrastructure Services"]
-        PythonAI["Python AI Service<br/>• CAE training<br/>• Heavy model inference<br/>• gRPC/HTTP API"]
-        SQLite["SQLite Database<br/>• Event cache metadata<br/>• Model catalog<br/>• Dataset metadata<br/>• Telemetry buffer<br/>• Edge registry"]
-        MinIO["MinIO (S3) Storage<br/>• Encrypted clips<br/>• Snapshots<br/>• Per-camera buckets"]
+    %% Infrastructure Services
+    subgraph Infra["Infrastructure Services"]
+        PythonAI["Python AI Service<br/>(Separate Container)<br/>• CAE training<br/>• Heavy model inference<br/>• HTTP API"]
+        SQLite["SQLite Database<br/>• Event metadata<br/>• Model catalog<br/>• Dataset metadata<br/>• Telemetry buffer<br/>• Edge registry<br/>• State history"]
+        MinIO["MinIO (S3-compatible)<br/>• Encrypted clips<br/>• Snapshots<br/>• Edge state history<br/>• Per-camera buckets"]
     end
     
+    %% External
     EdgeAppliances["Edge Appliances<br/>(via WireGuard tunnel)"]
     
-    %% Orchestrator connections
+    %% Orchestrator coordinates all services (includes state coordination)
+    Orchestrator -.->|"Coordinates state transitions<br/>Enforces action ordering"| TunnelGateway
+    Orchestrator -.->|"Coordinates state transitions<br/>Enforces action ordering"| ConnectionMonitor
+    Orchestrator -.->|"Coordinates state transitions<br/>Enforces action ordering"| EdgeStateTracker
+    Orchestrator -.->|"Coordinates state transitions<br/>Enforces action ordering"| EventCache
+    Orchestrator -.->|"Coordinates state transitions<br/>Enforces action ordering"| DatasetStorage
+    Orchestrator -.->|"Coordinates state transitions<br/>Enforces action ordering"| ModelCatalog
+    Orchestrator -.->|"Coordinates state transitions<br/>Enforces action ordering"| StorageSync
+    Orchestrator -.->|"Coordinates state transitions<br/>Enforces action ordering"| TelemetryAgg
+    
+    %% Orchestrator manages lifecycle
     Orchestrator --> TunnelGateway
     Orchestrator --> EventCache
-    Orchestrator --> StreamRelay
     Orchestrator --> DatasetStorage
     Orchestrator --> ModelCatalog
     Orchestrator --> StorageSync
     Orchestrator --> TelemetryAgg
-    Orchestrator --> RiskScoring
     
-    %% Event processing flow
+    %% Data flow: Edge Connection
+    EdgeAppliances -->|"HTTPS (WireGuard)"| TunnelGateway
+    TunnelGateway --> ConnectionMonitor
+    ConnectionMonitor --> EdgeStateTracker
+    TunnelGateway -->|"Model deployment"| EdgeAppliances
+    
+    %% Data flow: Event Processing
     TunnelGateway --> EventCache
     EventCache --> DeepAnalysis
     DeepAnalysis --> AnomalyReasoning
     AnomalyReasoning --> RiskScoring
     EventCache --> StorageSync
     
-    %% Model training flow
+    %% Data flow: Model Training
     TunnelGateway --> DatasetStorage
     DatasetStorage --> ModelCatalog
-    ModelCatalog --> BaselineInventory
     DatasetStorage --> PythonAI
     PythonAI --> ModelCatalog
-    ModelCatalog --> TunnelGateway
-    
-    %% Baseline inventory uses heavy models
+    ModelCatalog --> BaselineInventory
     BaselineInventory --> PythonAI
+    ModelCatalog -->|"Deploy"| TunnelGateway
     
-    %% Storage connections
+    %% Data flow: Storage
     EventCache --> SQLite
     ModelCatalog --> SQLite
     DatasetStorage --> SQLite
     TelemetryAgg --> SQLite
+    EdgeStateTracker --> MinIO
     StorageSync --> MinIO
+    StorageSync --> SQLite
+    StreamRelay --> StorageSync
     StreamRelay --> TunnelGateway
     
-    %% Infra connections
+    %% Infrastructure connections
     DeepAnalysis --> PythonAI
     ModelCatalog --> PythonAI
-    StorageSync --> SQLite
-    
-    %% Edge connections
-    EdgeAppliances -->|WireGuard tunnel| TunnelGateway
-    TunnelGateway -->|Model distribution| EdgeAppliances
-    StreamRelay -->|Clip request| EdgeAppliances
-    EdgeAppliances -->|Clip stream| StreamRelay
+    BaselineInventory --> PythonAI
     
     %% Styling
+    classDef orchestrator fill:#4a90e2,stroke:#1e3a5f,stroke-width:3px,color:#fff
     classDef coreService fill:#e1f5ff,stroke:#01579b,stroke-width:2px
     classDef infraService fill:#fff3e0,stroke:#e65100,stroke-width:2px
     classDef edge fill:#f3e5f5,stroke:#4a148c,stroke-width:2px
     
-    class Orchestrator,TunnelGateway,EventCache,DeepAnalysis,AnomalyReasoning,RiskScoring,DatasetStorage,ModelCatalog,BaselineInventory,StorageSync,StreamRelay,TelemetryAgg coreService
+    class Orchestrator orchestrator
+    class TunnelGateway,ConnectionMonitor,EdgeStateTracker,EventCache,DeepAnalysis,AnomalyReasoning,RiskScoring,DatasetStorage,ModelCatalog,BaselineInventory,StorageSync,StreamRelay,TelemetryAgg coreService
     class PythonAI,SQLite,MinIO infraService
     class EdgeAppliances edge
 ```
@@ -200,49 +227,49 @@ flowchart TB
 
 1. **Orchestrator / API Gateway**
 
-   Main coordinator managing lifecycle, configuration, and HTTP/gRPC APIs for Edge and UI/SaaS.
+   Main coordinator managing lifecycle, configuration, component states, and HTTP/gRPC APIs for Edge and UI/SaaS. Includes state coordination capabilities (state machine, action queue, strict ordering) to prevent race conditions and ensure deterministic state transitions.
 
 2. **Tunnel Gateway & Edge API Service**
 
    Manages WireGuard interfaces and peers, terminates tunnels, authenticates and authorizes Edge Appliances, and exposes Edge-facing APIs over the tunnel.
 
-3. **Event Cache Service**
+4. **Event Cache Service**
 
    Receives events (frames, clips, metadata) from edge, assigns event IDs, stores event metadata, and manages encrypted payload references. Event IDs and metadata are the *source of truth* for the event timeline.
 
-4. **Deep Analysis Service**
+5. **Deep Analysis Service**
 
    Orchestrates deep analysis by invoking heavy models (via Python AI or ONNX Runtime) for object detection, activity recognition, and threat classification.
 
-5. **Anomaly Reasoning Service**
+6. **Anomaly Reasoning Service**
 
    Compares event objects/patterns against baseline inventory to identify anomaly types and correlate related events.
 
-6. **Risk Scoring Service**
+7. **Risk Scoring Service**
 
    Computes risk scores and generates short, human-readable explanations of why an event is abnormal.
 
-7. **Dataset Storage Service**
+8. **Dataset Storage Service**
 
    Manages labeled snapshot ingestion and storage, organized by camera, label, and conditions, with metadata persisted in SQLite.
 
-8. **Model Catalog & Distribution Service**
+9. **Model Catalog & Distribution Service**
 
    Maintains model versions and metadata, packages models (ONNX), distributes them to Edge Appliances, and supports rollout/rollback.
 
-9. **Baseline Inventory Service**
+10. **Baseline Inventory Service**
 
    Processes "normal scene" snapshots with big models (via Python AI) to build per-camera object/behavior inventories and normal patterns.
 
-10. **Storage Sync Service**
+11. **Storage Sync Service**
 
     Archives encrypted clips and snapshots to MinIO, enforces per-camera quotas, and maintains object keys and bucket mappings in SQLite. Only persists **encrypted blobs**; stores **object keys + bucket info** in SQLite.
 
-11. **Stream Relay (logical) Service**
+12. **Stream Relay (logical) Service**
 
     Handles on-demand clip retrieval requests from clients. Retrieves archived clips from MinIO (via Storage Sync Service) and serves them to clients. **Note**: Edge Web UI is on local home network only (unreachable from Internet). Edge does NOT stream to VM - Edge only sends event frames and short clips when events occur.
 
-12. **Telemetry Aggregator Service**
+13. **Telemetry Aggregator Service**
 
     Collects telemetry from Edge and internal services, aggregates health metrics, persists them in SQLite, and exposes them in a metrics-friendly format (Prometheus/OpenTelemetry compatible for future production monitoring).
 
@@ -293,7 +320,11 @@ user-vm-api/
 │   ├── orchestrator/                  # Main orchestrator service
 │   │   ├── server.go                  # Service lifecycle management
 │   │   ├── manager.go                 # Service manager pattern
-│   │   └── health.go                  # Health checks
+│   │   ├── health.go                  # Health checks
+│   │   ├── state_coordinator.go       # State coordination (state machine, action queue)
+│   │   ├── states.go                  # State definitions and transitions
+│   │   ├── action_queue.go            # Action queue with strict ordering
+│   │   └── state_persistence.go       # State persistence and recovery
 │   │
 │   ├── tunnel-gateway/                # Tunnel Gateway & Edge API Service
 │   │   ├── wireguard.go               # WireGuard server management
@@ -413,7 +444,7 @@ user-vm-api/
 - **Modular Design**: Each logical service is a separate Go package under `internal/`
 - **Shared Libraries**: Common utilities in `internal/shared/`
 
-**Note**: gRPC proto definitions are in the parent repo at `proto/proto/edge/` (Edge ↔ User VM) and imported as Go module dependencies.
+**Note**: Protocol definitions migrated from gRPC/Protocol Buffers to HTTPS/HTTP2 with JSON (see Epic 2.0.0 for migration details). Original proto definitions remain in `proto/proto/edge/` for reference.
 
 ---
 
@@ -452,8 +483,9 @@ user-vm-api/
 
 - **HTTP / APIs**
   - `github.com/gin-gonic/gin` – HTTP web framework for API Gateway / UI integration
-  - `google.golang.org/grpc` – gRPC for APIs (Edge ↔ User VM over WireGuard) - event frame/clip upload, model distribution, telemetry
-  - `google.golang.org/protobuf` – Protocol Buffers (IDL + codegen)
+  - `net/http` – HTTPS/HTTP2 for APIs (Edge ↔ User VM over WireGuard) - event frame/clip upload, model distribution, telemetry (migrated from gRPC - see Epic 2.0.0)
+  - `crypto/tls` – TLS/mTLS for secure HTTPS communication
+  - `encoding/json` – JSON serialization (replaces Protocol Buffers for Edge ↔ VM communication)
 
 - **Networking / Tunnels**
   - `golang.zx2c4.com/wireguard` – WireGuard tunnel management (peer config, keys, lifecycle)
@@ -476,15 +508,18 @@ user-vm-api/
 **Communication:**
 
 - **Edge ↔ User VM API**
-  - **gRPC** over **WireGuard** tunnel (mTLS inside VPN) for event frame/clip upload (Edge sends when events occur, not streaming), model distribution, telemetry
-  - gRPC APIs for model download and event frame/clip upload
+  - **HTTPS/HTTP2** over **WireGuard** tunnel (mTLS inside VPN) for event frame/clip upload (Edge sends when events occur, not streaming), model distribution, telemetry
+  - REST API endpoints for all Edge ↔ VM operations
+  - HTTP/2 for efficient multiplexing and streaming (model deployment)
+  - All HTTPS traffic routes through WireGuard tunnel (10.0.0.1 ↔ 10.0.0.2)
+  - **Migration from gRPC**: After experiencing persistent gRPC connection issues (connection pool management, keepalive complexity, debugging difficulties), we migrated to HTTPS/HTTP2 for better reliability, simpler debugging, and standard tooling support. See "Epic 2.0.0: HTTPS/HTTP2 Migration" section for details.
 
 - **UI / SaaS ↔ User VM API**
   - **HTTP/REST + JSON** via API Gateway (Gin)
   - Authentication via API tokens or mTLS (per-tenant, per-VM)
 
 - **Serialization**
-  - **Protocol Buffers** for Edge ↔ User VM contracts
+  - **JSON** for all Edge ↔ User VM contracts (replaces Protocol Buffers)
   - JSON for external-facing REST APIs
 
 **Storage Layout:**
@@ -676,7 +711,7 @@ This metadata is ingested into the **Model Catalog** so the User VM API knows:
 * Go **Model Catalog** service:
   * Validates presence of `model.onnx` + `metadata.json`
   * Registers new model version in SQLite
-  * Pushes model to Edge via gRPC streaming over WireGuard
+  * Pushes model to Edge via HTTPS multipart upload over WireGuard tunnel
 * Edge stores models under e.g., `{data_dir}/models/{model_id}/model.onnx` and updates runtime.
 
 ---
@@ -1109,11 +1144,365 @@ services:
 
 ---
 
+## Epic 2.0.0: HTTPS/HTTP2 Migration from gRPC
+
+**Priority: P0**
+
+**Status**: 🔄 IN PROGRESS (Dec 2025)
+
+### Migration Rationale
+
+After implementing bidirectional gRPC communication between VM and Edge, we encountered persistent connection management issues:
+
+1. **Connection Pool Complexity**: gRPC connection pooling required careful state management (Ready, Idle, Connecting, TransientFailure) with complex recovery logic
+2. **Keepalive Issues**: Despite implementing keepalive on both client and server, connections would appear "Ready" but fail on actual RPC calls, indicating stale connections
+3. **Debugging Difficulties**: gRPC errors are less transparent than HTTP, making troubleshooting connection issues time-consuming
+4. **Connection Lifecycle**: Bidirectional gRPC connections required complex coordination between Edge→VM and VM→Edge, leading to race conditions and state drift
+5. **Tooling Limitations**: Standard HTTP debugging tools (curl, browser dev tools, HTTP logs) don't work with gRPC
+
+**Decision**: Migrate to **HTTPS/HTTP2** over WireGuard tunnel, maintaining the same security model (mTLS with existing certificates) but with simpler, more reliable communication.
+
+**Benefits of HTTPS/HTTP2**:
+- ✅ **Simpler Debugging**: Standard HTTP tools (curl, browser, HTTP logs) work out of the box
+- ✅ **Better Observability**: Standard HTTP access logs, status codes, response times
+- ✅ **Easier Testing**: `curl -k --cert client.crt --key client.key https://10.0.0.2:8443/health`
+- ✅ **No Connection Pool Issues**: HTTP is stateless, connections are simpler to manage
+- ✅ **Standard Tooling**: All HTTP monitoring/debugging tools work
+- ✅ **Same Security**: mTLS with existing certificates (no security regression)
+- ✅ **HTTP/2 Support**: Multiplexing and streaming for efficient model deployment
+- ✅ **Faster Implementation**: ~1 week vs 2-3 weeks for libp2p (alternative considered)
+
+**All HTTPS/HTTP2 traffic routes through WireGuard tunnel**:
+- VM HTTPS server listens on `10.0.0.1:8443` (WireGuard IP)
+- Edge HTTPS server listens on `10.0.0.2:8443` (WireGuard IP)
+- All communication is encrypted twice: WireGuard (VPN) + HTTPS (mTLS)
+- No direct Internet exposure - all traffic stays within WireGuard tunnel
+
+### Step 2.0.0.1: Edge HTTPS Server Implementation
+
+**Status**: 🔄 IN PROGRESS
+
+**Location**: `edge/orchestrator/internal/web/https_server.go`
+
+**Implementation Steps**:
+
+1. **Create HTTPS Server Package**
+   - Create `edge/orchestrator/internal/web/https_server.go`
+   - Implement HTTPS server with mTLS (client certificate verification)
+   - Use existing certificates: `edge-server.crt`, `edge-server.key`, `ca.crt`
+   - Listen on `:8443` (binds to WireGuard interface `10.0.0.2:8443`)
+
+2. **Implement REST API Endpoints**
+   - `POST /api/v1/config/get` - GetConfig (replaces gRPC GetConfig)
+   - `POST /api/v1/config/update` - UpdateConfig (replaces gRPC UpdateConfig)
+   - `POST /api/v1/snapshots/capture` - RequestSnapshotCapture (replaces gRPC RequestSnapshotCapture)
+   - `POST /api/v1/models/deploy` - DeployModel (replaces gRPC DeployModel streaming)
+   - `POST /api/v1/services/restart` - RestartService (replaces gRPC RestartService)
+   - `POST /api/v1/capabilities/sync` - SyncCapabilities (replaces gRPC SyncCapabilities)
+   - `GET /health` - Health check endpoint
+
+3. **Model Deployment (Streaming)**
+   - **Option A: Multipart Upload** (Recommended for simplicity)
+     ```http
+     POST /api/v1/models/deploy HTTP/1.1
+     Content-Type: multipart/form-data; boundary=----WebKitFormBoundary
+     
+     ------WebKitFormBoundary
+     Content-Disposition: form-data; name="metadata"
+     Content-Type: application/json
+     
+     {"deployment_id": "...", "model_id": "...", "total_size": 12265682, ...}
+     ------WebKitFormBoundary
+     Content-Disposition: form-data; name="model"; filename="model.onnx"
+     Content-Type: application/octet-stream
+     
+     <binary model data>
+     ------WebKitFormBoundary--
+     ```
+   - **Option B: Chunked Transfer-Encoding** (For HTTP/2 streaming)
+     ```http
+     POST /api/v1/models/deploy HTTP/2
+     Content-Type: application/json
+     Transfer-Encoding: chunked
+     
+     {"header": {"deployment_id": "...", "model_id": "...", "total_size": 12265682}}
+     <binary chunk 1>
+     <binary chunk 2>
+     ...
+     ```
+
+4. **Request/Response Format**
+   - All requests use JSON (replaces Protocol Buffers)
+   - Response format:
+     ```json
+     {
+       "success": true,
+       "data": {...},
+       "error_message": ""
+     }
+     ```
+
+5. **TLS Configuration**
+   - Load server certificate: `/etc/ssl/certs/edge-server.crt`
+   - Load server key: `/etc/ssl/private/edge-server.key`
+   - Load CA certificate: `/etc/ssl/certs/ca.crt`
+   - Require client certificate authentication (mTLS)
+   - Verify client certificate against CA
+
+6. **Integration with Existing Services**
+   - Wire snapshot service to `/api/v1/snapshots/capture`
+   - Wire model storage to `/api/v1/models/deploy`
+   - Wire config service to `/api/v1/config/*`
+   - Wire capability sync to `/api/v1/capabilities/sync`
+
+**Testing**:
+```bash
+# Test health endpoint
+curl -k --cert vm-client.crt --key vm-client.key \
+  https://10.0.0.2:8443/health
+
+# Test GetConfig
+curl -k --cert vm-client.crt --key vm-client.key \
+  -X POST https://10.0.0.2:8443/api/v1/config/get \
+  -H "Content-Type: application/json" \
+  -d '{}'
+
+# Test model deployment
+curl -k --cert vm-client.crt --key vm-client.key \
+  -X POST https://10.0.0.2:8443/api/v1/models/deploy \
+  -F "metadata=@metadata.json" \
+  -F "model=@model.onnx"
+```
+
+### Step 2.0.0.2: VM HTTPS Client Implementation
+
+**Status**: 🔄 IN PROGRESS
+
+**Location**: `user-vm-api/internal/tunnel-gateway/edge_https_client.go`
+
+**Implementation Steps**:
+
+1. **Create HTTPS Client Package**
+   - Create `user-vm-api/internal/tunnel-gateway/edge_https_client.go`
+   - Implement HTTPS client with mTLS (client certificate authentication)
+   - Use existing certificates: `vm-client.crt`, `vm-client.key`, `ca.crt`
+   - Connect to Edge HTTPS server at `10.0.0.2:8443` (WireGuard IP)
+
+2. **Replace EdgeClient gRPC Calls**
+   - Replace `GetConfig` gRPC call with `POST /api/v1/config/get`
+   - Replace `RequestSnapshotCapture` gRPC call with `POST /api/v1/snapshots/capture`
+   - Replace `DeployModel` gRPC streaming with `POST /api/v1/models/deploy` (multipart or chunked)
+   - Update `VerifyConnectionHealth` to use `GET /health` endpoint
+
+3. **Connection Management**
+   - Use `http.Client` with connection pooling (simpler than gRPC connection pool)
+   - Configure TLS with client certificate
+   - Set appropriate timeouts (dial, request, response)
+   - Enable HTTP/2 for better performance
+
+4. **Model Deployment Implementation**
+   - For multipart upload:
+     ```go
+     func (c *EdgeHTTPSClient) DeployModel(ctx context.Context, edgeID string, modelData []byte, metadata *DeployModelMetadata) error {
+         url := fmt.Sprintf("https://%s:8443/api/v1/models/deploy", edgeIP)
+         
+         // Create multipart form
+         body := &bytes.Buffer{}
+         writer := multipart.NewWriter(body)
+         
+         // Add metadata
+         metadataJSON, _ := json.Marshal(metadata)
+         writer.WriteField("metadata", string(metadataJSON))
+         
+         // Add model file
+         part, _ := writer.CreateFormFile("model", "model.onnx")
+         part.Write(modelData)
+         writer.Close()
+         
+         // Create request
+         req, _ := http.NewRequestWithContext(ctx, "POST", url, body)
+         req.Header.Set("Content-Type", writer.FormDataContentType())
+         
+         // Execute request
+         resp, err := c.client.Do(req)
+         // Handle response
+     }
+     ```
+
+5. **Error Handling**
+   - Map HTTP status codes to application errors
+   - Handle connection timeouts and retries
+   - Log HTTP requests/responses for debugging
+
+6. **Update EdgeStateTracker**
+   - Update `queryAndStoreState` to use HTTPS client instead of gRPC
+   - Call `POST /api/v1/config/get` to get Edge state
+
+**Testing**:
+```bash
+# Test from VM container
+docker compose -f docker-compose.dev.yml exec user-vm-api \
+  curl -k --cert /etc/ssl/certs/vm-client.crt \
+       --key /etc/ssl/private/vm-client.key \
+       https://10.0.0.2:8443/health
+```
+
+### Step 2.0.0.3: VM HTTPS Server Implementation (for Edge → VM)
+
+**Status**: 🔄 IN PROGRESS
+
+**Location**: `user-vm-api/internal/tunnel-gateway/vm_https_server.go`
+
+**Implementation Steps**:
+
+1. **Create HTTPS Server Package**
+   - Create `user-vm-api/internal/tunnel-gateway/vm_https_server.go`
+   - Implement HTTPS server with mTLS (client certificate verification)
+   - Use existing certificates: `vm-server.crt`, `vm-server.key`, `ca.crt`
+   - Listen on `:8443` (binds to WireGuard interface `10.0.0.1:8443`)
+
+2. **Implement REST API Endpoints**
+   - `POST /api/v1/telemetry/heartbeat` - Heartbeat (replaces gRPC Heartbeat)
+   - `POST /api/v1/telemetry/events` - SendEvents (replaces gRPC SendEvents)
+   - `POST /api/v1/config/get` - GetConfig (Edge queries VM config)
+   - `POST /api/v1/capabilities/sync` - SyncCapabilities (replaces gRPC SyncCapabilities)
+   - `GET /health` - Health check endpoint
+
+3. **Request/Response Format**
+   - All requests use JSON
+   - Response format matches Edge server format
+
+4. **TLS Configuration**
+   - Load server certificate: `/etc/ssl/certs/vm-server.crt`
+   - Load server key: `/etc/ssl/private/vm-server.key`
+   - Load CA certificate: `/etc/ssl/certs/ca.crt`
+   - Require client certificate authentication (mTLS)
+   - Verify client certificate against CA
+   - Extract Edge identity from client certificate (CN or SAN)
+
+5. **Integration with Existing Services**
+   - Wire EdgeAPIServer handlers to HTTPS endpoints
+   - Maintain existing authentication logic (WireGuard peer + certificate)
+   - Update connection tracking to use HTTPS instead of gRPC
+
+**Testing**:
+```bash
+# Test from Edge container
+docker compose -f docker-compose.dev.yml exec edge-orchestrator \
+  curl -k --cert /etc/ssl/certs/edge-client.crt \
+       --key /etc/ssl/private/edge-client.key \
+       https://10.0.0.1:8443/health
+```
+
+### Step 2.0.0.4: Edge HTTPS Client Implementation (for Edge → VM)
+
+**Status**: 🔄 IN PROGRESS
+
+**Location**: `edge/orchestrator/internal/grpc/client.go` → `edge/orchestrator/internal/web/https_client.go`
+
+**Implementation Steps**:
+
+1. **Create HTTPS Client Package**
+   - Create `edge/orchestrator/internal/web/https_client.go`
+   - Replace gRPC client with HTTPS client
+   - Use existing certificates: `edge-client.crt`, `edge-client.key`, `ca.crt`
+   - Connect to VM HTTPS server at `10.0.0.1:8443` (WireGuard IP)
+
+2. **Replace gRPC Calls**
+   - Replace `Heartbeat` gRPC call with `POST /api/v1/telemetry/heartbeat`
+   - Replace `SendEvents` gRPC call with `POST /api/v1/telemetry/events`
+   - Replace `GetConfig` gRPC call with `POST /api/v1/config/get`
+   - Replace `SyncCapabilities` gRPC call with `POST /api/v1/capabilities/sync`
+
+3. **Update Telemetry Sender**
+   - Update `telemetry_sender.go` to use HTTPS client
+   - Send heartbeats via `POST /api/v1/telemetry/heartbeat`
+   - Send telemetry via `POST /api/v1/telemetry/events`
+
+4. **Update Capability Sync**
+   - Update `capability_sync.go` to use HTTPS client
+   - Send capability sync via `POST /api/v1/capabilities/sync`
+
+5. **Connection Management**
+   - Use `http.Client` with connection pooling
+   - Configure TLS with client certificate
+   - Set appropriate timeouts
+   - Enable HTTP/2
+
+### Step 2.0.0.5: Remove gRPC Infrastructure
+
+**Status**: ⏳ PENDING
+
+**Implementation Steps**:
+
+1. **Remove gRPC Server Code**
+   - Remove `edge/orchestrator/internal/grpc/server.go` (Edge gRPC server)
+   - Remove `user-vm-api/internal/tunnel-gateway/edge_api.go` gRPC server code
+   - Keep proto files for reference (or remove if not needed)
+
+2. **Remove gRPC Client Code**
+   - Remove `edge/orchestrator/internal/grpc/client.go` (Edge gRPC client)
+   - Remove `user-vm-api/internal/tunnel-gateway/edge_client.go` (VM gRPC client)
+   - Update all callers to use HTTPS clients
+
+3. **Update Dependencies**
+   - Remove `google.golang.org/grpc` from `go.mod` (if not used elsewhere)
+   - Remove `google.golang.org/protobuf` from `go.mod` (if not used elsewhere)
+   - Keep TLS certificate loading utilities
+
+4. **Update Tests**
+   - Update integration tests to use HTTPS instead of gRPC
+   - Update test helpers to use `curl` or HTTP client
+   - Remove gRPC-specific test utilities
+
+5. **Update Documentation**
+   - Update API documentation to reflect REST endpoints
+   - Update architecture diagrams to show HTTPS instead of gRPC
+   - Update deployment guides
+
+### Step 2.0.0.6: Update Integration Tests
+
+**Status**: ⏳ PENDING
+
+**Implementation Steps**:
+
+1. **Update Test Scripts**
+   - Update `infra/local/scripts/epic_2_2_tests.sh` to use HTTPS endpoints
+   - Update `infra/local/scripts/epic_2_8_tests.sh` to use HTTPS endpoints
+   - Replace gRPC health checks with HTTP health checks
+
+2. **Update Test Helpers**
+   - Update `test_helpers.sh` to use `curl` for connection verification
+   - Replace gRPC connection checks with HTTP health checks
+   - Update Edge state tracking verification to use HTTPS
+
+3. **Update Docker Compose**
+   - Update port mappings if needed (8443 instead of 50051/50052)
+   - Update health checks to use HTTP endpoints
+   - Verify WireGuard tunnel is still required for all communication
+
+### Migration Timeline
+
+- **Week 1**: Steps 2.0.0.1-2.0.0.4 (HTTPS server/client implementation)
+- **Week 2**: Steps 2.0.0.5-2.0.0.6 (Remove gRPC, update tests)
+- **Total**: ~2 weeks for complete migration
+
+### Rollback Plan
+
+If issues arise during migration:
+1. Keep gRPC code in parallel during migration
+2. Use feature flag to switch between gRPC and HTTPS
+3. Can rollback by reverting to gRPC client/server code
+
+---
+
 ## Epic 2.1: Tunnel Gateway & Edge API Service
 
 **Priority: P0**
 
-**Note**: This service combines WireGuard server management with Edge-facing APIs. It handles tunnel termination, authentication, and exposes gRPC/HTTP APIs for Edge communication.
+**Status**: 🔄 MIGRATING TO HTTPS/HTTP2 (Dec 2025)
+
+**Note**: This service combines WireGuard server management with Edge-facing APIs. It handles tunnel termination, authentication, and exposes **HTTPS/HTTP2 REST APIs** for Edge communication (migrated from gRPC - see Epic 2.0.0).
 
 ### Step 2.0.1: WireGuard Server Implementation
 - **Substep 2.3.1**: WireGuard server management
@@ -1139,15 +1528,23 @@ services:
   - Location: `internal/tunnel-gateway/auth.go`
 
 ### Step 2.0.2: Edge API Implementation
-- **Substep 2.4.1**: Edge-facing gRPC API
-  - **Status**: ✅ DONE
-  - **P0**: gRPC server setup for Edge connections over WireGuard tunnel
-  - **P0**: Event upload endpoints (receive events from Edge)
-  - **P0**: Model distribution endpoints (push models to Edge) - Interface defined, implementation pending service integration
-  - **P0**: Telemetry reception endpoints
-  - **P0**: Dataset upload endpoints (receive labeled snapshots) - Interface defined, implementation pending service integration
-  - Location: `internal/tunnel-gateway/edge_api.go`
-  - **Notes**: Implemented gRPC server with authentication interceptor using WireGuard peer identification. Event and telemetry endpoints fully functional. Model distribution and dataset upload interfaces defined for future service integration.
+- **Substep 2.4.1**: Edge-facing HTTPS/HTTP2 API
+  - **Status**: 🔄 MIGRATING (See Epic 2.0.0)
+  - **P0**: HTTPS server setup for Edge connections over WireGuard tunnel
+  - **P0**: REST API endpoints (replaces gRPC):
+    - `POST /api/v1/config/get` - GetConfig
+    - `POST /api/v1/config/update` - UpdateConfig
+    - `POST /api/v1/snapshots/capture` - RequestSnapshotCapture
+    - `POST /api/v1/models/deploy` - DeployModel (multipart upload)
+    - `POST /api/v1/services/restart` - RestartService
+    - `POST /api/v1/capabilities/sync` - SyncCapabilities
+    - `GET /health` - Health check
+  - **P0**: Event upload endpoints (receive events from Edge) - Migrating to HTTPS
+  - **P0**: Model distribution endpoints (push models to Edge) - Migrating to HTTPS multipart upload
+  - **P0**: Telemetry reception endpoints - Migrating to HTTPS
+  - **P0**: Dataset upload endpoints (receive labeled snapshots) - Migrating to HTTPS
+  - Location: `edge/orchestrator/internal/web/https_server.go` (new), `internal/tunnel-gateway/vm_https_server.go` (new)
+  - **Migration Notes**: See Epic 2.0.0 for detailed migration steps. Original gRPC implementation in `internal/tunnel-gateway/edge_api.go` will be removed after migration.
 - **Substep 2.4.2**: Connection monitoring
   - **Status**: ✅ DONE
   - **P0**: Track connected Edge Appliances
@@ -1160,7 +1557,7 @@ services:
   - **Status**: ✅ DONE
   - **P0**: Test WireGuard server initialization and configuration
   - **P0**: Test Edge authentication and authorization
-  - **P0**: Test Edge-facing gRPC API endpoints
+  - **P0**: Test Edge-facing HTTPS API endpoints (migrating from gRPC - see Epic 2.0.0)
   - **P0**: Test connection monitoring and state management
   - **P1**: Test tunnel health monitoring (ping/pong, latency, bandwidth)
   - Location: `internal/tunnel-gateway/*_test.go`
@@ -1180,7 +1577,7 @@ This section documents the verified status of Epic 2.1 implementation in the loc
 - ✅ `user-vm-api`: **Healthy** (port 8280)
   - API Gateway: Running and accessible
   - Tunnel Gateway: WireGuard server running on `0.0.0.0:51820/udp`
-  - Edge API Server: gRPC server running on `localhost:9090`
+  - Edge API Server: HTTPS server running on `10.0.0.1:8443` (WireGuard IP, migrating from gRPC - see Epic 2.0.0)
   - Edge authentication: WireGuard peer-based authentication functional
   - Connection tracking: Edge connections tracked via EdgeAPIServer
   - Health endpoint: `http://localhost:8280/health` returns healthy
@@ -1188,8 +1585,8 @@ This section documents the verified status of Epic 2.1 implementation in the loc
 - ✅ `edge-orchestrator`: **Healthy** (port 8081)
   - Edge web server: Running with health endpoint
   - WireGuard client: Configured with `edge-wg0.conf` (peer IP: `10.0.0.2`)
-  - gRPC client: Connects to VM via WireGuard tunnel
-  - Capability sync: Functional, syncs camera capabilities to VM
+  - HTTPS client: Connects to VM via WireGuard tunnel at `10.0.0.1:8443` (migrating from gRPC - see Epic 2.0.0)
+  - Capability sync: Functional, syncs camera capabilities to VM via HTTPS
   - Health endpoint: `http://localhost:8081/health` returns healthy
 
 **WireGuard Tunnel:**
@@ -1210,8 +1607,8 @@ This section documents the verified status of Epic 2.1 implementation in the loc
 - ✅ `GET /api/cameras`: Lists cameras with capability status (supports `edge_id` filter)
 - ✅ `GET /api/cameras/{id}/dataset`: Returns dataset status for specific camera
 - ✅ `POST /api/datasets/upload`: Receives labeled snapshots from Edge (HTTP multipart)
-- ✅ gRPC endpoints (via Edge API Server):
-  - `SyncCapabilities`: Edge reports camera inventory and dataset readiness
+- ✅ HTTPS endpoints (via Edge API Server, migrating from gRPC - see Epic 2.0.0):
+  - `POST /api/v1/capabilities/sync`: Edge reports camera inventory and dataset readiness
   - `SendEvents`: Edge uploads events (batch support)
   - `SendTelemetry`: Edge sends telemetry data
   - `Heartbeat`: Edge maintains connection keepalive
@@ -1303,9 +1700,9 @@ This section documents the verified status of Epic 2.1 implementation in the loc
     - **VM validation flow**:
       - **VM starts first** (independent, central part) with edges pre-registered by SaaS
       - Edge starts and establishes WireGuard tunnel
-      - Edge establishes gRPC connection
-      - Edge sends edge_id in first heartbeat/telemetry message
-      - VM validates that edge_id exists in edge management system and matches WireGuard public key
+      - Edge establishes HTTPS connection
+      - Edge sends edge_id in first heartbeat/telemetry message (via `POST /api/v1/telemetry/heartbeat`)
+      - VM validates that edge_id exists in edge management system and matches WireGuard public key + client certificate
       - If edge_id exists and WireGuard public key matches: connection proceeds, edge status updated ✅
       - If edge_id doesn't exist or WireGuard public key doesn't match: connection is rejected with error message ✅
       - VM starts monitoring connection and receiving telemetry
@@ -1347,19 +1744,19 @@ This section documents the verified status of Epic 2.1 implementation in the loc
   - **P0**: Monitor WireGuard peer status (latest_handshake, transfer stats, latency) ✅
   - **P0**: Periodic health checks (ping/pong, heartbeat validation) ✅
   - **P0**: Connection state persistence in database (last_seen, connection_count, status) ✅
-  - **P0**: **Continuous gRPC health monitoring** - VM monitors Edge status through gRPC every 30s starting from Epic 2.2 ✅
-  - **P0**: **No HTTP communication** - All VM-Edge communication is gRPC-only (security requirement) ✅
-  - **Location**: `user-vm-api/internal/tunnel-gateway/connection_monitor.go`
-  - **Implementation Notes**:
+    - **P0**: **Continuous HTTPS health monitoring** - VM monitors Edge status through HTTPS every 30s starting from Epic 2.2 ✅ (Migrated from gRPC - see Epic 2.0.0)
+    - **P0**: **No unencrypted HTTP communication** - All VM-Edge communication is HTTPS-only over WireGuard tunnel (security requirement) ✅
+    - **Location**: `user-vm-api/internal/tunnel-gateway/connection_monitor.go`
+    - **Implementation Notes**:
     - Service should run as a background goroutine in EdgeAPIServer ✅
     - Monitor all registered Edges, not just actively connected ones ✅
     - Update `edges` table with connection status and last_seen timestamps ✅
     - Publish connection state change events to event bus ✅
     - Integrate with existing `monitorConnections` and `checkConnections` methods ✅
-    - **VM monitors Edge status through gRPC**: Use `EdgeClient` to call Edge's gRPC server (port 50052) every 30s to verify Edge is alive and ready ✅
-    - **Edge monitors VM configuration status through gRPC**: Edge uses `grpc.Client` to call VM's gRPC server (port 50051) every 30s to verify VM is alive and check configuration status ✅
-    - **Monitoring starts automatically** when bidirectional gRPC connection is established in Epic 2.2 ✅
-    - **All subsequent steps** (2.3, 2.4, 2.5, 2.6, 2.7, 2.8) can rely on gRPC connection being alive and monitored ✅
+    - **VM monitors Edge status through HTTPS**: Use `EdgeHTTPSClient` to call Edge's HTTPS server (port 8443 on WireGuard IP 10.0.0.2) every 30s to verify Edge is alive and ready ✅ (Migrated from gRPC - see Epic 2.0.0)
+    - **Edge monitors VM configuration status through HTTPS**: Edge uses `http.Client` to call VM's HTTPS server (port 8443 on WireGuard IP 10.0.0.1) every 30s to verify VM is alive and check configuration status ✅ (Migrated from gRPC - see Epic 2.0.0)
+    - **Monitoring starts automatically** when bidirectional HTTPS connection is established in Epic 2.2 ✅
+    - **All subsequent steps** (2.3, 2.4, 2.5, 2.6, 2.7, 2.8) can rely on HTTPS connection being alive and monitored ✅
   - **Implementation (Dec 2025)**:
     - Created `ConnectionMonitor` service in `user-vm-api/internal/tunnel-gateway/connection_monitor.go`
     - Implements connection state machine with states: `registered`, `connecting`, `connected`, `disconnected`, `stale`, `reconnecting`
@@ -1374,8 +1771,8 @@ This section documents the verified status of Epic 2.1 implementation in the loc
     - Runs monitoring loop every 30 seconds with configurable intervals
     - Thread-safe implementation with mutexes for concurrent access
     - Provides `GetConnectionState()` and `GetAllConnectionStates()` methods for querying connection status
-    - **gRPC health monitoring**: VM uses `EdgeClient.VerifyConnectionHealth()` to verify Edge gRPC connection is alive every 30s
-    - **Edge gRPC health monitoring**: Edge uses `grpc.Client` to call VM's gRPC services (Heartbeat, GetConfig) every 30s to verify VM is alive and check configuration status
+    - **HTTPS health monitoring**: VM uses `EdgeHTTPSClient.VerifyConnectionHealth()` to verify Edge HTTPS connection is alive every 30s (calls `GET /health` endpoint)
+    - **Edge HTTPS health monitoring**: Edge uses `http.Client` to call VM's HTTPS services (`POST /api/v1/telemetry/heartbeat`, `POST /api/v1/config/get`) every 30s to verify VM is alive and check configuration status
 
 - **Substep 2.0.1.2**: WireGuard tunnel keepalive mechanism
   - **Status**: ✅ DONE
@@ -1446,6 +1843,33 @@ This section documents the verified status of Epic 2.1 implementation in the loc
       - `GetWireGuardServer()` - Returns WireGuard server instance
     - Route registration: More specific routes registered before general `/api/edges/` route
     - Integrated with existing deployment endpoint routing
+
+- **Substep 2.0.1.4**: Edge state tracking via VM→Edge connection with MinIO storage
+  - **Status**: 🔄 IN PROGRESS
+  - **P0**: Use VM→Edge HTTPS connection (established in Epic 2.2) to track Edge services state
+  - **P0**: Store state history in MinIO bucket for SaaS visibility and audit trail
+  - **P0**: Keep VM→Edge connection active (not idle) to ensure it's ready for model deployment
+  - **Location**: `user-vm-api/internal/tunnel-gateway/edge_state_tracker.go`, `user-vm-api/internal/storage-sync/`
+  - **Implementation Notes**:
+    - Start tracking immediately after VM→Edge HTTPS connection is established in Epic 2.2
+    - Use `EdgeHTTPSClient` to periodically query Edge services state via HTTPS (every 30s)
+    - Query Edge services via `POST /api/v1/config/get` endpoint: edge-ai-service health, camera status, model deployment status, etc.
+    - Store state snapshots in MinIO bucket: `edge-states/{edge_id}/state-{timestamp}.json`
+    - State JSON includes: timestamp, edge_id, services_health, cameras, deployed_models, connection_metrics
+    - Benefits:
+      1. SaaS can query MinIO to get Edge state history (no direct VM access needed)
+      2. VM→Edge connection stays active, ready for immediate model deployment
+      3. Complete audit trail of Edge state changes over time
+    - Integration:
+      - Start state tracker when VM→Edge connection is established
+      - Stop state tracker when connection is lost
+      - Resume state tracker when connection is re-established
+  - **Implementation (Dec 2025)**:
+    - Create `EdgeStateTracker` service in `user-vm-api/internal/tunnel-gateway/edge_state_tracker.go`
+    - Integrate with `EdgeClient` to query Edge services state
+    - Use `StorageSync` service to store state snapshots in MinIO
+    - Start tracker automatically when VM→Edge connection is established
+    - Store state history in MinIO bucket: `edge-states/{edge_id}/state-{timestamp}.json`
 
 ### Step 2.0.2: Connection State Management
 
@@ -7115,27 +7539,292 @@ This section documents the verified status of Epic 2.8 implementation in the loc
 
 ---
 
-## Epic 2.19: Orchestrator & API Gateway Service
+## Epic 2.19: State Coordination (Integrated into Orchestrator)
 
 **Priority: P0**
 
-**Note**: Orchestrator & API Gateway Service is the main coordinator managing lifecycle, configuration, and HTTP/gRPC APIs for Edge and UI/SaaS. It coordinates all logical services and exposes the API Gateway for external access.
+**Note**: State coordination functionality is integrated into the Orchestrator service (Epic 2.20) rather than being a separate service. This architectural decision was made because:
+1. Both handle coordination concerns (lifecycle and state)
+2. State coordination is a natural extension of lifecycle management
+3. Simpler architecture with less inter-service overhead
+4. Single point of coordination for all services
 
-### Step 2.19.1: Orchestrator Service Framework
-- **Substep 2.19.1.1**: Main orchestrator service
+The Orchestrator now includes state coordination capabilities that manage component states and coordinate all actions/requests in strict order to prevent race conditions.
+
+### Rationale
+
+Race conditions have been observed in the system:
+- Edge capability sync happens before edge is registered in database (FOREIGN KEY constraint failures)
+- Authentication and capability sync can race
+- Edge state tracking starts before connection is fully established
+- Various services start in parallel without coordination
+
+The State Coordinator Service solves these issues by:
+1. **Centralized State Management**: Single source of truth for all component states
+2. **Strict Ordering**: All actions are queued and executed in deterministic order
+3. **State Machine**: Clear state transitions with validation
+4. **Coordination**: Prevents race conditions by coordinating all state changes
+5. **Observability**: Complete state history for debugging and audit
+
+### Step 2.19.1: VM State Coordinator Service
+
+#### VM Component States
+
+The VM State Coordinator manages the following component states:
+
+**Edge Connection States** (per edge):
+- `unregistered` → Edge not yet registered in database
+- `registered` → Edge registered but not authenticated
+- `authenticating` → Edge authentication in progress
+- `authenticated` → Edge authenticated, connection established
+- `connected` → Edge fully connected, ready for operations
+- `capability_syncing` → Capability sync in progress
+- `capability_synced` → Capability sync completed
+- `state_tracking` → Edge state tracking active
+- `disconnected` → Edge disconnected
+- `reconnecting` → Edge reconnection in progress
+
+**Service States** (per service):
+- `initializing` → Service initialization in progress
+- `ready` → Service ready to accept requests
+- `operational` → Service fully operational
+- `degraded` → Service operational but with reduced functionality
+- `failed` → Service failed, requires intervention
+- `stopping` → Service shutdown in progress
+- `stopped` → Service stopped
+
+**Action Queue States**:
+- `pending` → Action queued, waiting for prerequisites
+- `ready` → Action prerequisites met, ready to execute
+- `executing` → Action execution in progress
+- `completed` → Action completed successfully
+- `failed` → Action failed, may retry
+- `cancelled` → Action cancelled
+
+#### Substep 2.19.1.1: VM State Coordinator Core
+
+- **Status**: ⬜ TODO
+- **P0**: State Coordinator service structure
+- **P0**: State machine implementation with state transitions
+- **P0**: Action queue with strict ordering
+- **P0**: State persistence (SQLite for state history)
+- **P0**: State validation and transition guards
+- **P0**: Thread-safe state access (mutex-protected)
+- **P0**: State change notifications (event bus integration)
+- Location: `user-vm-api/internal/state-coordinator/coordinator.go`
+
+#### Substep 2.19.1.2: VM State Definitions
+
+- **Status**: ⬜ TODO
+- **P0**: Define Edge connection states and transitions
+- **P0**: Define service states and transitions
+- **P0**: Define action queue states
+- **P0**: State transition validation rules
+- **P0**: Prerequisite checking (e.g., edge must be authenticated before capability sync)
+- Location: `user-vm-api/internal/state-coordinator/states.go`
+
+#### Substep 2.19.1.3: VM Action Queue
+
+- **Status**: ⬜ TODO
+- **P0**: Action queue implementation (priority queue)
+- **P0**: Action prerequisites checking
+- **P0**: Action execution in strict order
+- **P0**: Action retry logic with exponential backoff
+- **P0**: Action cancellation support
+- **P0**: Action timeout handling
+- Location: `user-vm-api/internal/state-coordinator/action_queue.go`
+
+#### Substep 2.19.1.4: VM State Persistence
+
+- **Status**: ⬜ TODO
+- **P0**: State history storage (SQLite table)
+- **P0**: State snapshot creation
+- **P0**: State recovery on startup
+- **P0**: State audit log (who/what/when for state changes)
+- Location: `user-vm-api/internal/state-coordinator/persistence.go`
+
+#### Substep 2.19.1.5: VM State Coordinator Integration
+
+- **Status**: ⬜ TODO
+- **P0**: Integrate with Edge authentication flow (must go through coordinator)
+- **P0**: Integrate with capability sync (must wait for authentication)
+- **P0**: Integrate with Edge state tracking (must wait for connection established)
+- **P0**: Integrate with service manager (coordinate service startup)
+- **P0**: Replace direct state changes with coordinator requests
+- Location: `user-vm-api/internal/orchestrator/server.go`, `user-vm-api/internal/tunnel-gateway/`
+
+#### Substep 2.19.1.6: Unit tests for VM State Coordinator
+
+- **Status**: ⬜ TODO
+- **P0**: Test state transitions and validation
+- **P0**: Test action queue ordering
+- **P0**: Test prerequisite checking
+- **P0**: Test state persistence and recovery
+- **P0**: Test race condition prevention
+- Location: `user-vm-api/internal/state-coordinator/*_test.go`
+
+### Step 2.19.2: Edge State Coordinator Service
+
+#### Edge Component States
+
+The Edge State Coordinator manages the following component states:
+
+**VM Connection States**:
+- `disconnected` → Not connected to VM
+- `wireguard_connecting` → WireGuard tunnel establishment in progress
+- `wireguard_connected` → WireGuard tunnel established
+- `authenticating` → Authentication with VM in progress
+- `authenticated` → Authenticated with VM
+- `capability_syncing` → Capability sync in progress
+- `capability_synced` → Capability sync completed
+- `operational` → Fully operational, ready for all operations
+- `reconnecting` → Reconnection in progress
+- `failed` → Connection failed, requires intervention
+
+**Service States** (per service):
+- `initializing` → Service initialization in progress
+- `ready` → Service ready to accept requests
+- `operational` → Service fully operational
+- `degraded` → Service operational but with reduced functionality
+- `failed` → Service failed, requires intervention
+- `stopping` → Service shutdown in progress
+- `stopped` → Service stopped
+
+**Camera States** (per camera):
+- `discovered` → Camera discovered but not connected
+- `connecting` → Camera connection in progress
+- `connected` → Camera connected and streaming
+- `ready` → Camera ready for inference
+- `inference_active` → Inference running on camera
+- `failed` → Camera connection failed
+- `disabled` → Camera disabled
+
+**Action Queue States**:
+- `pending` → Action queued, waiting for prerequisites
+- `ready` → Action prerequisites met, ready to execute
+- `executing` → Action execution in progress
+- `completed` → Action completed successfully
+- `failed` → Action failed, may retry
+- `cancelled` → Action cancelled
+
+#### Substep 2.19.2.1: Edge State Coordinator Core
+
+- **Status**: ⬜ TODO
+- **P0**: State Coordinator service structure
+- **P0**: State machine implementation with state transitions
+- **P0**: Action queue with strict ordering
+- **P0**: State persistence (SQLite for state history)
+- **P0**: State validation and transition guards
+- **P0**: Thread-safe state access (mutex-protected)
+- **P0**: State change notifications (event bus integration)
+- Location: `edge/orchestrator/internal/state-coordinator/coordinator.go`
+
+#### Substep 2.19.2.2: Edge State Definitions
+
+- **Status**: ⬜ TODO
+- **P0**: Define VM connection states and transitions
+- **P0**: Define service states and transitions
+- **P0**: Define camera states and transitions
+- **P0**: Define action queue states
+- **P0**: State transition validation rules
+- **P0**: Prerequisite checking (e.g., WireGuard must be connected before authentication)
+- Location: `edge/orchestrator/internal/state-coordinator/states.go`
+
+#### Substep 2.19.2.3: Edge Action Queue
+
+- **Status**: ⬜ TODO
+- **P0**: Action queue implementation (priority queue)
+- **P0**: Action prerequisites checking
+- **P0**: Action execution in strict order
+- **P0**: Action retry logic with exponential backoff
+- **P0**: Action cancellation support
+- **P0**: Action timeout handling
+- Location: `edge/orchestrator/internal/state-coordinator/action_queue.go`
+
+#### Substep 2.19.2.4: Edge State Persistence
+
+- **Status**: ⬜ TODO
+- **P0**: State history storage (SQLite table)
+- **P0**: State snapshot creation
+- **P0**: State recovery on startup
+- **P0**: State audit log (who/what/when for state changes)
+- Location: `edge/orchestrator/internal/state-coordinator/persistence.go`
+
+#### Substep 2.19.2.5: Edge State Coordinator Integration
+
+- **Status**: ⬜ TODO
+- **P0**: Integrate with WireGuard client (must go through coordinator)
+- **P0**: Integrate with HTTPS client authentication (must wait for WireGuard)
+- **P0**: Integrate with capability sync (must wait for authentication)
+- **P0**: Integrate with camera manager (coordinate camera discovery and connection)
+- **P0**: Integrate with service manager (coordinate service startup)
+- **P0**: Replace direct state changes with coordinator requests
+- Location: `edge/orchestrator/main.go`, `edge/orchestrator/internal/web/`, `edge/orchestrator/internal/capabilities/`
+
+#### Substep 2.19.2.6: Unit tests for Edge State Coordinator
+
+- **Status**: ⬜ TODO
+- **P0**: Test state transitions and validation
+- **P0**: Test action queue ordering
+- **P0**: Test prerequisite checking
+- **P0**: Test state persistence and recovery
+- **P0**: Test race condition prevention
+- Location: `edge/orchestrator/internal/state-coordinator/*_test.go`
+
+### Step 2.19.3: State Coordinator Communication Protocol
+
+#### Substep 2.19.3.1: State Synchronization
+
+- **Status**: ⬜ TODO
+- **P0**: VM and Edge state synchronization over HTTPS
+- **P0**: State change notifications (VM → Edge, Edge → VM)
+- **P0**: State consistency checks
+- **P0**: Conflict resolution (if states diverge)
+- Location: `user-vm-api/internal/state-coordinator/sync.go`, `edge/orchestrator/internal/state-coordinator/sync.go`
+
+#### Substep 2.19.3.2: State API Endpoints
+
+- **Status**: ⬜ TODO
+- **P0**: REST API endpoints for state queries
+- **P0**: State history endpoints
+- **P0**: State transition endpoints (for manual intervention)
+- **P0**: State health check endpoints
+- Location: `user-vm-api/internal/state-coordinator/api.go`, `edge/orchestrator/internal/state-coordinator/api.go`
+
+---
+
+## Epic 2.20: Orchestrator & API Gateway Service
+
+**Priority: P0**
+
+**Note**: Orchestrator & API Gateway Service is the main coordinator managing lifecycle, configuration, component states, and HTTP/gRPC APIs for Edge and UI/SaaS. It coordinates all logical services, manages component state transitions, enforces strict action ordering to prevent race conditions, and exposes the API Gateway for external access.
+
+**Architectural Decision**: The Orchestrator combines service lifecycle management with state coordination. Originally planned as separate services (Orchestrator + State Coordinator), they were combined because:
+1. Both handle coordination concerns (lifecycle and state)
+2. State coordination is a natural extension of lifecycle management
+3. Simpler architecture with less inter-service overhead
+4. Single point of coordination for all services
+
+### Step 2.20.1: Orchestrator Service Framework
+- **Substep 2.20.1.1**: Main orchestrator service
   - **Status**: ⬜ TODO
   - **P0**: Service initialization and startup
   - **P0**: Configuration management (YAML/JSON config via Viper)
   - **P0**: Logging setup (structured JSON logging via Zap)
   - **P0**: Graceful shutdown handling
+  - **P0**: Component state management (state machine, action queue)
+  - **P0**: Race condition prevention (strict action ordering)
   - Location: `internal/orchestrator/server.go`
-- **Substep 2.19.1.2**: Service manager pattern
+- **Substep 2.20.1.2**: Service manager pattern with state coordination
   - **Status**: ⬜ TODO
-  - **P0**: Service lifecycle management
+  - **P0**: Service lifecycle management with state coordination
   - **P0**: Service registration and discovery
   - **P0**: Inter-service communication (channels/events)
   - **P0**: Service dependency injection
-  - Location: `internal/orchestrator/manager.go`
+  - **P0**: Service startup ordering (enforced by state coordinator)
+  - **P0**: Action queue with strict ordering
+  - **P0**: State transition validation and prerequisites
+  - Location: `internal/orchestrator/manager.go`, `internal/orchestrator/state_coordinator.go`
 - **Substep 2.19.1.3**: Health check system
   - **Status**: ⬜ TODO
   - **P0**: Health check endpoints (HTTP/gRPC)
@@ -7151,8 +7840,8 @@ This section documents the verified status of Epic 2.8 implementation in the loc
   - **P1**: Test inter-service communication
   - Location: `internal/orchestrator/server_test.go`, `internal/orchestrator/manager_test.go`
 
-### Step 2.19.2: API Gateway Implementation
-- **Substep 2.19.2.1**: HTTP API Gateway
+### Step 2.20.2: API Gateway Implementation
+- **Substep 2.20.2.1**: HTTP API Gateway
   - **Status**: ⬜ TODO
   - **P0**: HTTP server setup (Gin framework)
   - **P0**: API endpoints for Edge Web UI and future SaaS UI
@@ -7160,7 +7849,7 @@ This section documents the verified status of Epic 2.8 implementation in the loc
   - **P0**: Configuration endpoints
   - **P0**: System status and metrics endpoints
   - Location: `internal/orchestrator/server.go` (API Gateway routes)
-- **Substep 2.19.2.2**: API Gateway routing
+- **Substep 2.20.2.2**: API Gateway routing
   - **Status**: ⬜ TODO
   - **P0**: Route requests to appropriate services (Event Cache, Stream Relay for archived clips, etc.)
   - **P0**: Request/response handling
@@ -7168,8 +7857,8 @@ This section documents the verified status of Epic 2.8 implementation in the loc
   - **P1**: Authentication middleware (for future SaaS integration)
   - Location: `internal/orchestrator/server.go`
 
-### Step 2.19.3: Docker Compose Integration
-- **Substep 2.19.3.1**: Docker Compose setup
+### Step 2.20.3: Docker Compose Integration
+- **Substep 2.20.3.1**: Docker Compose setup
   - **Status**: ⬜ TODO
   - **P0**: Docker Compose service definition for User VM API
   - **P0**: Networking between Edge and User VM API
@@ -7177,7 +7866,7 @@ This section documents the verified status of Epic 2.8 implementation in the loc
   - **P0**: Python AI Service integration
   - **P0**: Shared volumes for SQLite, datasets, models
   - Location: `docker/docker-compose.yml`
-- **Substep 2.19.3.2**: Integration tests
+- **Substep 2.20.3.2**: Integration tests
   - **Status**: ⬜ TODO
   - **P0**: Test Docker Compose service startup and health checks
   - **P0**: Test networking between Edge and User VM API
@@ -7188,13 +7877,13 @@ This section documents the verified status of Epic 2.8 implementation in the loc
 
 ---
 
-## Epic 2.20: Python AI Service
+## Epic 2.21: Python AI Service
 
 **Priority: P0**
 
 **Note**: Python AI Service is a separate containerized microservice that handles both CAE model training and heavy model inference (YOLOv8 for object detection, baseline processing). It exposes a simple HTTP/JSON API (FastAPI) consumed by Go services.
 
-### Step 2.20.1: Python AI Service Setup
+### Step 2.21.1: Python AI Service Setup
 - **Substep 2.20.1.1**: Service structure and dependencies
   - **Status**: ⬜ TODO
   - **P0**: Create `user-vm-api/training-service/` directory structure
