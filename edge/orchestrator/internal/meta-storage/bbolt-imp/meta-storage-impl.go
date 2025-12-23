@@ -24,6 +24,11 @@ const (
 	securityEventsBucket          = "security_events"
 	eventQueueBucket              = "event_queue"
 	pendingSnapshotRequestsBucket = "pending_snapshot_requests"
+	edgeStateBucket               = "edge_state"
+	edgeStateHistoryBucket        = "edge_state_history"
+	edgeCapabilitiesBucket        = "edge_capabilities"
+	currentEdgeStateKey           = "current"
+	currentEdgeCapabilitiesKey    = "current"
 )
 
 // BboltMetaStorage implements MetaDataStore using BoltDB
@@ -63,6 +68,9 @@ func NewBboltMetaDataStore(ctx context.Context, cfg *types.MetaStorageConfig, lo
 			securityEventsBucket,
 			eventQueueBucket,
 			pendingSnapshotRequestsBucket,
+			edgeStateBucket,
+			edgeStateHistoryBucket,
+			edgeCapabilitiesBucket,
 		}
 		for _, bucketName := range buckets {
 			if _, err := tx.CreateBucketIfNotExists([]byte(bucketName)); err != nil {
@@ -404,7 +412,7 @@ func (s *BboltMetaStorage) GetCamera(ctx context.Context, cameraID string) (type
 }
 
 // ListCameras lists camera metadata with optional filters
-func (s *BboltMetaStorage) ListCameras(ctx context.Context, enabledOnly bool) ([]types.CameraMetadata, error) {
+func (s *BboltMetaStorage) ListCameras(ctx context.Context, filters *types.CameraFilters) ([]types.CameraMetadata, error) {
 	var cameras []types.CameraMetadata
 
 	err := s.db.View(func(tx *bbolt.Tx) error {
@@ -420,8 +428,20 @@ func (s *BboltMetaStorage) ListCameras(ctx context.Context, enabledOnly bool) ([
 				return nil // Skip invalid entries
 			}
 
-			if enabledOnly && !camera.Enabled {
-				return nil
+			// Apply filters
+			if filters != nil {
+				if filters.EnabledOnly != nil && *filters.EnabledOnly && !camera.Enabled {
+					return nil
+				}
+				if filters.Status != nil && camera.Status != *filters.Status {
+					return nil
+				}
+				if filters.SyncedWithVM != nil && camera.SyncedWithVM != *filters.SyncedWithVM {
+					return nil
+				}
+				if filters.Type != nil && camera.Type != *filters.Type {
+					return nil
+				}
 			}
 
 			cameras = append(cameras, camera)
@@ -879,6 +899,162 @@ func (s *BboltMetaStorage) DeletePendingSnapshotRequest(ctx context.Context, cam
 		}
 		return b.Delete([]byte(cameraID))
 	})
+}
+
+// SaveEdgeState saves the current edge state and appends to history
+func (s *BboltMetaStorage) SaveEdgeState(ctx context.Context, state map[string]interface{}) error {
+	data, err := json.Marshal(state)
+	if err != nil {
+		return fmt.Errorf("failed to marshal edge state: %w", err)
+	}
+
+	return s.db.Update(func(tx *bbolt.Tx) error {
+		// Save current state
+		currentBucket := tx.Bucket([]byte(edgeStateBucket))
+		if currentBucket == nil {
+			return fmt.Errorf("bucket %s not found", edgeStateBucket)
+		}
+		if err := currentBucket.Put([]byte(currentEdgeStateKey), data); err != nil {
+			return fmt.Errorf("failed to save current edge state: %w", err)
+		}
+
+		// Append to history (with timestamp as key for ordering)
+		historyBucket := tx.Bucket([]byte(edgeStateHistoryBucket))
+		if historyBucket == nil {
+			return fmt.Errorf("bucket %s not found", edgeStateHistoryBucket)
+		}
+
+		// Use timestamp as key (nanoseconds since epoch for uniqueness)
+		timestampKey := []byte(fmt.Sprintf("%d", time.Now().UnixNano()))
+		if err := historyBucket.Put(timestampKey, data); err != nil {
+			return fmt.Errorf("failed to save edge state history: %w", err)
+		}
+
+		return nil
+	})
+}
+
+// GetCurrentEdgeState retrieves the current edge state
+func (s *BboltMetaStorage) GetCurrentEdgeState(ctx context.Context) (map[string]interface{}, bool) {
+	var result map[string]interface{}
+
+	err := s.db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(edgeStateBucket))
+		if b == nil {
+			return fmt.Errorf("bucket %s not found", edgeStateBucket)
+		}
+
+		data := b.Get([]byte(currentEdgeStateKey))
+		if data == nil {
+			return fmt.Errorf("current edge state not found")
+		}
+
+		if err := json.Unmarshal(data, &result); err != nil {
+			return fmt.Errorf("failed to unmarshal edge state: %w", err)
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return nil, false
+	}
+
+	return result, true
+}
+
+// GetEdgeStateHistory retrieves edge state history, most recent first
+func (s *BboltMetaStorage) GetEdgeStateHistory(ctx context.Context, limit int) ([]map[string]interface{}, error) {
+	var history []map[string]interface{}
+
+	err := s.db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(edgeStateHistoryBucket))
+		if b == nil {
+			return fmt.Errorf("bucket %s not found", edgeStateHistoryBucket)
+		}
+
+		c := b.Cursor()
+		// Iterate in reverse order (most recent first)
+		var keys [][]byte
+		for k, _ := c.Last(); k != nil; k, _ = c.Prev() {
+			keys = append(keys, k)
+			if limit > 0 && len(keys) >= limit {
+				break
+			}
+		}
+
+		// Read values in reverse order
+		for i := len(keys) - 1; i >= 0; i-- {
+			data := b.Get(keys[i])
+			if data == nil {
+				continue
+			}
+
+			var state map[string]interface{}
+			if err := json.Unmarshal(data, &state); err != nil {
+				s.logger.Warn("failed to unmarshal edge state history entry", zap.Error(err))
+				continue
+			}
+
+			history = append(history, state)
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	return history, nil
+}
+
+// SaveEdgeCapabilities saves the Edge capabilities received from VM
+func (s *BboltMetaStorage) SaveEdgeCapabilities(ctx context.Context, capabilities map[string]interface{}) error {
+	data, err := json.Marshal(capabilities)
+	if err != nil {
+		return fmt.Errorf("failed to marshal edge capabilities: %w", err)
+	}
+
+	return s.db.Update(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(edgeCapabilitiesBucket))
+		if b == nil {
+			return fmt.Errorf("bucket %s not found", edgeCapabilitiesBucket)
+		}
+		if err := b.Put([]byte(currentEdgeCapabilitiesKey), data); err != nil {
+			return fmt.Errorf("failed to save edge capabilities: %w", err)
+		}
+		return nil
+	})
+}
+
+// GetEdgeCapabilities retrieves the Edge capabilities
+func (s *BboltMetaStorage) GetEdgeCapabilities(ctx context.Context) (map[string]interface{}, bool) {
+	var result map[string]interface{}
+
+	err := s.db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(edgeCapabilitiesBucket))
+		if b == nil {
+			return fmt.Errorf("bucket %s not found", edgeCapabilitiesBucket)
+		}
+
+		data := b.Get([]byte(currentEdgeCapabilitiesKey))
+		if data == nil {
+			return fmt.Errorf("edge capabilities not found")
+		}
+
+		if err := json.Unmarshal(data, &result); err != nil {
+			return fmt.Errorf("failed to unmarshal edge capabilities: %w", err)
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return nil, false
+	}
+
+	return result, true
 }
 
 // Close closes the database and releases all resources

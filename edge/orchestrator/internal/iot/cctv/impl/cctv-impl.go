@@ -245,15 +245,49 @@ func (s *CCTVServiceImpl) discoveredToCCTV(discovered *discovery.DiscoveredCamer
 
 // DiscoverCameras triggers immediate camera discovery
 func (s *CCTVServiceImpl) DiscoverCameras(ctx context.Context) error {
-	// Trigger discovery in both services
-	if s.onvifDiscovery != nil {
-		// ONVIF discovery runs in a loop, but we can trigger it manually if needed
-		// For now, discovery happens automatically
+	s.logger.Info("Initiating camera discovery")
+	
+	// Get all discovered cameras from discovery services
+	discoveredCameras, err := s.GetDiscoveredCameras(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get discovered cameras: %w", err)
 	}
-	if s.usbDiscovery != nil {
-		// USB discovery runs in a loop, but we can trigger it manually if needed
-		// For now, discovery happens automatically
+
+	// Register all discovered cameras and publish events
+	for _, camera := range discoveredCameras {
+		// Check if camera is already registered
+		_, found := s.metaStore.GetCamera(ctx, camera.ID)
+		if !found {
+			// Register the camera
+			if err := s.RegisterCamera(ctx, camera); err != nil {
+				s.logger.Warn("Failed to register discovered camera", 
+					zap.String("camera_id", camera.ID),
+					zap.Error(err))
+				continue
+			}
+		}
+
+		// Publish camera.discovered event
+		if s.eventBus != nil {
+			s.eventBus.Publish(evtbusstypes.Event{
+				Type:      evtbusstypes.EventType("camera.discovered"),
+				Source:    s.Name(),
+				Timestamp: time.Now(),
+				Data: map[string]interface{}{
+					"camera_id": camera.ID,
+					"name":       camera.Name,
+					"type":       string(camera.Type),
+				},
+			})
+		}
 	}
+
+	if len(discoveredCameras) == 0 {
+		s.logger.Info("No cameras discovered")
+	} else {
+		s.logger.Info("Camera discovery completed", zap.Int("count", len(discoveredCameras)))
+	}
+
 	return nil
 }
 
@@ -290,7 +324,12 @@ func (s *CCTVServiceImpl) GetCamera(ctx context.Context, cameraID string) (*cctv
 
 // ListCameras lists all registered cameras
 func (s *CCTVServiceImpl) ListCameras(ctx context.Context, enabledOnly bool) ([]*cctvtypes.Camera, error) {
-	metas, err := s.metaStore.ListCameras(ctx, enabledOnly)
+	filters := &metastorage.CameraFilters{}
+	if enabledOnly {
+		enabled := true
+		filters.EnabledOnly = &enabled
+	}
+	metas, err := s.metaStore.ListCameras(ctx, filters)
 	if err != nil {
 		return nil, err
 	}

@@ -63,8 +63,19 @@ type CameraMetadata struct {
 	DevicePath    string
 	Config        map[string]interface{} // Camera configuration
 	Capabilities  map[string]interface{} // Camera capabilities
+	SyncedWithVM  bool                   // Whether camera has been synced with VM
+	SyncedAt      *time.Time             // Timestamp of last sync with VM
+	VMCameraID    string                 // Camera ID on VM side (if different from Edge ID)
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
+}
+
+// CameraFilters contains filters for listing cameras
+type CameraFilters struct {
+	EnabledOnly   *bool   // Filter by enabled status
+	Status        *string // Filter by status (e.g., "online", "offline", "discovered")
+	SyncedWithVM  *bool   // Filter by VM sync status
+	Type          *string // Filter by camera type (e.g., "rtsp", "onvif", "usb")
 }
 
 // ScreenshotMetadata represents metadata for a screenshot

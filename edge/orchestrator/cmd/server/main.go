@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"flag"
-	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
@@ -29,39 +28,31 @@ func main() {
 	flag.StringVar(&configPath, "c", "", "Path to configuration file (short)")
 	flag.Parse()
 
-	// 1. Initialize logger first (needed for config loading)
-	log, err := zap.NewDevelopment()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to initialize logger: %v\n", err)
-		os.Exit(1)
-	}
-	defer func() { _ = log.Sync() }()
-
-	log.Info("Starting Edge Orchestrator",
-		zap.String("version", version),
-		zap.String("build_time", buildTime),
-		zap.String("git_commit", gitCommit),
-	)
-
-	// 2. Create fx.App with orchestrator module
-	// Config will be loaded first via ConfigProviderWithPath, then other services
+	// 1. Create fx.App with orchestrator module
+	// Config will be loaded first, then logger created from config, then other services
 	app := fx.New(
-		// Provide logger first (needed by config provider)
-		fx.Provide(
-			func() *zap.Logger { return log },
-		),
-		// Provide config using ConfigProvider (will be invoked first)
+		// Provide config first (no dependencies)
 		config.ConfigProviderWithPath(configPath),
+		// Provide logger based on config (depends on Config)
+		fx.Provide(config.LoggerProvider),
 		// Include orchestrator module (provides all services in correct order)
 		orchestrator.Module(),
-		// Add lifecycle hook to start the server
+		// Add lifecycle hook to start the server and log startup
 		fx.Invoke(func(
 			lc fx.Lifecycle,
 			server *impl.Server,
 			logger *zap.Logger,
+			cfg *config.Config,
 		) {
 			lc.Append(fx.Hook{
 				OnStart: func(ctx context.Context) error {
+					logger.Info("Starting Edge Orchestrator",
+						zap.String("version", version),
+						zap.String("build_time", buildTime),
+						zap.String("git_commit", gitCommit),
+						zap.String("config_file", cfg.ConfigFile),
+						zap.String("environment", cfg.Environment),
+					)
 					logger.Info("Starting orchestrator server...")
 					return server.Start(ctx)
 				},
@@ -69,7 +60,9 @@ func main() {
 					logger.Info("Stopping orchestrator server...")
 					shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 					defer cancel()
-					return server.Shutdown(shutdownCtx)
+					err := server.Shutdown(shutdownCtx)
+					logger.Info("Edge Orchestrator stopped gracefully")
+					return err
 				},
 			})
 		}),
@@ -79,32 +72,42 @@ func main() {
 		}),
 	)
 
-	// 4. Start the application
+	// 2. Check for build errors before starting
+	if err := app.Err(); err != nil {
+		// Use a fallback logger for build errors (before config is loaded)
+		fallbackLogger, _ := zap.NewDevelopment()
+		defer func() { _ = fallbackLogger.Sync() }()
+		fallbackLogger.Error("Failed to build application", zap.Error(err))
+		os.Exit(1)
+	}
+
+	// 3. Start the application (logger will be available through fx lifecycle)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	if err := app.Start(ctx); err != nil {
-		log.Error("Failed to start application", zap.Error(err))
+		// Fallback logger for startup errors
+		fallbackLogger, _ := zap.NewDevelopment()
+		defer func() { _ = fallbackLogger.Sync() }()
+		fallbackLogger.Error("Failed to start application", zap.Error(err))
 		os.Exit(1)
 	}
 
-	log.Info("Orchestrator started")
-
-	// 5. Wait for interrupt signal
+	// 4. Wait for interrupt signal
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
 	<-sigChan
-	log.Info("Shutting down Edge Orchestrator...")
 
-	// 6. Stop the application (fx will handle graceful shutdown of all services)
+	// 5. Stop the application (fx will handle graceful shutdown of all services)
 	stopCtx, stopCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer stopCancel()
 
 	if err := app.Stop(stopCtx); err != nil {
-		log.Error("Error during shutdown", zap.Error(err))
+		// Fallback logger for shutdown errors
+		fallbackLogger, _ := zap.NewDevelopment()
+		defer func() { _ = fallbackLogger.Sync() }()
+		fallbackLogger.Error("Error during shutdown", zap.Error(err))
 		os.Exit(1)
 	}
-
-	log.Info("Edge Orchestrator stopped gracefully")
 }

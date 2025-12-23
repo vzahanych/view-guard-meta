@@ -20,8 +20,27 @@ func (g *WebGatewayImpl) handleListCameras(c *gin.Context) {
 	}
 
 	enabledOnly := c.Query("enabled") == "true"
+	statusFilter := c.Query("status")
+	syncedFilter := c.Query("synced") // "true" or "false"
+	typeFilter := c.Query("type")
 
-	cameraMetas, err := g.metaStorage.ListCameras(c.Request.Context(), enabledOnly)
+	filters := &metastorage.CameraFilters{}
+	if enabledOnly {
+		enabled := true
+		filters.EnabledOnly = &enabled
+	}
+	if statusFilter != "" {
+		filters.Status = &statusFilter
+	}
+	if syncedFilter != "" {
+		synced := syncedFilter == "true"
+		filters.SyncedWithVM = &synced
+	}
+	if typeFilter != "" {
+		filters.Type = &typeFilter
+	}
+
+	cameraMetas, err := g.metaStorage.ListCameras(c.Request.Context(), filters)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

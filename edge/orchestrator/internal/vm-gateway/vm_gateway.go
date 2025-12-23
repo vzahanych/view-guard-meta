@@ -3,6 +3,7 @@ package vmgateway
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	eventbus "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/event-bus"
 	metastorage "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/meta-storage"
@@ -46,6 +47,11 @@ type VMGateway interface {
 
 	// IsConnected returns whether the WireGuard tunnel is connected and ready for communication.
 	IsConnected() bool
+
+	// IsHTTPConnected returns whether the HTTP/HTTPS client connection to VM is established and authenticated.
+	// In production mode, this requires WireGuard to be connected.
+	// In dev mode (localhost), this checks if authentication with VM has succeeded.
+	IsHTTPConnected() bool
 
 	// GetWireGuardInterfaceName returns the WireGuard interface name.
 	GetWireGuardInterfaceName() string
@@ -113,8 +119,9 @@ func NewVMGateway(
 }
 
 // VMGatewayProvider creates the VM gateway with fx lifecycle management.
-// The gateway is optional and will be nil if WireGuard is disabled.
-// For development, the gateway can run in localhost mode even when WireGuard is disabled.
+// The gateway is required when configured. If WireGuard is disabled and not in localhost mode,
+// the gateway will not be created (returns nil, nil). For development, the gateway can run
+// in localhost mode even when WireGuard is disabled.
 //
 // The gateway is a complex service with three internal components:
 //   - WireGuard client service (tunnel management)
@@ -122,6 +129,7 @@ func NewVMGateway(
 //   - HTTPS client service (Edge → VM communication)
 //
 // All dependencies are injected via fx at construction time.
+// If gateway creation fails, an error is returned and the application will not start.
 func VMGatewayProvider(
 	lc fx.Lifecycle,
 	cfg *types.VMGatewayConfig,
@@ -131,25 +139,37 @@ func VMGatewayProvider(
 	logger *zap.Logger,
 ) (VMGateway, error) {
 	// Allow localhost mode for development even when WireGuard is disabled
-	// Check if we have localhost endpoints configured
-	isLocalhostMode := !cfg.WireGuard.Enabled &&
-		(cfg.HTTPServerConfig.ListenAddress == "localhost:8443" || cfg.HTTPServerConfig.ListenAddress == "127.0.0.1:8443") &&
-		(cfg.HTTPSClientConfig.VMEndpoint == "localhost:8443" || cfg.HTTPSClientConfig.VMEndpoint == "127.0.0.1:8443")
+	if !cfg.WireGuard.Enabled {
+		// For dev mode, check if HTTPS server is configured to listen on localhost
+		serverAddr := cfg.HTTPServerConfig.ListenAddress
+		isLocalhostServer := serverAddr == "" || // Empty defaults to localhost
+			serverAddr == "localhost:8443" ||
+			serverAddr == "127.0.0.1:8443" ||
+			serverAddr == "0.0.0.0:8443" // 0.0.0.0 is also acceptable for dev
 
-	if !cfg.WireGuard.Enabled && !isLocalhostMode {
-		logger.Info("WireGuard disabled and not in localhost mode, VM gateway will not be available")
-		return nil, nil
-	}
+		// HTTPS client endpoint is optional for dev - can be empty or localhost (any port)
+		clientEndpoint := cfg.HTTPSClientConfig.VMEndpoint
+		isLocalhostClient := clientEndpoint == "" || // Empty defaults to localhost
+			strings.HasPrefix(clientEndpoint, "localhost:") ||
+			strings.HasPrefix(clientEndpoint, "127.0.0.1:")
 
-	if isLocalhostMode {
-		logger.Info("VM gateway running in localhost development mode (WireGuard disabled)")
+		if isLocalhostServer && isLocalhostClient {
+			logger.Info("VM gateway running in localhost development mode (WireGuard disabled)",
+				zap.String("server_address", serverAddr),
+				zap.String("client_endpoint", clientEndpoint))
+		} else {
+			logger.Info("WireGuard disabled and not in localhost mode, VM gateway will not be available",
+				zap.String("server_address", serverAddr),
+				zap.String("client_endpoint", clientEndpoint))
+			return nil, nil
+		}
 	}
 
 	// Create the gateway (this constructs all three internal components with dependencies)
 	gateway, err := NewVMGateway(context.Background(), cfg, metaStore, objectStore, eventBus, logger)
 	if err != nil {
-		logger.Warn("Failed to create VM gateway", zap.Error(err))
-		return nil, nil // Return nil instead of error to make it optional
+		logger.Error("Failed to create VM gateway", zap.Error(err))
+		return nil, fmt.Errorf("failed to create VM gateway: %w", err)
 	}
 
 	// Setup lifecycle hooks

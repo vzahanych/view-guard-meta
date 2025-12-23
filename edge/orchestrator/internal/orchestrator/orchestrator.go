@@ -19,6 +19,7 @@ import (
 	vmgateway "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/vm-gateway"
 	vmgatewaytypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/vm-gateway/types"
 	webgateway "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/web-gateway"
+	webgatewaytypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/web-gateway/types"
 	"go.uber.org/fx"
 	"go.uber.org/zap"
 )
@@ -147,8 +148,15 @@ func Module() fx.Option {
 			func(cfg *config.Config, vmGateway vmgateway.VMGateway, lc fx.Lifecycle, cctvCfg *cctvtypes.CCTVServiceConfig, metaStore metastorage.MetaDataStore, objectStore objectstorage.ObjectStorageService, eventBus eventbus.EventBus, logger *zap.Logger) (cctv.CCTVService, error) {
 				return cctv.CCTVServiceProvider(lc, cctvCfg, metaStore, objectStore, eventBus, logger)
 			},
+			// Provide WebGatewayConfig from Config
+			func(cfg *config.Config) *webgatewaytypes.WebGatewayConfig {
+				return &cfg.WebGateway
+			},
 			// Web gateway provider with fx lifecycle management
-			webgateway.WebGatewayProvider,
+			// Depends on MetaStorage, ObjectStorage, CCTVService, VMGateway, and EventBus (for startup ordering)
+			func(cfg *config.Config, metaStore metastorage.MetaDataStore, objectStore objectstorage.ObjectStorageService, cctvService cctv.CCTVService, vmGateway vmgateway.VMGateway, eventBus eventbus.EventBus, lc fx.Lifecycle, webCfg *webgatewaytypes.WebGatewayConfig, logger *zap.Logger) (webgateway.WebGateway, error) {
+				return webgateway.WebGatewayProvider(lc, webCfg, metaStore, objectStore, cctvService, vmGateway, eventBus, logger)
+			},
 			// Server constructor - wires all services together
 			func(
 				edgeID string,

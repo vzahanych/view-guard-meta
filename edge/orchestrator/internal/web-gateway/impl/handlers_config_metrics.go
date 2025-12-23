@@ -99,7 +99,7 @@ func (g *WebGatewayImpl) handleAppMetrics(c *gin.Context) {
 	appMetrics := map[string]interface{}{}
 
 	if g.metaStorage != nil {
-		cameras, err := g.metaStorage.ListCameras(c.Request.Context(), false)
+		cameras, err := g.metaStorage.ListCameras(c.Request.Context(), nil)
 		if err == nil {
 			appMetrics["total_cameras"] = len(cameras)
 

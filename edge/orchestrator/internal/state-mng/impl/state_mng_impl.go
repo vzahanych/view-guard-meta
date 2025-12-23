@@ -40,6 +40,7 @@ const (
 	EventTypeHTTPSConnected        eventbustypes.EventType = "network.https.connected"
 	EventTypeHTTPSDisconnected     eventbustypes.EventType = "network.https.disconnected"
 	EventTypeEdgeAuthenticated     eventbustypes.EventType = "edge.authenticated"
+	EventTypeCapabilitiesReceived  eventbustypes.EventType = "edge.capabilities_received"
 	EventTypeCameraDiscovered      eventbustypes.EventType = "camera.discovered"
 	EventTypeCameraRegistered      eventbustypes.EventType = "camera.registered"
 	EventTypeCameraConnected       eventbustypes.EventType = "camera.connected"
@@ -58,12 +59,25 @@ const (
 type EdgeStatus string
 
 const (
-	EdgeStatusDisconnected  EdgeStatus = "disconnected"
-	EdgeStatusWireGuardConn EdgeStatus = "wireguard_connected"
-	EdgeStatusHTTPSConn     EdgeStatus = "https_connected"
-	EdgeStatusAuthenticated EdgeStatus = "authenticated"
-	EdgeStatusReady         EdgeStatus = "ready"
-	EdgeStatusError         EdgeStatus = "error"
+	EdgeStatusInitializing         EdgeStatus = "initializing"
+	EdgeStatusDisconnected         EdgeStatus = "disconnected"
+	EdgeStatusWGConnecting         EdgeStatus = "wg_connecting"
+	EdgeStatusHTTPConnecting       EdgeStatus = "http_connecting"
+	EdgeStatusWireGuardConn        EdgeStatus = "wireguard_connected"
+	EdgeStatusHTTPSConn            EdgeStatus = "https_connected"
+	EdgeStatusAuthenticated        EdgeStatus = "authenticated"
+	EdgeStatusCapabilitiesReceived EdgeStatus = "capabilities_received"
+	EdgeStatusCameraDiscovered     EdgeStatus = "camera_discovered"
+	EdgeStatusReady                EdgeStatus = "ready"
+	EdgeStatusError                EdgeStatus = "error"
+	EdgeStatusMetaStorageError     EdgeStatus = "meta_storage_error"
+	EdgeStatusObjectStorageError   EdgeStatus = "object_storage_error"
+	EdgeStatusCCTVServiceError     EdgeStatus = "cctv_service_error"
+	EdgeStatusAIGatewayError       EdgeStatus = "ai_gateway_error"
+	EdgeStatusVMGatewayError       EdgeStatus = "vm_gateway_error"
+	EdgeStatusWebGatewayError      EdgeStatus = "web_gateway_error"
+	EdgeStatusWGConnectionError    EdgeStatus = "wg_connection_error"
+	EdgeStatusHTTPConnectionError  EdgeStatus = "http_connection_error"
 )
 
 // EdgeState represents the complete state of the edge appliance
@@ -75,13 +89,6 @@ type EdgeState struct {
 	AIProcessingActive bool
 	StorageHealth      string // "healthy", "warning", "full"
 	LastUpdated        time.Time
-}
-
-// HTTPSClient interface for VM communication
-type HTTPSClient interface {
-	IsConnected() bool
-	SyncCapabilities(ctx context.Context, req *httpsclienttypes.SyncCapabilitiesRequest) (*httpsclienttypes.SyncCapabilitiesResponse, error)
-	ReportDeploymentStatus(ctx context.Context, deploymentID string, status string, errorMessage *string, modelPath *string) error
 }
 
 // stateManager implements the StateManager interface.
@@ -97,7 +104,6 @@ type StateManagerImpl struct {
 	objectStorage objectstorage.ObjectStorageService
 	vmGateway     vmgateway.VMGateway
 	webGateway    webgateway.WebGateway
-	httpsClient   HTTPSClient // HTTPS client for VM communication
 
 	// Capability sync state
 	minSnapshots int
@@ -137,13 +143,22 @@ func NewStateManagerImpl(bus eventbus.EventBus, log *zap.Logger) (*StateManagerI
 		return nil, fmt.Errorf("event bus is required")
 	}
 
+	// Create a development logger if none is provided
+	if log == nil {
+		var err error
+		log, err = zap.NewDevelopment()
+		if err != nil {
+			return nil, fmt.Errorf("failed to create logger: %w", err)
+		}
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &StateManagerImpl{
 		eventBus: bus,
 		logger:   log,
 		state: EdgeState{
-			Status:        EdgeStatusDisconnected,
+			Status:        EdgeStatusInitializing,
 			StorageHealth: "healthy",
 			LastUpdated:   time.Now(),
 		},
@@ -214,15 +229,6 @@ func (m *StateManagerImpl) SetWebGateway(webGateway interface{}) {
 	}
 }
 
-// SetHTTPSClient sets the HTTPS client for VM communication
-func (m *StateManagerImpl) SetHTTPSClient(httpsClient interface{}) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if client, ok := httpsClient.(HTTPSClient); ok {
-		m.httpsClient = client
-	}
-}
-
 // SetConfig sets the configuration
 func (m *StateManagerImpl) SetConfig(cfg *config.Config) {
 	m.mu.Lock()
@@ -272,6 +278,26 @@ func (m *StateManagerImpl) SetEdgeID(edgeID string) {
 func (m *StateManagerImpl) Start(ctx context.Context) error {
 	var startErr error
 	m.startOnce.Do(func() {
+		// Initialize and log initial state
+		m.mu.Lock()
+		m.state.Status = EdgeStatusInitializing
+		m.state.LastUpdated = time.Now()
+		initialState := m.state
+		m.mu.Unlock()
+
+		// Persist initial state
+		m.persistStateToStorage(ctx, initialState)
+
+		m.logger.Info("Edge state initialized",
+			zap.String("status", string(initialState.Status)),
+			zap.Bool("network_connected", initialState.NetworkConnected),
+			zap.Bool("vm_authenticated", initialState.VMAuthenticated),
+			zap.Int("cameras_enabled", initialState.CamerasEnabled),
+			zap.String("storage_health", initialState.StorageHealth))
+
+		// Check health of all services after setting initializing status
+		m.checkServicesHealth(ctx)
+
 		m.logger.Info("Starting edge state manager, subscribing to all events")
 
 		events := m.eventBus.SubscribeAll()
@@ -282,8 +308,8 @@ func (m *StateManagerImpl) Start(ctx context.Context) error {
 			m.run(events)
 		}()
 
-		// Start capability sync loop if HTTPS client is available
-		if m.httpsClient != nil && m.cctvService != nil {
+		// Start capability sync loop if VM gateway is available
+		if m.vmGateway != nil && m.cctvService != nil {
 			m.wg.Add(1)
 			go func() {
 				defer m.wg.Done()
@@ -291,6 +317,9 @@ func (m *StateManagerImpl) Start(ctx context.Context) error {
 			}()
 			m.logger.Info("Capability sync loop started")
 		}
+
+		// Connection initiation is now handled in checkServicesHealth -> initiateConnection
+		// This ensures health checks pass before attempting connection
 
 		m.logger.Info("Edge state manager started, listening for events from all services")
 	})
@@ -380,7 +409,7 @@ func (m *StateManagerImpl) updateStateForEvent(ev eventbustypes.Event) (EdgeStat
 	// Network events
 	case EventTypeWireGuardConnected:
 		newState.NetworkConnected = true
-		if newState.Status == EdgeStatusDisconnected {
+		if newState.Status == EdgeStatusDisconnected || newState.Status == EdgeStatusInitializing {
 			newState.Status = EdgeStatusWireGuardConn
 		}
 	case EventTypeWireGuardDisconnected:
@@ -401,8 +430,16 @@ func (m *StateManagerImpl) updateStateForEvent(ev eventbustypes.Event) (EdgeStat
 			newState.Status = EdgeStatusAuthenticated
 			newState.VMAuthenticated = true
 		}
+	case EventTypeCapabilitiesReceived:
+		if newState.Status == EdgeStatusAuthenticated || newState.Status == EdgeStatusHTTPSConn {
+			newState.Status = EdgeStatusCapabilitiesReceived
+		}
 
 	// Camera events
+	case EventTypeCameraDiscovered:
+		if newState.Status == EdgeStatusCapabilitiesReceived {
+			newState.Status = EdgeStatusCameraDiscovered
+		}
 	case EventTypeCameraRegistered:
 		if cameraID, ok := ev.Data["camera_id"].(string); ok {
 			m.logger.Info("Camera registered", zap.String("camera_id", cameraID))
@@ -459,6 +496,9 @@ func (m *StateManagerImpl) updateStateForEvent(ev eventbustypes.Event) (EdgeStat
 		}
 	}
 
+	// Persist state to meta-storage (use background context since we're in an event handler)
+	m.persistStateToStorage(context.Background(), newState)
+
 	// Log state transition if status changed
 	if oldState.Status != newState.Status {
 		m.logger.Info("edge-state-manager: state transition",
@@ -489,8 +529,14 @@ func (m *StateManagerImpl) executeWorkflow(ctx context.Context, ev eventbustypes
 		// Workflow: After authentication, ensure cameras are discovered and AI is ready
 		m.initializeServicesAfterAuth(ctx)
 
+	case EventTypeCapabilitiesReceived:
+		m.logger.Info("Capabilities received from VM, checking for camera capability")
+		// Workflow: Check capabilities and initiate camera discovery if CCTV capability is present
+		m.handleCapabilitiesReceived(ctx, ev)
+
 	// Camera workflow
 	case EventTypeCameraDiscovered:
+		m.logger.Info("Cameras discovered, updating state")
 		m.handleCameraDiscovered(ctx, ev)
 	case EventTypeCameraRegistered:
 		m.handleCameraRegistered(ctx, ev)
@@ -556,12 +602,54 @@ func (m *StateManagerImpl) initializeServicesAfterAuth(ctx context.Context) {
 	}
 }
 
+// handleCapabilitiesReceived handles capabilities received from VM
+func (m *StateManagerImpl) handleCapabilitiesReceived(ctx context.Context, ev eventbustypes.Event) {
+	capabilities, ok := ev.Data["capabilities"].(map[string]interface{})
+	if !ok {
+		m.logger.Warn("Capabilities data not found in event")
+		return
+	}
+
+	m.logger.Info("Processing capabilities", zap.Any("capabilities", capabilities))
+
+	// Check if CCTV camera capability is present
+	if cctvCap, ok := capabilities["cctv_camera"].(bool); ok && cctvCap {
+		m.logger.Info("CCTV camera capability detected, initiating camera discovery")
+		// Initiate camera discovery through CCTV service
+		if m.cctvService != nil {
+			if err := m.cctvService.DiscoverCameras(ctx); err != nil {
+				m.logger.Error("Failed to initiate camera discovery", zap.Error(err))
+				// Update state to error
+				m.mu.Lock()
+				m.state.Status = EdgeStatusCCTVServiceError
+				m.persistStateToStorage(ctx, m.state)
+				m.mu.Unlock()
+				return
+			}
+			m.logger.Info("Camera discovery initiated")
+		} else {
+			m.logger.Warn("CCTV service not available for camera discovery")
+		}
+	} else {
+		m.logger.Info("No CCTV camera capability found in capabilities")
+	}
+}
+
 // handleCameraDiscovered handles camera discovery events
 func (m *StateManagerImpl) handleCameraDiscovered(ctx context.Context, ev eventbustypes.Event) {
 	cameraID, _ := ev.Data["camera_id"].(string)
 	m.logger.Info("Camera discovered, workflow: register if needed",
 		zap.String("camera_id", cameraID),
 	)
+
+	// Update state to camera_discovered if we're in capabilities_received state
+	m.mu.Lock()
+	if m.state.Status == EdgeStatusCapabilitiesReceived {
+		m.state.Status = EdgeStatusCameraDiscovered
+		m.persistStateToStorage(ctx, m.state)
+		m.logger.Info("State updated to camera_discovered")
+	}
+	m.mu.Unlock()
 
 	// Workflow: Auto-register discovered cameras if configured
 	// This would interact with CCTV service to register the camera
@@ -725,7 +813,7 @@ func (m *StateManagerImpl) handleScreenshotSaved(ctx context.Context, ev eventbu
 	// 1. Metadata already stored by CCTV service
 	// 2. Update dataset status if needed
 	// 3. Trigger capability sync to VM (if connected)
-	if m.httpsClient != nil {
+	if m.vmGateway != nil {
 		select {
 		case m.syncTrigger <- struct{}{}:
 			// Sync triggered successfully
@@ -742,6 +830,154 @@ func (m *StateManagerImpl) executeReadyStateWorkflow(ctx context.Context, state 
 
 	// Example: Monitor camera health, AI processing status, storage usage
 	m.logger.Debug("Edge in ready state, monitoring services")
+}
+
+// initiateWireGuardConnection initiates WireGuard connection in production mode
+func (m *StateManagerImpl) initiateWireGuardConnection(ctx context.Context) {
+	if m.vmGateway == nil {
+		m.logger.Error("VM gateway not available, cannot establish WireGuard connection")
+		m.mu.Lock()
+		m.state.Status = EdgeStatusVMGatewayError
+		m.state.LastUpdated = time.Now()
+		m.persistStateToStorage(ctx, m.state)
+		m.mu.Unlock()
+		return
+	}
+
+	m.logger.Info("Initiating WireGuard connection to VM")
+
+	// Check if already connected
+	if m.vmGateway.IsConnected() {
+		m.logger.Info("WireGuard already connected")
+		// Update state to wireguard_connected
+		m.mu.Lock()
+		if m.state.Status == EdgeStatusWGConnecting || m.state.Status == EdgeStatusInitializing || m.state.Status == EdgeStatusDisconnected {
+			m.state.Status = EdgeStatusWireGuardConn
+			m.state.NetworkConnected = true
+			m.state.LastUpdated = time.Now()
+		}
+		newState := m.state
+		m.mu.Unlock()
+
+		// Persist state update
+		m.persistStateToStorage(ctx, newState)
+
+		m.logger.Info("Edge state updated",
+			zap.String("status", string(newState.Status)),
+			zap.Bool("network_connected", newState.NetworkConnected))
+
+		// WireGuard is started via fx lifecycle, we just monitor connection status
+		return
+	}
+
+	// Poll for WireGuard connection status
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	timeout := time.NewTimer(60 * time.Second)
+	defer timeout.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timeout.C:
+			m.logger.Error("WireGuard connection timeout - connection not established within 60 seconds")
+			m.mu.Lock()
+			if m.state.Status == EdgeStatusWGConnecting {
+				m.state.Status = EdgeStatusWGConnectionError
+				m.state.LastUpdated = time.Now()
+				m.persistStateToStorage(ctx, m.state)
+			}
+			m.mu.Unlock()
+			return
+		case <-ticker.C:
+			if m.vmGateway.IsConnected() {
+				m.logger.Info("WireGuard connection established")
+				// Update state to wireguard_connected
+				m.mu.Lock()
+				if m.state.Status == EdgeStatusWGConnecting {
+					m.state.Status = EdgeStatusWireGuardConn
+					m.state.NetworkConnected = true
+					m.state.LastUpdated = time.Now()
+				}
+				newState := m.state
+				m.mu.Unlock()
+
+				// Persist state update
+				m.persistStateToStorage(ctx, newState)
+
+				m.logger.Info("Edge state updated",
+					zap.String("status", string(newState.Status)),
+					zap.Bool("network_connected", newState.NetworkConnected))
+				return
+			}
+		}
+	}
+}
+
+// initiateHTTPConnection initiates HTTP connection in dev mode (WireGuard disabled)
+func (m *StateManagerImpl) initiateHTTPConnection(ctx context.Context) {
+	if m.vmGateway == nil {
+		m.logger.Error("VM gateway not available, cannot establish HTTP connection")
+		m.mu.Lock()
+		m.state.Status = EdgeStatusVMGatewayError
+		m.state.LastUpdated = time.Now()
+		m.persistStateToStorage(ctx, m.state)
+		m.mu.Unlock()
+		return
+	}
+
+	m.logger.Info("Initiating HTTP connection to VM (dev mode, WireGuard disabled)")
+
+	// Get edge ID
+	edgeID := m.edgeID
+	if edgeID == "" && m.config != nil {
+		edgeID = m.config.VMGateway.EdgeID
+	}
+	if edgeID == "" {
+		edgeID = "edge-dev-001" // Fallback default
+	}
+
+	// Try to authenticate with VM using the VM gateway interface
+	// This will fail if VM is not running or unreachable
+	m.logger.Info("Testing HTTP connection to VM by attempting authentication")
+	testCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	err := m.vmGateway.Authenticate(testCtx, edgeID)
+	if err != nil {
+		m.logger.Error("HTTP connection test failed - VM is not reachable or not running",
+			zap.Error(err))
+		m.mu.Lock()
+		if m.state.Status == EdgeStatusHTTPConnecting {
+			m.state.Status = EdgeStatusHTTPConnectionError
+			m.state.LastUpdated = time.Now()
+			m.persistStateToStorage(ctx, m.state)
+		}
+		m.mu.Unlock()
+		return
+	}
+
+	// Connection successful
+	m.logger.Info("HTTP connection established and authenticated (dev mode)")
+	m.mu.Lock()
+	if m.state.Status == EdgeStatusHTTPConnecting {
+		m.state.Status = EdgeStatusHTTPSConn
+		m.state.NetworkConnected = true
+		m.state.VMAuthenticated = true
+		m.state.LastUpdated = time.Now()
+	}
+	newState := m.state
+	m.mu.Unlock()
+
+	// Persist state update
+	m.persistStateToStorage(ctx, newState)
+
+	m.logger.Info("Edge state updated",
+		zap.String("status", string(newState.Status)),
+		zap.Bool("network_connected", newState.NetworkConnected),
+		zap.Bool("vm_authenticated", newState.VMAuthenticated))
 }
 
 // handleErrorState handles error state
@@ -768,13 +1004,184 @@ func (m *StateManagerImpl) GetState() EdgeState {
 	return m.state
 }
 
-// SyncCameraCapabilities syncs capabilities for a single camera to the VM
-func (m *StateManagerImpl) SyncCameraCapabilities(ctx context.Context, cameraID string) error {
-	if m.httpsClient == nil {
-		return fmt.Errorf("HTTPS client not available")
+// checkServicesHealth checks the health of all services and updates status if any are unhealthy
+func (m *StateManagerImpl) checkServicesHealth(ctx context.Context) {
+	m.mu.Lock()
+
+	// Only check health if status is initializing
+	if m.state.Status != EdgeStatusInitializing {
+		m.mu.Unlock()
+		return
 	}
 
-	if !m.httpsClient.IsConnected() {
+	// Check meta-storage health (required service)
+	if m.metaStorage == nil {
+		m.logger.Error("Meta-storage is not available")
+		m.state.Status = EdgeStatusMetaStorageError
+		m.state.LastUpdated = time.Now()
+		m.persistStateToStorage(ctx, m.state)
+		return
+	}
+	_, err := m.metaStorage.GetStorageStats(ctx)
+	if err != nil {
+		m.logger.Error("Meta-storage health check failed", zap.Error(err))
+		m.state.Status = EdgeStatusMetaStorageError
+		m.state.LastUpdated = time.Now()
+		m.persistStateToStorage(ctx, m.state)
+		return
+	}
+	m.logger.Debug("Meta-storage health check passed")
+
+	// Check object-storage health (optional service - only check if available)
+	if m.objectStorage != nil {
+		// Object-storage doesn't have a direct health check method
+		// If it's initialized, we assume it's healthy (Start() would have failed if there was an issue)
+		m.logger.Debug("Object-storage is available")
+	} else {
+		m.logger.Debug("Object-storage is not available (optional service)")
+	}
+
+	// Check CCTV service health (required service)
+	if m.cctvService == nil {
+		m.logger.Error("CCTV service is not available")
+		m.state.Status = EdgeStatusCCTVServiceError
+		m.state.LastUpdated = time.Now()
+		m.persistStateToStorage(ctx, m.state)
+		return
+	}
+	m.logger.Debug("CCTV service is available")
+
+	// Check AI gateway health (required service)
+	if m.aiGateway == nil {
+		m.logger.Error("AI gateway is not available")
+		m.state.Status = EdgeStatusAIGatewayError
+		m.state.LastUpdated = time.Now()
+		m.persistStateToStorage(ctx, m.state)
+		return
+	}
+	m.logger.Debug("AI gateway is available")
+
+	// Check VM gateway health (optional service - only check if available)
+	if m.vmGateway != nil {
+		// VM gateway is available, check if it's properly initialized
+		// We can check WireGuard connection status, but in dev mode it might not be connected
+		m.logger.Debug("VM gateway is available")
+	} else {
+		m.logger.Debug("VM gateway is not available (optional in dev mode)")
+	}
+
+	// Check web gateway health (required service)
+	if m.webGateway == nil {
+		m.logger.Error("Web gateway is not available")
+		m.state.Status = EdgeStatusWebGatewayError
+		m.state.LastUpdated = time.Now()
+		m.persistStateToStorage(ctx, m.state)
+		return
+	}
+	m.logger.Debug("Web gateway is available")
+
+	// All required services are healthy, now initiate connection
+	m.logger.Info("All services health checks passed, initiating connection")
+
+	// Unlock mutex before calling initiateConnection (it will lock its own mutex)
+	m.mu.Unlock()
+
+	// Initiate connection based on WireGuard configuration
+	m.initiateConnection(ctx)
+}
+
+// initiateConnection initiates WireGuard or HTTP connection based on configuration
+func (m *StateManagerImpl) initiateConnection(ctx context.Context) {
+	m.logger.Info("initiateConnection called")
+	m.mu.Lock()
+
+	// Only proceed if status is still initializing
+	currentStatus := m.state.Status
+	m.logger.Info("Current status check", zap.String("status", string(currentStatus)))
+	if currentStatus != EdgeStatusInitializing {
+		m.logger.Debug("Status is not initializing, skipping connection initiation", zap.String("status", string(currentStatus)))
+		m.mu.Unlock()
+		return
+	}
+
+	// Check if VM gateway is available
+	if m.vmGateway == nil {
+		m.logger.Warn("VM gateway is not available, cannot establish connection")
+		m.state.Status = EdgeStatusVMGatewayError
+		m.state.LastUpdated = time.Now()
+		m.persistStateToStorage(ctx, m.state)
+		m.mu.Unlock()
+		return
+	}
+	m.logger.Info("VM gateway is available")
+
+	// Check WireGuard enabled status from config
+	wireGuardEnabled := false
+	if m.config != nil {
+		wireGuardEnabled = m.config.VMGateway.WireGuard.Enabled
+		m.logger.Info("Checking connection configuration",
+			zap.Bool("wireguard_enabled", wireGuardEnabled),
+			zap.String("environment", m.config.Environment))
+	} else {
+		m.logger.Warn("Config is nil, cannot determine WireGuard status")
+	}
+
+	if wireGuardEnabled {
+		// WireGuard is enabled - initiate WireGuard connection
+		m.logger.Info("WireGuard is enabled, initiating WireGuard connection")
+		m.state.Status = EdgeStatusWGConnecting
+		m.state.LastUpdated = time.Now()
+		m.persistStateToStorage(ctx, m.state)
+		m.mu.Unlock()
+
+		// Start WireGuard connection in a goroutine
+		m.wg.Add(1)
+		go func() {
+			defer m.wg.Done()
+			m.initiateWireGuardConnection(ctx)
+		}()
+	} else {
+		// WireGuard is disabled (dev mode) - connect via HTTP directly
+		m.logger.Info("WireGuard is disabled, connecting via HTTP (localhost/dev mode)")
+		m.state.Status = EdgeStatusHTTPConnecting
+		m.state.LastUpdated = time.Now()
+		m.persistStateToStorage(ctx, m.state)
+		m.mu.Unlock()
+
+		// Call HTTP connection synchronously so we can update status based on result
+		m.initiateHTTPConnection(ctx)
+	}
+}
+
+// persistStateToStorage persists the edge state to meta-storage
+func (m *StateManagerImpl) persistStateToStorage(ctx context.Context, state EdgeState) {
+	if m.metaStorage == nil {
+		return
+	}
+
+	// Convert EdgeState to map for storage
+	stateMap := map[string]interface{}{
+		"status":               string(state.Status),
+		"network_connected":    state.NetworkConnected,
+		"vm_authenticated":     state.VMAuthenticated,
+		"cameras_enabled":      state.CamerasEnabled,
+		"ai_processing_active": state.AIProcessingActive,
+		"storage_health":       state.StorageHealth,
+		"last_updated":         state.LastUpdated.Format(time.RFC3339),
+	}
+
+	if err := m.metaStorage.SaveEdgeState(ctx, stateMap); err != nil {
+		m.logger.Warn("failed to persist edge state to storage", zap.Error(err))
+	}
+}
+
+// SyncCameraCapabilities syncs capabilities for a single camera to the VM
+func (m *StateManagerImpl) SyncCameraCapabilities(ctx context.Context, cameraID string) error {
+	if m.vmGateway == nil {
+		return fmt.Errorf("VM gateway not available")
+	}
+
+	if m.vmGateway == nil || !m.vmGateway.IsHTTPConnected() {
 		return fmt.Errorf("HTTPS not connected")
 	}
 
@@ -804,7 +1211,7 @@ func (m *StateManagerImpl) SyncCameraCapabilities(ctx context.Context, cameraID 
 	callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	resp, err := m.httpsClient.SyncCapabilities(callCtx, req)
+	resp, err := m.vmGateway.SyncCapabilities(callCtx, req)
 	if err != nil {
 		return fmt.Errorf("capability sync failed: %w", err)
 	}
@@ -851,7 +1258,7 @@ func (m *StateManagerImpl) capabilitySyncLoop(ctx context.Context) {
 // syncOnce performs a single capability sync for all cameras
 func (m *StateManagerImpl) syncOnce(ctx context.Context) {
 	// Check HTTPS connection first
-	if m.httpsClient == nil || !m.httpsClient.IsConnected() {
+	if m.vmGateway == nil || !m.vmGateway.IsHTTPConnected() {
 		m.logger.Debug("Skipping capability sync - HTTPS not connected (will retry when connection is ready)")
 		m.pendingSync = true // Mark as pending so we retry when connection is ready
 		return
@@ -899,7 +1306,13 @@ func (m *StateManagerImpl) syncOnce(ctx context.Context) {
 	callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	resp, err := m.httpsClient.SyncCapabilities(callCtx, req)
+	if m.vmGateway == nil {
+		m.logger.Debug("Skipping capability sync - VM gateway not available")
+		m.pendingSync = true
+		return
+	}
+
+	resp, err := m.vmGateway.SyncCapabilities(callCtx, req)
 	if err != nil {
 		// Check if it's an authentication error - if so, mark as pending and retry later
 		if isAuthError(err) {
@@ -1494,11 +1907,11 @@ func hasProtocol(url string) bool {
 
 // ReportStatus reports deployment status to the VM
 func (m *StateManagerImpl) ReportStatus(ctx context.Context, deploymentID string, status string, errorMessage *string, modelPath *string) error {
-	if m.httpsClient == nil {
-		return fmt.Errorf("HTTPS client not available")
+	if m.vmGateway == nil {
+		return fmt.Errorf("VM gateway not available")
 	}
 
-	if !m.httpsClient.IsConnected() {
+	if !m.vmGateway.IsHTTPConnected() {
 		// Queue for retry when connection is available
 		m.logger.Debug("HTTPS not connected, deployment status will be retried when connection is available",
 			zap.String("deployment_id", deploymentID),
@@ -1508,7 +1921,10 @@ func (m *StateManagerImpl) ReportStatus(ctx context.Context, deploymentID string
 		return fmt.Errorf("HTTPS not connected")
 	}
 
-	err := m.httpsClient.ReportDeploymentStatus(ctx, deploymentID, status, errorMessage, modelPath)
+	if m.vmGateway == nil {
+		return fmt.Errorf("VM gateway not available")
+	}
+	err := m.vmGateway.ReportDeploymentStatus(ctx, deploymentID, status, errorMessage, modelPath)
 	if err != nil {
 		m.logger.Warn("Failed to report deployment status",
 			zap.String("deployment_id", deploymentID),

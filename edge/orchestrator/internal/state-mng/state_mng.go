@@ -59,8 +59,6 @@ type StateManager interface {
 	// SetWebGateway sets the web gateway service dependency
 	SetWebGateway(webGateway interface{})
 
-	// SetHTTPSClient sets the HTTPS client for VM communication
-	SetHTTPSClient(httpsClient interface{})
 
 	// SetConfig sets the configuration
 	SetConfig(cfg *config.Config)
@@ -122,10 +120,8 @@ type StateManager interface {
 // NewStateManager creates a new StateManager instance.
 // This factory function should typically not be called directly;
 // use StateManagerProvider instead for proper dependency injection.
-// The logger parameter can be nil, in which case the implementation will create its own logger.
-func NewStateManager(eventBus eventbus.EventBus) (StateManager, error) {
-	// Pass nil for logger - implementation will create its own if nil
-	return impl.NewStateManagerImpl(eventBus, nil)
+func NewStateManager(eventBus eventbus.EventBus, logger *zap.Logger) (StateManager, error) {
+	return impl.NewStateManagerImpl(eventBus, logger)
 }
 
 // StateManagerProvider creates the StateManager with fx lifecycle management and wires all service dependencies.
@@ -142,7 +138,7 @@ func StateManagerProvider(
 	vmGateway vmgateway.VMGateway,
 	webGateway webgateway.WebGateway,
 ) (StateManager, error) {
-	manager, err := NewStateManager(eventBus)
+	manager, err := NewStateManager(eventBus, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -162,10 +158,6 @@ func StateManagerProvider(
 	}
 	if vmGateway != nil {
 		manager.SetVMGateway(vmGateway)
-		// Also wire HTTPS client from VM gateway when available
-		if httpsClientSvc := vmGateway.GetHTTPSClientService(); httpsClientSvc != nil {
-			manager.SetHTTPSClient(httpsClientSvc)
-		}
 	}
 	if webGateway != nil {
 		manager.SetWebGateway(webGateway)

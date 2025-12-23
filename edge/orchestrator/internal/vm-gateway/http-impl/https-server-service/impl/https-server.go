@@ -166,12 +166,6 @@ func (s *HTTPServer) Name() string {
 
 // Start starts the HTTPS server
 func (s *HTTPServer) Start(ctx context.Context) error {
-	// Check if WireGuard is enabled (for production) or if we're in localhost dev mode
-	if s.wgCfg != nil && !s.wgCfg.Enabled && s.serverCfg.ListenAddress == "" {
-		s.logger.Info("HTTPS server disabled (WireGuard disabled and no listen address configured)")
-		return nil
-	}
-
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -183,6 +177,21 @@ func (s *HTTPServer) Start(ctx context.Context) error {
 			listenAddr = "10.0.0.2:8443"
 		} else {
 			listenAddr = "localhost:8443" // Development mode
+		}
+	}
+
+	// For development mode (WireGuard disabled), allow localhost addresses
+	if s.wgCfg != nil && !s.wgCfg.Enabled {
+		// Allow localhost, 127.0.0.1, or 0.0.0.0 for dev mode
+		host, _, err := net.SplitHostPort(listenAddr)
+		if err != nil {
+			return fmt.Errorf("invalid listen address: %w", err)
+		}
+		isLocalhost := host == "localhost" || host == "127.0.0.1" || host == "0.0.0.0" || host == ""
+		if !isLocalhost {
+			s.logger.Info("HTTPS server disabled in dev mode - must use localhost address when WireGuard is disabled",
+				zap.String("listen_address", listenAddr))
+			return nil
 		}
 	}
 
@@ -235,20 +244,31 @@ func (s *HTTPServer) Start(ctx context.Context) error {
 	serverKeyPath := s.serverCfg.ServerKeyPath
 	caCertPath := s.serverCfg.CACertPath
 
-	// Defaults for production
-	if serverCertPath == "" {
-		serverCertPath = "/etc/ssl/certs/edge-server.crt"
+	// Check if we're in localhost dev mode (WireGuard disabled)
+	isLocalhostMode := s.wgCfg != nil && !s.wgCfg.Enabled
+	if isLocalhostMode && listenAddr != "" {
+		host, _, err := net.SplitHostPort(listenAddr)
+		if err == nil {
+			isLocalhostMode = host == "localhost" || host == "127.0.0.1" || host == "0.0.0.0"
+		}
 	}
-	if serverKeyPath == "" {
-		serverKeyPath = "/etc/ssl/private/edge-server.key"
-	}
-	if caCertPath == "" {
-		caCertPath = "/etc/ssl/certs/ca.crt"
+
+	// Only set defaults if not in localhost mode (production with WireGuard)
+	if !isLocalhostMode {
+		if serverCertPath == "" {
+			serverCertPath = "/etc/ssl/certs/edge-server.crt"
+		}
+		if serverKeyPath == "" {
+			serverKeyPath = "/etc/ssl/private/edge-server.key"
+		}
+		if caCertPath == "" {
+			caCertPath = "/etc/ssl/certs/ca.crt"
+		}
 	}
 
 	var tlsConfig *tls.Config
 
-	// Only load TLS if cert paths are provided (allows localhost dev without certs)
+	// Load TLS if cert paths are provided (works for both production and localhost dev)
 	if serverCertPath != "" && serverKeyPath != "" && caCertPath != "" {
 		cert, err := tls.LoadX509KeyPair(serverCertPath, serverKeyPath)
 		if err != nil {
@@ -805,16 +825,54 @@ func (s *HTTPServer) handleRestartService(w http.ResponseWriter, r *http.Request
 	})
 }
 
-// handleSyncCapabilities handles capability sync requests
+// handleSyncCapabilities handles capability sync requests from VM
+// VM sends Edge capabilities (e.g., CCTV camera capability) which Edge stores and processes
 func (s *HTTPServer) handleSyncCapabilities(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	// TODO: Implement capability sync
+	var req struct {
+		Capabilities map[string]interface{} `json:"capabilities"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.sendErrorResponse(w, http.StatusBadRequest, fmt.Sprintf("invalid request: %v", err))
+		return
+	}
+
+	if req.Capabilities == nil {
+		s.sendErrorResponse(w, http.StatusBadRequest, "capabilities field is required")
+		return
+	}
+
+	// Store capabilities in meta-storage
+	if s.metaStorage != nil {
+		ctx := r.Context()
+		if err := s.metaStorage.SaveEdgeCapabilities(ctx, req.Capabilities); err != nil {
+			s.logger.Error("Failed to save edge capabilities", zap.Error(err))
+			s.sendErrorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to save capabilities: %v", err))
+			return
+		}
+		s.logger.Info("Edge capabilities saved", zap.Any("capabilities", req.Capabilities))
+	}
+
+	// Send event to state manager to process capabilities
+	if s.eventBus != nil {
+		s.eventBus.Publish(evtbusstypes.Event{
+			Type:      "edge.capabilities_received",
+			Source:    "https-server",
+			Timestamp: time.Now(),
+			Data: map[string]interface{}{
+				"capabilities": req.Capabilities,
+			},
+		})
+		s.logger.Info("Published capabilities_received event to state manager")
+	}
+
 	s.sendSuccessResponse(w, map[string]interface{}{
-		"message": "Capability sync not yet implemented",
+		"message": "Capabilities received and stored successfully",
 	})
 }
 

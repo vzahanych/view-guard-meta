@@ -3,6 +3,11 @@ package webgateway
 import (
 	"context"
 
+	eventbus "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/event-bus"
+	cctv "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/iot/cctv"
+	metastorage "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/meta-storage"
+	objectstorage "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/object-storage"
+	vmgateway "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/vm-gateway"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/web-gateway/impl"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/web-gateway/types"
 	"go.uber.org/fx"
@@ -34,17 +39,30 @@ type WebGateway interface {
 // NewWebGateway creates a new WebGateway instance.
 // This factory function should typically not be called directly;
 // use WebGatewayProvider instead for proper dependency injection.
-func NewWebGateway(cfg *types.WebGatewayConfig, logger *zap.Logger) (WebGateway, error) {
-	return impl.NewWebGateway(cfg, logger)
+func NewWebGateway(
+	cfg *types.WebGatewayConfig,
+	metaStore metastorage.MetaDataStore,
+	objectStore objectstorage.ObjectStorageService,
+	cctvService cctv.CCTVService,
+	vmGateway vmgateway.VMGateway,
+	eventBus eventbus.EventBus,
+	logger *zap.Logger,
+) (WebGateway, error) {
+	return impl.NewWebGateway(cfg, metaStore, objectStore, cctvService, vmGateway, eventBus, logger)
 }
 
 // WebGatewayProvider creates the WebGateway with fx lifecycle management.
 func WebGatewayProvider(
 	lc fx.Lifecycle,
 	cfg *types.WebGatewayConfig,
+	metaStore metastorage.MetaDataStore,
+	objectStore objectstorage.ObjectStorageService,
+	cctvService cctv.CCTVService,
+	vmGateway vmgateway.VMGateway,
+	eventBus eventbus.EventBus,
 	logger *zap.Logger,
 ) (WebGateway, error) {
-	gateway, err := NewWebGateway(cfg, logger)
+	gateway, err := NewWebGateway(cfg, metaStore, objectStore, cctvService, vmGateway, eventBus, logger)
 	if err != nil {
 		return nil, err
 	}

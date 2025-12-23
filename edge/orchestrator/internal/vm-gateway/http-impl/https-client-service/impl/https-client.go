@@ -32,14 +32,16 @@ type TelemetryClient interface {
 // Replaces gRPC client for Edge → VM communication
 // HTTPSClient implements TelemetryClient interface directly
 type HTTPSClient struct {
-	clientCfg  *httpsclienttypes.HTTPSClientConfig
-	wgCfg      *wgclienttypes.WGClientConfig
-	wgClient   wgclient.WGClientService
-	logger     *zap.Logger
-	httpClient *http.Client
-	mu         sync.RWMutex
-	vmEndpoint string // VM HTTPS endpoint
-	edgeID     string // Edge ID for authentication
+	clientCfg     *httpsclienttypes.HTTPSClientConfig
+	wgCfg         *wgclienttypes.WGClientConfig
+	wgClient      wgclient.WGClientService
+	logger        *zap.Logger
+	httpClient    *http.Client
+	mu            sync.RWMutex
+	vmEndpoint    string // VM HTTPS endpoint
+	edgeID        string // Edge ID for authentication
+	authenticated bool   // Track if authentication with VM has succeeded
+	lastAuthError error  // Track last authentication error
 }
 
 // NewHTTPSClient creates a new HTTPS client for Edge → VM calls
@@ -58,14 +60,25 @@ func NewHTTPSClient(clientCfg *httpsclienttypes.HTTPSClientConfig, wgCfg *wgclie
 	if timeout == 0 {
 		timeout = 30 * time.Second
 	}
-	if clientCertPath == "" {
-		clientCertPath = "/etc/ssl/certs/edge-client.crt"
+
+	// Detect localhost mode (WireGuard disabled and localhost endpoint)
+	isLocalhostMode := wgCfg != nil && !wgCfg.Enabled && vmEndpoint != ""
+	host, _, err := net.SplitHostPort(vmEndpoint)
+	if err == nil {
+		isLocalhostMode = isLocalhostMode && (host == "localhost" || host == "127.0.0.1")
 	}
-	if clientKeyPath == "" {
-		clientKeyPath = "/etc/ssl/private/edge-client.key"
-	}
-	if caCertPath == "" {
-		caCertPath = "/etc/ssl/certs/ca.crt"
+
+	// Only set default cert paths if not in localhost mode (for production with WireGuard)
+	if !isLocalhostMode {
+		if clientCertPath == "" {
+			clientCertPath = "/etc/ssl/certs/edge-client.crt"
+		}
+		if clientKeyPath == "" {
+			clientKeyPath = "/etc/ssl/private/edge-client.key"
+		}
+		if caCertPath == "" {
+			caCertPath = "/etc/ssl/certs/ca.crt"
+		}
 	}
 
 	// When connecting via IP address through WireGuard tunnel,
@@ -84,6 +97,10 @@ func NewHTTPSClient(clientCfg *httpsclienttypes.HTTPSClientConfig, wgCfg *wgclie
 
 	// Only load TLS if cert paths are provided (allows localhost dev without certs)
 	if clientCertPath != "" && clientKeyPath != "" && caCertPath != "" {
+		log.Info("Loading TLS credentials for HTTPS client (mTLS enabled)",
+			zap.String("client_cert", clientCertPath),
+			zap.String("client_key", clientKeyPath),
+			zap.String("ca_cert", caCertPath))
 		cert, err := tls.LoadX509KeyPair(clientCertPath, clientKeyPath)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load client certificate: %w", err)
@@ -100,7 +117,7 @@ func NewHTTPSClient(clientCfg *httpsclienttypes.HTTPSClientConfig, wgCfg *wgclie
 			return nil, fmt.Errorf("failed to parse CA certificate")
 		}
 
-		// Configure TLS
+		// Configure TLS with proper certificate verification
 		tlsConfig = &tls.Config{
 			Certificates: []tls.Certificate{cert},
 			RootCAs:      caCertPool,
@@ -193,9 +210,17 @@ func (c *HTTPSClient) Start(ctx context.Context) error {
 
 		// Send authentication request using stored edge ID
 		if err := c.Authenticate(ctx, c.edgeID); err != nil {
+			c.mu.Lock()
+			c.authenticated = false
+			c.lastAuthError = err
+			c.mu.Unlock()
 			c.logger.Error("Failed to authenticate with VM", zap.Error(err))
 			// Don't fail startup - will retry on next heartbeat or can be retried
 		} else {
+			c.mu.Lock()
+			c.authenticated = true
+			c.lastAuthError = nil
+			c.mu.Unlock()
 			c.logger.Info("Successfully authenticated with VM", zap.String("edge_id", c.edgeID))
 		}
 	}()
@@ -213,13 +238,18 @@ func (c *HTTPSClient) Stop(ctx context.Context) error {
 	return nil
 }
 
-// IsConnected returns true if WireGuard is connected (HTTPS client is always ready when WireGuard is up)
-// For localhost mode, always return true
+// IsConnected returns true if the connection to VM is established and authenticated
+// In localhost mode, it checks if authentication has succeeded
+// In production mode, it checks if WireGuard is connected
 func (c *HTTPSClient) IsConnected() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
 	if c.wgCfg != nil && !c.wgCfg.Enabled {
-		// Localhost mode - always connected
-		return true
+		// Localhost mode - check if authentication has succeeded
+		return c.authenticated
 	}
+	// Production mode - check if WireGuard is connected
 	return c.wgClient != nil && c.wgClient.IsConnected()
 }
 
@@ -365,7 +395,12 @@ func (c *HTTPSClient) Authenticate(ctx context.Context, edgeID string) error {
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("authentication failed with status %d: %s", resp.StatusCode, string(body))
+		err := fmt.Errorf("authentication failed with status %d: %s", resp.StatusCode, string(body))
+		c.mu.Lock()
+		c.authenticated = false
+		c.lastAuthError = err
+		c.mu.Unlock()
+		return err
 	}
 
 	var result struct {
@@ -379,9 +414,19 @@ func (c *HTTPSClient) Authenticate(ctx context.Context, edgeID string) error {
 	}
 
 	if !result.Success {
-		return fmt.Errorf("authentication not successful: %s", result.Message)
+		err := fmt.Errorf("authentication not successful: %s", result.Message)
+		c.mu.Lock()
+		c.authenticated = false
+		c.lastAuthError = err
+		c.mu.Unlock()
+		return err
 	}
 
+	c.mu.Lock()
+	c.authenticated = true
+	c.lastAuthError = nil
+	c.mu.Unlock()
+	c.logger.Info("Edge authenticated with VM", zap.String("edge_id", result.EdgeID))
 	return nil
 }
 

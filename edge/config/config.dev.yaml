@@ -1,51 +1,96 @@
 edge:
-  orchestrator:
-    log_level: debug
-    log_format: text
-    data_dir: ./data
-    config_file: ./config/config.dev.yaml
+  # Top-level orchestrator settings
+  environment: dev
+  log_level: debug
+  log_format: text
+  config_file: ./config/config.dev.yaml
 
-  wireguard:
-    enabled: false
-    config_path: ""
-    kvm_endpoint: "localhost:51820"
+  # Event bus configuration
+  event_bus:
+    provider: inmemory
+    buffer_size: 100
 
-  cameras:
+  # AI Gateway configuration
+  ai:
+    aiserviceurl: "http://localhost:8080"
+    inferenceinterval: 1s
+    confidencethreshold: 0.5
+    enabledclasses: []
+    requesttimeout: 30s
+    maxretries: 3
+    retrydelay: 1s
+
+  # CCTV service configuration (cameras)
+  cctv:
     discovery:
       enabled: true
       interval: 60s
+      usb_device_path: /dev
     rtsp:
       timeout: 30s
       reconnect_interval: 5s
 
-  storage:
-    clips_dir: ./data/clips
-    snapshots_dir: ./data/snapshots
-    retention_days: 1
-    max_disk_usage_percent: 90
+  # Metadata storage configuration (for screenshots, clips metadata, etc.)
+  meta_storage:
+    provider: bbolt
+    endpoint: ""
+    access_key: ""
+    secret_key: ""
+    region: ""
+    data_dir: ./data/db
 
-  ai:
-    service_url: "http://localhost:8080"  # HTTP address with protobuf JSON
-    inference_interval: 1s
-    confidence_threshold: 0.5
-    local_inference_enabled: true
-    baseline_label: "normal"
-    anomaly_threshold: 12
-    clip_duration: 10s
-    pre_event_duration: 2s
-    dataset_export_dir: ./data/exports
+  # Object storage configuration (for clips, snapshots files)
+  object_storage:
+    provider: minio
+    endpoint: "localhost:9010"
+    access_key: "minioadmin"
+    secret_key: "minioadmin"
+    region: "us-east-1"
 
-  events:
-    queue_size: 100
-    batch_size: 5
-    transmission_interval: 2s
+  # VM Gateway configuration (for communication with VM)
+  vm_gateway:
+    provider: http
+    edge_id: edge-dev-001
+    wireguard:
+      enabled: false
+      config_path: ""
+      kvm_endpoint: "localhost:51820"
+      interface_name: wg0
+      health_check_interval: 10s
+      connection_timeout: 30s
+      ping_timeout: 2s
+      reconnect_timeout: 5s
+      max_reconnect_attempts: 10
+    https_server_config:
+      listen_address: "localhost:8443"
+      server_cert_path: "/home/vova/My-Projects/view-guard-meta/infra/dev/ssl/edge-server.crt"
+      server_key_path: "/home/vova/My-Projects/view-guard-meta/infra/dev/ssl/edge-server.key"
+      ca_cert_path: "/home/vova/My-Projects/view-guard-meta/infra/dev/ssl/ca.crt"
+      read_timeout: 30s
+      write_timeout: 30s
+      idle_timeout: 120s
+      wireguard_interface_wait_timeout: 60s
+      wireguard_interface_check_interval: 2s
+      multipart_form_max_memory: 10485760  # 10MB
+    https_client_config:
+      vm_endpoint: "localhost:8444"
+      client_cert_path: "/home/vova/My-Projects/view-guard-meta/infra/dev/ssl/edge-client.crt"
+      client_key_path: "/home/vova/My-Projects/view-guard-meta/infra/dev/ssl/edge-client.key"
+      ca_cert_path: "/home/vova/My-Projects/view-guard-meta/infra/dev/ssl/ca.crt"
+      timeout: 30s
 
-  telemetry:
+  # Web Gateway configuration (local admin UI)
+  web_gateway:
     enabled: true
-    service_name: "edge-orchestrator"
-    environment: "dev"
-    otlp_endpoint: "http://localhost:4318"  # OTLP HTTP endpoint (for local dev, use VM WireGuard IP in production)
-    insecure: true  # Use insecure connection for local dev
-    timeout: 10s
-    interval: 30s  # Deprecated: kept for backward compatibility
+    host: "localhost"
+    port: 3000
 
+  # Telemetry configuration (OpenTelemetry)
+  telemetry:
+    servicename: "edge-orchestrator"
+    environment: "dev"
+    mode: "edge"
+    otlpendpoint: "http://localhost:4318"
+    insecure: true
+    timeout: 10s
+    resourceattributes: {}

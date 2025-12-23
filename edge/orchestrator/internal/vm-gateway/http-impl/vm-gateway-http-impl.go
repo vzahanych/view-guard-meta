@@ -23,6 +23,7 @@ type VmGatewayHttpImpl struct {
 	wgClientService    wgclient.WGClientService
 	httpsServerService httpsserver.HTTPSServerService
 	httpsClientService httpsclient.HTTPSClientService // Use interface instead of concrete type
+	wgCfg              *wgclienttypes.WGClientConfig
 	logger             *zap.Logger
 	mu                 sync.RWMutex
 	started            bool
@@ -75,6 +76,7 @@ func NewVmGatewayHttpImpl(
 		wgClientService:    wgClientSvc,
 		httpsServerService: httpsServerSvc,
 		httpsClientService: httpsClientSvc,
+		wgCfg:              &cfg.WireGuard,
 		logger:             logger,
 	}, nil
 }
@@ -97,31 +99,36 @@ func (g *VmGatewayHttpImpl) Start(ctx context.Context) error {
 		g.logger.Info("Starting VM Gateway (all services)")
 	}
 
-	// Step 1: Start WireGuard client first (required for HTTPS services)
-	if g.logger != nil {
-		g.logger.Info("Starting WireGuard client service...")
-	}
-	if g.wgClientService != nil {
+	// Step 1: Start WireGuard client first (required for HTTPS services in production)
+	// Skip WireGuard if disabled (for localhost dev mode)
+	if g.wgClientService != nil && g.wgCfg != nil && g.wgCfg.Enabled {
+		if g.logger != nil {
+			g.logger.Info("Starting WireGuard client service...")
+		}
 		if err := g.wgClientService.Start(ctx); err != nil {
 			return fmt.Errorf("failed to start WireGuard client service: %w", err)
 		}
+	} else if g.wgCfg != nil && !g.wgCfg.Enabled {
+		if g.logger != nil {
+			g.logger.Info("WireGuard disabled - skipping WireGuard client startup (localhost dev mode)")
+		}
 	}
 
-	// Step 2: Start HTTPS server (depends on WireGuard)
+	// Step 2: Start HTTPS server (depends on WireGuard in production, localhost for dev)
 	if g.logger != nil {
 		g.logger.Info("Starting HTTPS server service...")
 	}
 	if g.httpsServerService != nil {
 		if err := g.httpsServerService.Start(ctx); err != nil {
-			// Try to stop WireGuard if HTTPS server fails
-			if g.wgClientService != nil {
+			// Try to stop WireGuard if HTTPS server fails (only if it was started)
+			if g.wgClientService != nil && g.wgCfg != nil && g.wgCfg.Enabled {
 				_ = g.wgClientService.Stop(ctx)
 			}
 			return fmt.Errorf("failed to start HTTPS server service: %w", err)
 		}
 	}
 
-	// Step 3: Start HTTPS client (depends on WireGuard)
+	// Step 3: Start HTTPS client (depends on WireGuard in production, localhost for dev)
 	if g.logger != nil {
 		g.logger.Info("Starting HTTPS client service...")
 	}
@@ -131,7 +138,7 @@ func (g *VmGatewayHttpImpl) Start(ctx context.Context) error {
 			if g.httpsServerService != nil {
 				_ = g.httpsServerService.Stop(ctx)
 			}
-			if g.wgClientService != nil {
+			if g.wgClientService != nil && g.wgCfg != nil && g.wgCfg.Enabled {
 				_ = g.wgClientService.Stop(ctx)
 			}
 			return fmt.Errorf("failed to start HTTPS client service: %w", err)
@@ -236,6 +243,16 @@ func (g *VmGatewayHttpImpl) IsConnected() bool {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 	return g.wgClientService != nil && g.wgClientService.IsConnected()
+}
+
+// IsHTTPConnected returns whether the HTTP/HTTPS client connection to VM is established and authenticated
+func (g *VmGatewayHttpImpl) IsHTTPConnected() bool {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	if g.httpsClientService == nil {
+		return false
+	}
+	return g.httpsClientService.IsConnected()
 }
 
 // GetWireGuardInterfaceName returns the WireGuard interface name

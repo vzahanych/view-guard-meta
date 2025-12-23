@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"go.uber.org/fx"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"gopkg.in/yaml.v3"
 
 	aigwtypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/ai-gateway/types"
@@ -16,6 +18,7 @@ import (
 	objectstoragetypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/object-storage/types"
 	telemetryotel "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/telemetry-otel"
 	vmgatewaytypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/vm-gateway/types"
+	webgatewaytypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/web-gateway/types"
 )
 
 // Config represents the application configuration
@@ -31,6 +34,7 @@ type Config struct {
 	VMGateway     vmgatewaytypes.VMGatewayConfig         `yaml:"vm_gateway"`
 	CCTV          cctvtypes.CCTVServiceConfig            `yaml:"cctv"`
 	Telemetry     telemetryotel.Config                   `yaml:"telemetry"`
+	WebGateway    webgatewaytypes.WebGatewayConfig       `yaml:"web_gateway"`
 }
 
 // Load loads configuration from a YAML file.
@@ -127,20 +131,67 @@ func ConfigProvider(defaultPath string) func(logger *zap.Logger) (*Config, error
 
 // ConfigProviderWithPath creates a ConfigProvider that uses a specific config path.
 // This is useful when the config path is known at compile time or from flags.
+// Logger is optional - if provided, it will be used for logging config loading.
 func ConfigProviderWithPath(configPath string) fx.Option {
-	return fx.Provide(func(logger *zap.Logger) (*Config, error) {
+	return fx.Provide(func() (*Config, error) {
 		cfg, err := Load(configPath)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load config: %w", err)
 		}
-
-		if logger != nil {
-			logger.Info("Configuration loaded",
-				zap.String("config_file", cfg.ConfigFile),
-				zap.String("environment", cfg.Environment),
-			)
-		}
-
 		return cfg, nil
 	})
+}
+
+// LoggerProvider creates a zap.Logger based on the configuration.
+// It uses the log_level and log_format fields from Config to configure the logger.
+func LoggerProvider(cfg *Config) (*zap.Logger, error) {
+	if cfg == nil {
+		// Fallback to development logger if config is nil
+		return zap.NewDevelopment()
+	}
+
+	// Parse log level
+	var level zapcore.Level
+	logLevel := strings.ToLower(cfg.LogLevel)
+	switch logLevel {
+	case "debug":
+		level = zapcore.DebugLevel
+	case "info":
+		level = zapcore.InfoLevel
+	case "warn":
+		level = zapcore.WarnLevel
+	case "error":
+		level = zapcore.ErrorLevel
+	case "fatal":
+		level = zapcore.FatalLevel
+	default:
+		level = zapcore.InfoLevel // Default to info
+	}
+
+	// Configure encoder based on log format
+	logFormat := strings.ToLower(cfg.LogFormat)
+	var encoderConfig zapcore.EncoderConfig
+	var encoder zapcore.Encoder
+
+	if logFormat == "json" {
+		encoderConfig = zap.NewProductionEncoderConfig()
+		encoder = zapcore.NewJSONEncoder(encoderConfig)
+	} else {
+		// Default to text/console format (development style)
+		encoderConfig = zap.NewDevelopmentEncoderConfig()
+		encoder = zapcore.NewConsoleEncoder(encoderConfig)
+	}
+
+	// Create core
+	core := zapcore.NewCore(encoder, zapcore.AddSync(os.Stderr), level)
+
+	// Create logger with additional fields
+	logger := zap.New(core, zap.AddCaller(), zap.AddStacktrace(zapcore.ErrorLevel))
+	
+	// Add default fields
+	logger = logger.With(
+		zap.String("environment", cfg.Environment),
+	)
+
+	return logger, nil
 }

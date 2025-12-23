@@ -16,6 +16,7 @@ import (
 	cctvtypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/iot/cctv/types"
 	metastorage "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/meta-storage"
 	objectstorage "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/object-storage"
+	vmgateway "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/vm-gateway"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/web-gateway/types"
 	"go.uber.org/zap"
 )
@@ -51,6 +52,7 @@ type WebGatewayImpl struct {
 	metaStorage   metastorage.MetaDataStore          // Meta-storage for cameras, security events, snapshot requests
 	objectStorage objectstorage.ObjectStorageService // Optional object-storage for model files and screenshots
 	cctvService   cctv.CCTVService                   // CCTV service for capturing camera screenshots
+	vmGateway     vmgateway.VMGateway                 // VM gateway for WireGuard and HTTP client status
 	version       string                             // Application version
 	startTime     time.Time                          // Server start time for uptime calculation
 }
@@ -71,7 +73,15 @@ type StorageCleanupResult = cctvtypes.StorageCleanupResult
 type DatasetExportResult = cctvtypes.DatasetExportResult
 
 // NewWebGateway creates a new web gateway implementation
-func NewWebGateway(cfg *types.WebGatewayConfig, log *zap.Logger) (*WebGatewayImpl, error) {
+func NewWebGateway(
+	cfg *types.WebGatewayConfig,
+	metaStore metastorage.MetaDataStore,
+	objectStore objectstorage.ObjectStorageService,
+	cctvService cctv.CCTVService,
+	vmGateway vmgateway.VMGateway,
+	eventBus eventbus.EventBus,
+	log *zap.Logger,
+) (*WebGatewayImpl, error) {
 	// Set Gin mode to release mode for production
 	// Debug mode can be enabled via GIN_MODE environment variable
 	gin.SetMode(gin.ReleaseMode)
@@ -86,11 +96,16 @@ func NewWebGateway(cfg *types.WebGatewayConfig, log *zap.Logger) (*WebGatewayImp
 	router.Use(corsMiddleware())
 
 	return &WebGatewayImpl{
-		config:    cfg,
-		logger:    log,
-		router:    router,
-		version:   "dev", // Default version, can be set via SetVersion
-		startTime: time.Now(),
+		config:        cfg,
+		logger:        log,
+		router:        router,
+		metaStorage:   metaStore,
+		objectStorage: objectStore,
+		cctvService:   cctvService,
+		vmGateway:     vmGateway,
+		eventBus:      eventBus,
+		version:       "dev", // Default version, can be set via SetVersion
+		startTime:     time.Now(),
 	}, nil
 }
 
@@ -172,6 +187,9 @@ func (g *WebGatewayImpl) setupRoutes() {
 
 		// System status
 		api.GET("/status", g.handleStatus)
+
+		// Edge application state
+		api.GET("/state", g.handleGetState)
 
 		// Camera endpoints (Step 1.9.5)
 		camerag := api.Group("/cameras")

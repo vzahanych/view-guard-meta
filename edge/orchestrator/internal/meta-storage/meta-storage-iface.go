@@ -16,6 +16,7 @@ type DeployedModelMetadata = types.DeployedModelMetadata
 type StorageStats = types.StorageStats
 type ModelFilters = types.ModelFilters
 type CameraMetadata = types.CameraMetadata
+type CameraFilters = types.CameraFilters
 type ScreenshotMetadata = types.ScreenshotMetadata
 type ClipMetadata = types.ClipMetadata
 
@@ -38,7 +39,7 @@ type MetaDataStore interface {
 	SaveCamera(ctx context.Context, camera CameraMetadata) error
 	UpdateCamera(ctx context.Context, cameraID string, updateFn func(CameraMetadata) CameraMetadata) (CameraMetadata, error)
 	GetCamera(ctx context.Context, cameraID string) (CameraMetadata, bool)
-	ListCameras(ctx context.Context, enabledOnly bool) ([]CameraMetadata, error)
+	ListCameras(ctx context.Context, filters *CameraFilters) ([]CameraMetadata, error)
 	DeleteCamera(ctx context.Context, cameraID string) error
 
 	// Screenshot metadata
@@ -65,6 +66,15 @@ type MetaDataStore interface {
 	GetPendingSnapshotRequest(ctx context.Context, cameraID string) (map[string]interface{}, bool)
 	ListPendingSnapshotRequests(ctx context.Context) ([]map[string]interface{}, error)
 	DeletePendingSnapshotRequest(ctx context.Context, cameraID string) error
+
+	// Edge state metadata (current state and history)
+	SaveEdgeState(ctx context.Context, state map[string]interface{}) error
+	GetCurrentEdgeState(ctx context.Context) (map[string]interface{}, bool)
+	GetEdgeStateHistory(ctx context.Context, limit int) ([]map[string]interface{}, error)
+
+	// Edge capabilities metadata (capabilities sent by VM)
+	SaveEdgeCapabilities(ctx context.Context, capabilities map[string]interface{}) error
+	GetEdgeCapabilities(ctx context.Context) (map[string]interface{}, bool)
 
 	// Close closes the metadata store and releases all resources (e.g., database connections).
 	// After Close, all methods should return errors.
