@@ -18,6 +18,9 @@ import (
 
 	"github.com/vzahanych/view-guard-meta/vm-edge-orch/config"
 	httpsserver "github.com/vzahanych/view-guard-meta/vm-edge-orch/internal/edge-gateway/https-server-service"
+	authhandlers "github.com/vzahanych/view-guard-meta/vm-edge-orch/internal/edge-gateway/https-server-service/handlers"
+	eventbus "github.com/vzahanych/view-guard-meta/vm-edge-orch/internal/event-bus"
+	metastorage "github.com/vzahanych/view-guard-meta/vm-edge-orch/internal/meta-storage"
 )
 
 // httpsServerService implements the HTTPSServerService interface
@@ -29,12 +32,17 @@ type httpsServerService struct {
 	ctx        context.Context
 	cancel     context.CancelFunc
 	tlsConfig  config.TLSConfig
+	appConfig  *config.Config // Store full config to check env
+	devMode    bool           // True if running in dev mode
+	metaStore  interface{}    // MetaDataStore for edge state (optional)
+	eventBus   interface{}    // EventBus for publishing events (optional)
 }
 
 // NewHTTPSServerService creates a new HTTPS server service implementation.
 // cfg is interface{} to avoid tight coupling to the config package.
+// metaStore and eventBus are optional dependencies for edge authentication.
 // For now, we use simple defaults: listen on 10.0.0.1:8443.
-func NewHTTPSServerService(cfg interface{}, log interface{}) (httpsserver.HTTPSServerService, error) {
+func NewHTTPSServerService(cfg interface{}, log interface{}, metaStore interface{}, eventBus interface{}) (httpsserver.HTTPSServerService, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Try to extract logger if it's a zap.Logger
@@ -46,10 +54,15 @@ func NewHTTPSServerService(cfg interface{}, log interface{}) (httpsserver.HTTPSS
 		logger, _ = zap.NewDevelopment()
 	}
 
-	// Extract TLS configuration from application config if available.
+	// Extract TLS configuration and app config if available.
 	var tlsCfg config.TLSConfig
-	if appCfg, ok := cfg.(*config.Config); ok && appCfg != nil {
-		tlsCfg = appCfg.TLS
+	var appCfg *config.Config
+	var devMode bool
+
+	if cfgObj, ok := cfg.(*config.Config); ok && cfgObj != nil {
+		appCfg = cfgObj
+		tlsCfg = cfgObj.TLS
+		devMode = cfgObj.Env == "dev"
 	}
 
 	server := &httpsServerService{
@@ -57,6 +70,10 @@ func NewHTTPSServerService(cfg interface{}, log interface{}) (httpsserver.HTTPSS
 		cancel:    cancel,
 		logger:    logger,
 		tlsConfig: tlsCfg,
+		appConfig: appCfg,
+		devMode:   devMode,
+		metaStore: metaStore,
+		eventBus:  eventBus,
 	}
 
 	return server, nil
@@ -72,28 +89,77 @@ func (s *httpsServerService) Start(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Listen on WireGuard interface IP only (Edge will connect to VM's WireGuard IP)
-	// Port 8443 for HTTPS (replaces gRPC port 50051)
-	// Binding to 10.0.0.1 ensures server is only accessible through WireGuard tunnel
-	listenAddr := "10.0.0.1:8443"
+	// In dev mode, bind to localhost for easy testing with curl
+	// In prod, bind only to WireGuard interface for security
+	var listenAddr string
+	if s.devMode {
+		listenAddr = "127.0.0.1:8443"
+		if s.logger != nil {
+			s.logger.Info("Starting HTTP server in dev mode (localhost, no TLS)",
+				zap.String("address", listenAddr),
+				zap.Bool("tls_enabled", false))
+		}
+	} else {
+		// Listen on WireGuard interface IP only (Edge will connect to VM's WireGuard IP)
+		// Port 8443 for HTTPS (replaces gRPC port 50051)
+		// Binding to 10.0.0.1 ensures server is only accessible through WireGuard tunnel
+		listenAddr = "10.0.0.1:8443"
+		if s.logger != nil {
+			s.logger.Info("Starting HTTPS server", zap.String("address", listenAddr))
+		}
 
-	if s.logger != nil {
-		s.logger.Info("Starting HTTPS server", zap.String("address", listenAddr))
-	}
-
-	// Optionally verify WireGuard interface is ready.
-	if !s.isWireGuardInterfaceReady("10.0.0.1") && s.logger != nil {
-		s.logger.Warn("WireGuard interface may not be ready, attempting to bind anyway",
-			zap.String("address", listenAddr))
+		// Optionally verify WireGuard interface is ready.
+		if !s.isWireGuardInterfaceReady("10.0.0.1") && s.logger != nil {
+			s.logger.Warn("WireGuard interface may not be ready, attempting to bind anyway",
+				zap.String("address", listenAddr))
+		}
 	}
 
 	listener, err := net.Listen("tcp", listenAddr)
 	if err != nil {
-		return fmt.Errorf("failed to create listener on %s (WireGuard interface may not be ready): %w", listenAddr, err)
+		return fmt.Errorf("failed to create listener on %s: %w", listenAddr, err)
 	}
 	s.listener = listener
 
-	// Load TLS credentials for mTLS (zero-trust security).
+	// Create HTTP mux and setup routes
+	mux := http.NewServeMux()
+	if err := s.setupRoutes(mux); err != nil {
+		return fmt.Errorf("failed to setup routes: %w", err)
+	}
+
+	// In dev mode, skip TLS and use plain HTTP
+	if s.devMode {
+		s.httpServer = &http.Server{
+			Addr:         listenAddr,
+			Handler:      mux, // No auth middleware in dev mode
+			ReadTimeout:  30 * time.Second,
+			WriteTimeout: 30 * time.Second,
+			IdleTimeout:  120 * time.Second,
+		}
+
+		// Start plain HTTP server in goroutine
+		go func() {
+			if s.logger != nil {
+				s.logger.Info("HTTP server listening (dev mode, no TLS)", zap.String("address", listenAddr))
+			}
+			if err := s.httpServer.Serve(listener); err != nil && err != http.ErrServerClosed {
+				if s.logger != nil {
+					s.logger.Error("HTTP server error", zap.Error(err))
+				}
+			}
+		}()
+
+		// Give the server a moment to start accepting connections
+		time.Sleep(100 * time.Millisecond)
+
+		if s.logger != nil {
+			s.logger.Info("HTTP server started (dev mode)", zap.String("address", listenAddr))
+		}
+
+		return nil
+	}
+
+	// Production mode: Load TLS credentials for mTLS (zero-trust security).
 	// Use configured paths if provided, otherwise fall back to system defaults.
 	serverCertPath := s.tlsConfig.ServerCert
 	serverKeyPath := s.tlsConfig.ServerKey
@@ -131,10 +197,6 @@ func (s *httpsServerService) Start(ctx context.Context) error {
 		s.logger.Info("Loaded TLS credentials for HTTPS server (mTLS enabled)",
 			zap.String("server_cert", serverCertPath))
 	}
-
-	// Create HTTP mux and setup routes
-	mux := http.NewServeMux()
-	s.setupRoutes(mux)
 
 	// Create HTTPS server
 	s.httpServer = &http.Server{
@@ -232,20 +294,46 @@ func (s *httpsServerService) checkInterfaceHasIP(iface, expectedIP string) bool 
 }
 
 // setupRoutes configures all REST API endpoints
-func (s *httpsServerService) setupRoutes(mux *http.ServeMux) {
+func (s *httpsServerService) setupRoutes(mux *http.ServeMux) error {
 	// Health check endpoint
 	mux.HandleFunc("/health", s.handleHealth)
 
-	// API v1 endpoints (simplified for refactoring)
-	mux.HandleFunc("/api/v1/auth/authenticate", s.handleAuthenticate)
+	// Create authentication handler
+	metaStore, ok := s.metaStore.(metastorage.MetaDataStore)
+	if !ok {
+		return fmt.Errorf("metaStore is not of type MetaDataStore")
+	}
+	eventBus, ok := s.eventBus.(eventbus.EventBus)
+	if !ok {
+		return fmt.Errorf("eventBus is not of type EventBus")
+	}
+	authHandler := authhandlers.NewAuthHandler(metaStore, eventBus, s.logger)
+	mux.HandleFunc("/api/v1/auth/authenticate", authHandler.HandleAuthenticate)
+
 	mux.HandleFunc("/api/v1/telemetry/heartbeat", s.handleHeartbeat)
 	// Additional endpoints can be added as needed during refactoring
+	return nil
 }
 
-// authMiddleware extracts Edge identity from client certificate and adds to context
+// authMiddleware extracts Edge identity from client certificate and adds to context.
+// In dev mode, this middleware is skipped (no TLS, no client certs).
 func (s *httpsServerService) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Extract client certificate from TLS connection
+		// In dev mode, skip certificate validation
+		if s.devMode {
+			// For dev, allow requests without client certificates
+			// Extract edge ID from query param or header if needed
+			if edgeID := r.URL.Query().Get("edge_id"); edgeID != "" {
+				ctx := context.WithValue(r.Context(), "edge_id", edgeID)
+				next.ServeHTTP(w, r.WithContext(ctx))
+				return
+			}
+			// No edge ID in dev mode, continue without it
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// Production mode: require client certificate
 		if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
 			s.sendErrorResponse(w, http.StatusUnauthorized, "client certificate required")
 			return
@@ -313,9 +401,7 @@ func (s *httpsServerService) handleAuthenticate(w http.ResponseWriter, r *http.R
 		if ctxEdgeID, ok := r.Context().Value("edge_id").(string); ok {
 			edgeID = ctxEdgeID
 			// Certificate CN format is "edge-client-{edge-id}", extract edge ID
-			if strings.HasPrefix(edgeID, "edge-client-") {
-				edgeID = strings.TrimPrefix(edgeID, "edge-client-")
-			}
+			edgeID = strings.TrimPrefix(edgeID, "edge-client-")
 		}
 	}
 
@@ -359,9 +445,7 @@ func (s *httpsServerService) handleHeartbeat(w http.ResponseWriter, r *http.Requ
 	if edgeID == "" {
 		if ctxEdgeID, ok := r.Context().Value("edge_id").(string); ok {
 			edgeID = ctxEdgeID
-			if strings.HasPrefix(edgeID, "edge-client-") {
-				edgeID = strings.TrimPrefix(edgeID, "edge-client-")
-			}
+			edgeID = strings.TrimPrefix(edgeID, "edge-client-")
 		}
 	}
 

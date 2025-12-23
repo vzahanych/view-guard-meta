@@ -21,12 +21,10 @@ FROM golang:1.25-alpine AS builder
 WORKDIR /build
 
 # Install build dependencies
-RUN apk add --no-cache git gcc musl-dev sqlite-dev
+RUN apk add --no-cache git gcc musl-dev
 
 # Copy go mod files from orchestrator
 COPY edge/orchestrator/go.mod edge/orchestrator/go.sum ./
-# Copy crypto/go for replace directive
-COPY crypto/go ./crypto/go
 # Copy proto for replace directive (if needed)
 COPY proto ./proto
 
@@ -42,8 +40,8 @@ WORKDIR /build/edge/orchestrator
 # Download dependencies (now that all files are in place)
 RUN go mod download
 
-# Build the orchestrator
-RUN CGO_ENABLED=1 go build -o orchestrator .
+# Build the orchestrator (bbolt doesn't require CGO)
+RUN go build -o orchestrator ./cmd/server
 
 # Runtime stage
 FROM alpine:latest
@@ -52,7 +50,6 @@ FROM alpine:latest
 RUN apk add --no-cache \
     ca-certificates \
     ffmpeg \
-    sqlite \
     v4l-utils \
     wget \
     bash \

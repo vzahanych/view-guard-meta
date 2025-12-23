@@ -15,10 +15,14 @@ The orchestrator manages:
 
 ```
 orchestrator/
-├── main.go                    # Main entry point
+├── cmd/
+│   └── server/
+│       └── main.go           # Main entry point
+├── config/                    # Configuration management
+│   ├── config.go             # YAML config loading and validation
+│   ├── service.go            # Configuration service with hot reload
+│   └── validation.go        # Configuration validation
 ├── internal/
-│   ├── config/               # Configuration management
-│   │   └── config.go         # YAML config loading and validation
 │   ├── logger/               # Structured logging
 │   │   └── logger.go         # JSON/text logging with zap
 │   └── service/              # Service management
@@ -33,7 +37,7 @@ orchestrator/
 
 ```bash
 cd edge/orchestrator
-go build -o orchestrator .
+go build -o orchestrator ./cmd/server
 ```
 
 ## Running
@@ -141,7 +145,7 @@ The orchestrator includes a comprehensive health check system with HTTP endpoint
 
 The system includes built-in health checkers for:
 - **System** - System resources (disk, memory)
-- **Database** - SQLite database connectivity
+- **Database** - BoltDB database connectivity
 - **AI Service** - AI inference service connectivity
 - **Storage** - Storage directories accessibility
 - **Network** - Network connectivity
@@ -193,5 +197,5 @@ The health endpoints are designed for Kubernetes probes:
 
 - `go.uber.org/zap` - Structured logging
 - `gopkg.in/yaml.v3` - YAML configuration parsing
-- `github.com/mattn/go-sqlite3` - SQLite database driver
+- `go.etcd.io/bbolt` - BoltDB embedded database
 

@@ -29,7 +29,8 @@ type edgeGateway struct {
 // NewEdgeGateway creates a new EdgeGateway implementation that composes
 // WireGuard server, HTTPS server, and HTTPS client services.
 // cfg, log, and db are interface{} to avoid dependencies on non-existent packages.
-func NewEdgeGateway(cfg interface{}, log interface{}, db interface{}) (edgegateway.EdgeGateway, error) {
+// metaStore and eventBus are optional dependencies for HTTPS server authentication handlers.
+func NewEdgeGateway(cfg interface{}, log interface{}, db interface{}, metaStore interface{}, eventBus interface{}) (edgegateway.EdgeGateway, error) {
 	// Try to extract logger if it's a zap.Logger
 	var logger *zap.Logger
 	if zapLogger, ok := log.(*zap.Logger); ok {
@@ -46,7 +47,8 @@ func NewEdgeGateway(cfg interface{}, log interface{}, db interface{}) (edgegatew
 	}
 
 	// Create HTTPS server service (uses config for TLS paths)
-	httpsServer, err := httpsserverimpl.NewHTTPSServerService(cfg, log)
+	// Pass metaStore and eventBus for authentication handlers
+	httpsServer, err := httpsserverimpl.NewHTTPSServerService(cfg, log, metaStore, eventBus)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create HTTPS server service: %w", err)
 	}

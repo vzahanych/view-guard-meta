@@ -1,0 +1,146 @@
+package config
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+
+	"go.uber.org/fx"
+	"go.uber.org/zap"
+	"gopkg.in/yaml.v3"
+
+	aigwtypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/ai-gateway/types"
+	evtbustypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/event-bus/types"
+	cctvtypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/iot/cctv/types"
+	metastoragetypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/meta-storage/types"
+	objectstoragetypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/object-storage/types"
+	telemetryotel "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/telemetry-otel"
+	vmgatewaytypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/vm-gateway/types"
+)
+
+// Config represents the application configuration
+type Config struct {
+	Environment   string                                 `yaml:"environment"`
+	LogLevel      string                                 `yaml:"log_level"`
+	LogFormat     string                                 `yaml:"log_format"`
+	ConfigFile    string                                 `yaml:"config_file"`
+	EventBus      evtbustypes.EventBusConfig             `yaml:"event_bus"`
+	AI            aigwtypes.AIGatewayConfig              `yaml:"ai"`
+	MetaStorage   metastoragetypes.MetaStorageConfig     `yaml:"meta_storage"`
+	ObjectStorage objectstoragetypes.ObjectStorageConfig `yaml:"object_storage"`
+	VMGateway     vmgatewaytypes.VMGatewayConfig         `yaml:"vm_gateway"`
+	CCTV          cctvtypes.CCTVServiceConfig            `yaml:"cctv"`
+	Telemetry     telemetryotel.Config                   `yaml:"telemetry"`
+}
+
+// Load loads configuration from a YAML file.
+// If configPath is empty, it searches common locations:
+// - ./config.yaml
+// - ./config/config.yaml
+// - /etc/view-guard-edge/config.yaml
+func Load(configPath string) (*Config, error) {
+	if configPath == "" {
+		// Try common locations
+		commonPaths := []string{
+			"./config.yaml",
+			"./config/config.yaml",
+			"/etc/view-guard-edge/config.yaml",
+		}
+		for _, path := range commonPaths {
+			if _, err := os.Stat(path); err == nil {
+				configPath = path
+				break
+			}
+		}
+		if configPath == "" {
+			return nil, fmt.Errorf("no config file found in common locations and no path provided")
+		}
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read config file %s: %w", configPath, err)
+	}
+
+	// Unmarshal the YAML into a map first to handle the "edge" root key
+	var raw map[string]interface{}
+	if parseErr := yaml.Unmarshal(data, &raw); parseErr != nil {
+		return nil, fmt.Errorf("failed to parse YAML: %w", parseErr)
+	}
+
+	// Extract the "edge" section if present
+	var edgeSection map[string]interface{}
+	if edge, ok := raw["edge"].(map[string]interface{}); ok {
+		edgeSection = edge
+	} else {
+		// If no "edge" key, assume the config is at root level
+		edgeSection = raw
+	}
+
+	// Marshal the edge section back to YAML for unmarshaling into Config
+	edgeYAML, marshalErr := yaml.Marshal(edgeSection)
+	if marshalErr != nil {
+		return nil, fmt.Errorf("failed to marshal edge section: %w", marshalErr)
+	}
+
+	var cfg Config
+	if unmarshalErr := yaml.Unmarshal(edgeYAML, &cfg); unmarshalErr != nil {
+		return nil, fmt.Errorf("failed to unmarshal config: %w", unmarshalErr)
+	}
+
+	// Set the config file path for reference
+	absPath, absErr := filepath.Abs(configPath)
+	if absErr != nil {
+		absPath = configPath
+	}
+	cfg.ConfigFile = absPath
+
+	return &cfg, nil
+}
+
+// ConfigProvider creates the Config with fx lifecycle management.
+// It reads the config path from the CONFIG_PATH environment variable,
+// or uses the provided defaultPath if set.
+// If neither is set, it searches common locations.
+func ConfigProvider(defaultPath string) func(logger *zap.Logger) (*Config, error) {
+	return func(logger *zap.Logger) (*Config, error) {
+		configPath := defaultPath
+		if configPath == "" {
+			configPath = os.Getenv("CONFIG_PATH")
+		}
+
+		cfg, err := Load(configPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load config: %w", err)
+		}
+
+		if logger != nil {
+			logger.Info("Configuration loaded",
+				zap.String("config_file", cfg.ConfigFile),
+				zap.String("environment", cfg.Environment),
+			)
+		}
+
+		return cfg, nil
+	}
+}
+
+// ConfigProviderWithPath creates a ConfigProvider that uses a specific config path.
+// This is useful when the config path is known at compile time or from flags.
+func ConfigProviderWithPath(configPath string) fx.Option {
+	return fx.Provide(func(logger *zap.Logger) (*Config, error) {
+		cfg, err := Load(configPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load config: %w", err)
+		}
+
+		if logger != nil {
+			logger.Info("Configuration loaded",
+				zap.String("config_file", cfg.ConfigFile),
+				zap.String("environment", cfg.Environment),
+			)
+		}
+
+		return cfg, nil
+	})
+}

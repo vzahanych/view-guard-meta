@@ -83,19 +83,21 @@ func (s *Server) Init(cfg *config.Config) error {
 	}
 	s.metaStore = edgeStateStore
 
-	// 3. State manager: consumes events and updates edge state / schedules tasks.
-	stateManager, err := statemngimpl.NewStateManager(s.eventBus, s.metaStore, s.logger)
-	if err != nil {
-		return fmt.Errorf("failed to create state manager: %w", err)
-	}
-	s.stateManager = stateManager
-
 	// 4. Edge gateway: composes WireGuard server, HTTPS server, HTTPS client.
-	gateway, err := edgegatewayimpl.NewEdgeGateway(cfg, s.logger, nil)
+	// Pass meta-storage and event-bus so HTTPS server can handle edge authentication.
+	gateway, err := edgegatewayimpl.NewEdgeGateway(cfg, s.logger, nil, s.metaStore, s.eventBus)
 	if err != nil {
 		return fmt.Errorf("failed to create edge gateway: %w", err)
 	}
 	s.edgeGateway = gateway
+
+	// 3. State manager: consumes events and updates edge state / schedules tasks.
+	// Pass edge gateway so state manager can request IoT device sync from edges.
+	stateManager, err := statemngimpl.NewStateManager(s.eventBus, s.metaStore, s.logger, s.edgeGateway)
+	if err != nil {
+		return fmt.Errorf("failed to create state manager: %w", err)
+	}
+	s.stateManager = stateManager
 
 	// 5. SaaS gateway: admin/control-plane HTTP API.
 	// Pass meta-storage and event-bus so it can manage edges.

@@ -1,107 +1,86 @@
-# Protocol Definitions
+# Protocol Buffer Definitions
 
-Protocol buffer definitions and SDKs for The Private AI Guardian platform APIs.
-
-## Overview
-
-This is the single source of truth for all `.proto` definitions:
-- Edge ↔ KVM VM communication protocols
-- KVM VM ↔ SaaS communication protocols
-- Generated language stubs (Go, TypeScript, Python)
+This directory contains protocol buffer definitions for communication between VM and Edge components.
 
 ## Directory Structure
 
-- `proto/edge/` - Edge ↔ KVM VM protocol definitions
-- `proto/kvm/` - KVM VM ↔ SaaS protocol definitions
-- `go/generated/` - Generated Go stubs
-- `typescript/generated/` - Generated TypeScript stubs
-- `python/generated/` - Generated Python stubs
-- `docs/` - API reference and protocol documentation
+```
+proto/
+├── proto/                          # Protocol buffer source files
+│   ├── vm-to-edge/                 # Messages/services from VM → Edge
+│   │   └── (proto files here)
+│   └── edge-to-vm/                 # Messages/services from Edge → VM
+│       └── auth.proto
+├── go/                             # Generated Go code
+│   ├── generated/
+│   │   ├── vm_to_edge/             # Generated VM → Edge code
+│   │   └── edge_to_vm/             # Generated Edge → VM code
+│   └── go.mod
+└── generate-proto.sh               # Generation script
+```
 
-## Generating Stubs
+## Naming Conventions
+
+- **Directory names**: Use kebab-case (`vm-to-edge`, `edge-to-vm`)
+- **Package names**: Use snake_case (`vm_to_edge`, `edge_to_vm`)
+- **Go package paths**: Use snake_case in generated paths (`vm_to_edge`, `edge_to_vm`)
+
+## Generating Code
+
+Run the generation script:
+
+```bash
+./generate-proto.sh
+```
+
+This script will:
+1. Check for required tools (`protoc`, `protoc-gen-go`, `protoc-gen-go-grpc`)
+2. Generate Go code for all `.proto` files in `vm-to-edge/` and `edge-to-vm/`
+3. Run `go mod tidy` to update dependencies
 
 ### Prerequisites
 
-1. Install Protocol Buffers compiler:
-   ```bash
-   # Ubuntu/Debian
-   sudo apt-get install protobuf-compiler
-   
-   # macOS
-   brew install protobuf
-   ```
+- `protoc` (Protocol Buffer Compiler)
+- `protoc-gen-go` (Go plugin for protoc)
+- `protoc-gen-go-grpc` (gRPC Go plugin for protoc)
 
-2. Install Go plugins:
-   ```bash
-   go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
-   go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
-   ```
-
-### Generate Go Stubs
-
+Install with:
 ```bash
-cd proto
-make generate
+# Install protoc
+sudo apt-get install protobuf-compiler
+
+# Install Go plugins
+go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
 ```
 
-Or manually:
-```bash
-protoc \
-  --go_out=go/generated \
-  --go_opt=paths=source_relative \
-  --go-grpc_out=go/generated \
-  --go-grpc_opt=paths=source_relative \
-  --proto_path=proto \
-  proto/edge/*.proto
-```
+## Usage in Go Code
 
-## Protocol Definitions
-
-### Edge ↔ KVM VM (`proto/edge/`)
-
-- **`events.proto`** - Event transmission service
-  - `EventService.SendEvents` - Batch event transmission
-  - `EventService.SendEvent` - Single event transmission
-
-- **`telemetry.proto`** - Telemetry and health reporting
-  - `TelemetryService.SendTelemetry` - System and application metrics
-  - `TelemetryService.Heartbeat` - Heartbeat for connection monitoring
-
-- **`control.proto`** - Control commands from KVM VM to Edge
-  - `ControlService.GetConfig` - Retrieve Edge configuration
-  - `ControlService.UpdateConfig` - Update Edge configuration
-  - `ControlService.RestartService` - Restart Edge services
-
-- **`streaming.proto`** - On-demand clip streaming
-  - `StreamingService.StreamClip` - Stream video clip
-  - `StreamingService.GetClipInfo` - Get clip metadata
-
-### KVM VM ↔ SaaS (`proto/kvm/`)
-
-(To be defined in Phase 2)
-
-## Usage
-
-### In Edge Orchestrator
+Import generated code:
 
 ```go
-import edgeevents "github.com/vzahanych/view-guard-meta/proto/go/generated/edge/events"
-
-// Use generated stubs
-client := edgeevents.NewEventServiceClient(conn)
+import (
+    "github.com/vzahanych/view-guard-meta/proto/go/generated/edge_to_vm"
+    "github.com/vzahanych/view-guard-meta/proto/go/generated/vm_to_edge"
+)
 ```
 
-### In KVM VM Agent
+The package names are snake_case (e.g., `edge_to_vm`, `vm_to_edge`) matching the proto package declarations.
 
-```go
-import edgeevents "github.com/vzahanych/view-guard-meta/proto/go/generated/edge/events"
+## Adding New Proto Files
 
-// Implement server
-type EventServer struct {
-    edgeevents.UnimplementedEventServiceServer
-}
-```
+1. Create your `.proto` file in the appropriate directory:
+   - `proto/vm-to-edge/` for VM → Edge messages/services
+   - `proto/edge-to-vm/` for Edge → VM messages/services
 
-## License
+2. Set the package name to match the directory (snake_case):
+   ```protobuf
+   package vm_to_edge;  // or edge_to_vm
+   ```
 
-Apache 2.0
+3. Set the go_package option:
+   ```protobuf
+   option go_package = "github.com/vzahanych/view-guard-meta/proto/go/generated/vm_to_edge";
+   ```
+
+4. Run `./generate-proto.sh` to generate code

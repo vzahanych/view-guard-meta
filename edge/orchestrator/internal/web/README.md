@@ -239,7 +239,7 @@ The web server is part of the orchestrator service. To test API endpoints:
 1. **Start the orchestrator**:
    ```bash
    cd edge/orchestrator
-   go run main.go -config ../config/config.dev.yaml
+   go run ./cmd/server -config ../config/config.dev.yaml
    ```
 
 2. **Test API endpoints**:
@@ -256,9 +256,9 @@ The web server is part of the orchestrator service. To test API endpoints:
      -d '{"name":"Test Camera","type":"rtsp","rtsp_url":"rtsp://example.com/stream"}'
    ```
 
-### Integration Testing
+### Testing
 
-Run integration tests:
+Run tests:
 
 ```bash
 cd edge/orchestrator

@@ -25,7 +25,7 @@ edge:
     max_disk_usage_percent: 90
 
   ai:
-    service_url: "http://localhost:8080"
+    service_url: "http://localhost:8080"  # HTTP address with protobuf JSON
     inference_interval: 1s
     confidence_threshold: 0.5
     local_inference_enabled: true
@@ -41,6 +41,11 @@ edge:
     transmission_interval: 2s
 
   telemetry:
-    interval: 30s
     enabled: true
+    service_name: "edge-orchestrator"
+    environment: "dev"
+    otlp_endpoint: "http://localhost:4318"  # OTLP HTTP endpoint (for local dev, use VM WireGuard IP in production)
+    insecure: true  # Use insecure connection for local dev
+    timeout: 10s
+    interval: 30s  # Deprecated: kept for backward compatibility
 

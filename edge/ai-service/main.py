@@ -98,7 +98,7 @@ async def lifespan(app: FastAPI):
         detection_logic = DetectionLogic()
         app.state.detection_logic = detection_logic
         
-        # Setup inference endpoints
+        # Setup inference endpoints (HTTP with protobuf JSON)
         setup_inference_endpoints(app, inference_engine, detection_logic)
         
         # Mark service as ready

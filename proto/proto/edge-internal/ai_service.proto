@@ -1,0 +1,126 @@
+syntax = "proto3";
+
+package edge_internal;
+
+option go_package = "github.com/vzahanych/view-guard-meta/proto/go/generated/edge_internal";
+
+// InferenceService provides AI inference capabilities for the Edge Appliance
+service InferenceService {
+  // Infer performs inference on a single image
+  rpc Infer(InferenceRequest) returns (InferenceResponse);
+  
+  // InferBatch performs batch inference on multiple images
+  rpc InferBatch(BatchInferenceRequest) returns (BatchInferenceResponse);
+  
+  // GetStats retrieves inference statistics
+  rpc GetStats(GetStatsRequest) returns (InferenceStats);
+  
+  // HealthCheck checks if the service is healthy
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+// InferenceRequest represents a request to perform inference on a single image
+message InferenceRequest {
+  // Base64-encoded JPEG/PNG image
+  string image = 1;
+  
+  // Optional confidence threshold override (0.0 to 1.0)
+  optional float confidence_threshold = 2;
+  
+  // Optional filter by class names
+  repeated string enabled_classes = 3;
+}
+
+// BoundingBox represents a detected object's bounding box
+message BoundingBox {
+  // Left coordinate (normalized 0.0 to 1.0)
+  float x1 = 1;
+  
+  // Top coordinate (normalized 0.0 to 1.0)
+  float y1 = 2;
+  
+  // Right coordinate (normalized 0.0 to 1.0)
+  float x2 = 3;
+  
+  // Bottom coordinate (normalized 0.0 to 1.0)
+  float y2 = 4;
+  
+  // Detection confidence (0.0 to 1.0)
+  float confidence = 5;
+  
+  // COCO class ID
+  int32 class_id = 6;
+  
+  // Human-readable class name
+  string class_name = 7;
+}
+
+// InferenceResponse represents the response from an inference request
+message InferenceResponse {
+  // Detected objects
+  repeated BoundingBox bounding_boxes = 1;
+  
+  // Inference duration in milliseconds
+  float inference_time_ms = 2;
+  
+  // Frame shape [height, width]
+  repeated int32 frame_shape = 3;
+  
+  // Model input shape [height, width]
+  repeated int32 model_input_shape = 4;
+  
+  // Number of detections
+  int32 detection_count = 5;
+}
+
+// BatchInferenceRequest represents a batch inference request
+message BatchInferenceRequest {
+  // List of base64-encoded images
+  repeated string images = 1;
+  
+  // Optional confidence threshold override
+  optional float confidence_threshold = 2;
+  
+  // Optional filter by class names
+  repeated string enabled_classes = 3;
+}
+
+// BatchInferenceResponse represents a batch inference response
+message BatchInferenceResponse {
+  // Results for each image
+  repeated InferenceResponse results = 1;
+  
+  // Total inference time in milliseconds
+  float total_inference_time_ms = 2;
+  
+  // Average inference time per image in milliseconds
+  float average_inference_time_ms = 3;
+}
+
+// GetStatsRequest is an empty request for getting statistics
+message GetStatsRequest {}
+
+// InferenceStats represents inference statistics
+message InferenceStats {
+  // Total number of inferences performed
+  int64 total_inferences = 1;
+  
+  // Total inference time in milliseconds
+  float total_time_ms = 2;
+  
+  // Average inference time in milliseconds
+  float average_time_ms = 3;
+}
+
+// HealthCheckRequest is an empty request for health check
+message HealthCheckRequest {}
+
+// HealthCheckResponse represents the health status
+message HealthCheckResponse {
+  // Whether the service is healthy
+  bool healthy = 1;
+  
+  // Optional status message
+  string message = 2;
+}
+

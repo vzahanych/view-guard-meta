@@ -1,0 +1,92 @@
+syntax = "proto3";
+
+package edge_to_vm;
+
+option go_package = "github.com/vzahanych/view-guard-meta/proto/go/generated/edge_to_vm";
+
+import "google/protobuf/timestamp.proto";
+
+// AuthRequest represents an Edge device's request to authenticate with the VM.
+// This is sent by the Edge appliance to the VM's HTTPS server over the WireGuard tunnel.
+message AuthRequest {
+  // EdgeID is the unique identifier for the Edge device (UUID as string).
+  // This should match the edge_id that was registered via the SaaS gateway.
+  string edge_id = 1;
+
+  // EdgeVersion is the version of the Edge device software.
+  string edge_version = 2;
+
+  // WgPublicKey is the WireGuard public key of the Edge device.
+  // The VM verifies this matches the registered public key for the given EdgeID.
+  string wg_public_key = 3;
+
+  // OSInfo contains optional information about the Edge device hardware/software.
+  OSInfo device_info = 4;
+
+  // Capabilities lists what the Edge device can do (e.g., "camera_discovery", "ai_inference").
+  repeated string capabilities = 5;
+
+  // Timestamp is when the Edge device generated this request.
+  google.protobuf.Timestamp timestamp = 6;
+}
+
+// OSInfo contains information about the Edge device hardware/software.
+message OSInfo {
+  // OS is the operating system running on the Edge device (e.g., "linux", "windows").
+  string os = 1;
+
+  // OSVersion is the OS version string.
+  string os_version = 2;
+
+  // SerialNumber is an optional device serial number for inventory tracking.
+  string serial_number = 3;
+}
+
+// AuthResponse represents the VM's response to an Edge authentication request.
+// This is sent by the VM's HTTPS server back to the Edge device.
+message AuthResponse {
+  // Success indicates whether authentication was successful.
+  bool success = 1;
+
+  // EdgeID is the confirmed Edge device identifier (echoed from request).
+  string edge_id = 2;
+
+  // Message provides a human-readable status message.
+  string message = 3;
+
+  // ErrorCode is an optional error code if authentication failed.
+  AuthErrorCode error_code = 4;
+
+  // SessionToken is an optional session token for authenticated requests (if auth succeeded).
+  // This can be used for subsequent API calls to avoid re-authentication.
+  string session_token = 5;
+
+  // ServerTimestamp is when the VM processed this request.
+  google.protobuf.Timestamp server_timestamp = 6;
+
+  // NextSteps lists what the Edge should do after successful authentication.
+  // Examples: ["sync_iot_devices", "start_heartbeat", "check_for_updates"].
+  repeated string next_steps = 7;
+}
+
+// AuthErrorCode defines standard error codes for authentication failures.
+enum AuthErrorCode {
+  // Unspecified error (default value, should not be used).
+  AUTH_ERROR_UNSPECIFIED = 0;
+
+  // AuthErrorEdgeNotFound indicates the Edge ID is not registered in the VM.
+  AUTH_ERROR_EDGE_NOT_FOUND = 1;
+
+  // AuthErrorInvalidWGKey indicates the WireGuard public key doesn't match the registered key.
+  AUTH_ERROR_INVALID_WG_KEY = 2;
+
+  // AuthErrorEdgeAlreadyAuthenticated indicates the Edge is already authenticated.
+  AUTH_ERROR_EDGE_ALREADY_AUTHENTICATED = 3;
+
+  // AuthErrorInvalidRequest indicates the request format is invalid.
+  AUTH_ERROR_INVALID_REQUEST = 4;
+
+  // AuthErrorInternalServerError indicates an internal server error occurred.
+  AUTH_ERROR_INTERNAL_SERVER_ERROR = 5;
+}
+

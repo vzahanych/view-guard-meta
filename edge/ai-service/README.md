@@ -8,11 +8,11 @@ The Edge AI Service is a FastAPI-based service that:
 - Receives video frames from the Edge Orchestrator
 - Performs object detection (people, vehicles, etc.) using YOLOv8 models
 - Returns detection results with bounding boxes and confidence scores
-- Supports both HTTP and gRPC interfaces
+- Uses HTTP with protobuf JSON for type-safe communication
 
 ## Features
 
-- **FastAPI Framework**: Modern, async-friendly HTTP/gRPC service
+- **FastAPI Framework**: Modern, async-friendly HTTP service with protobuf JSON
 - **OpenVINO Integration**: Hardware-accelerated inference (CPU/iGPU)
 - **Health Checks**: Liveness, readiness, and detailed health endpoints
 - **Structured Logging**: JSON and text logging formats
@@ -38,6 +38,8 @@ ai-service/
 
 - Python 3.12+
 - Virtual environment (recommended)
+- Protocol Buffer compiler (`protoc`)
+- `grpcio-tools` Python package
 
 ### Setup
 
@@ -48,6 +50,12 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 
 # Install dependencies
 pip install -r requirements.txt
+
+# Generate Python proto code from proto definitions
+# This must be done before running the service
+cd ../../proto
+./generate-python-proto.sh
+cd ../edge/ai-service
 ```
 
 ## Configuration
