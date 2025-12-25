@@ -380,7 +380,7 @@ The Edge Orchestrator follows an **event-driven architecture** with the followin
 3. **CCTV Service** - Manages camera discovery, frame capture, and screenshot management
 4. **AI Gateway** - Bridges between Edge and AI service for frame processing
 5. **Object Storage** - Stores images, models, and frames (MinIO/S3-compatible)
-6. **Meta Storage** - Stores metadata, camera info, and Edge state (SQLite/file-based)
+6. **Meta Storage** - Stores metadata, camera info, and Edge state (bbolt/BoltDB)
 7. **Event Bus** - In-memory event system for inter-service communication
 8. **Web Gateway** - HTTP API for user interactions (screenshot capture, labeling)
 
@@ -739,7 +739,7 @@ The Edge Orchestrator follows an **event-driven architecture** with the followin
 - **Security Events**: `security-events/{cameraID}/{date}/{filename}.jpg`
 - **Clips**: `clips/{cameraID}/{timestamp}.mp4`
 
-#### Meta Storage (SQLite/File-based)
+#### Meta Storage (bbolt/BoltDB)
 - **Edge State**: Current state, network status, authentication status
 - **Cameras**: Camera metadata, enabled status, configuration
 - **Screenshots**: Screenshot metadata (ID, camera, label, object_key, timestamps)
@@ -876,7 +876,7 @@ frame_processing → (30s interval) → (object-storage) → (AI Service) → (c
       │
       └──► Object Storage (MinIO) ──► Images, Models, Frames
       │
-      └──► Meta Storage (SQLite) ──► Metadata, State, Config
+      └──► Meta Storage (bbolt) ──► Metadata, State, Config
 ```
 
 ### Key Design Decisions
