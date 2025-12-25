@@ -518,6 +518,95 @@ func (c *HTTPSClient) SyncCapabilities(ctx context.Context, req *httpsclienttype
 	}, nil
 }
 
+// SyncCameras syncs discovered cameras to the VM. VM decides which cameras should be enabled.
+func (c *HTTPSClient) SyncCameras(ctx context.Context, req *httpsclienttypes.SyncCamerasRequest) (*httpsclienttypes.SyncCamerasResponse, error) {
+	url := fmt.Sprintf("https://%s/api/v1/cameras/sync", c.vmEndpoint)
+
+	reqBody := map[string]interface{}{
+		"edge_id": req.EdgeID,
+		"cameras": req.Cameras,
+	}
+
+	jsonBody, _ := json.Marshal(reqBody)
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonBody))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to sync cameras: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("sync cameras failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var result struct {
+		Success        bool                              `json:"success"`
+		ErrorMessage   string                            `json:"error_message"`
+		EnabledCameras []*httpsclienttypes.EnabledCamera `json:"enabled_cameras"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return &httpsclienttypes.SyncCamerasResponse{
+		Success:        result.Success,
+		ErrorMessage:   result.ErrorMessage,
+		EnabledCameras: result.EnabledCameras,
+	}, nil
+}
+
+// SyncScreenshots syncs labeled screenshots to the VM for model training.
+func (c *HTTPSClient) SyncScreenshots(ctx context.Context, req *httpsclienttypes.SyncScreenshotsRequest) (*httpsclienttypes.SyncScreenshotsResponse, error) {
+	url := fmt.Sprintf("https://%s/api/v1/screenshots/sync", c.vmEndpoint)
+
+	reqBody := map[string]interface{}{
+		"edge_id":     req.EdgeID,
+		"camera_id":   req.CameraID,
+		"screenshots": req.Screenshots,
+	}
+
+	jsonBody, _ := json.Marshal(reqBody)
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonBody))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to sync screenshots: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("sync screenshots failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var result struct {
+		Success      bool   `json:"success"`
+		ErrorMessage string `json:"error_message"`
+		Message      string `json:"message"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return &httpsclienttypes.SyncScreenshotsResponse{
+		Success:      result.Success,
+		ErrorMessage: result.ErrorMessage,
+		Message:      result.Message,
+	}, nil
+}
+
 // ReportDeploymentStatus reports deployment status to the VM
 func (c *HTTPSClient) ReportDeploymentStatus(ctx context.Context, deploymentID string, status string, errorMessage *string, modelPath *string) error {
 	url := fmt.Sprintf("https://%s/api/deployments/%s/status", c.vmEndpoint, deploymentID)

@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
 
 	"go.uber.org/zap"
 )
@@ -298,24 +299,35 @@ func (f *FFmpegWrapper) GetVersion() (string, error) {
 }
 
 // ValidateInput validates an input source (RTSP URL or device path)
+// Uses a short timeout to avoid hanging on busy/locked devices
 func (f *FFmpegWrapper) ValidateInput(input string) error {
-	// Quick probe to check if input is valid
+	// Quick probe to check if input is valid with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
 	args := []string{
 		"-hide_banner",
+		"-loglevel", "error",
 		"-probesize", "32",
 		"-analyzeduration", "1000000",
 		"-i", input,
 		"-f", "null",
+		"-frames:v", "0", // Don't decode any frames, just probe
 		"-",
 	}
 
-	cmd := f.BuildCommand(context.Background(), args)
+	cmd := f.BuildCommand(ctx, args)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
+		// Check for context timeout
+		if ctx.Err() == context.DeadlineExceeded {
+			return fmt.Errorf("input validation timeout: device may be busy or locked")
+		}
 		// Check if it's a timeout or actual error
 		if strings.Contains(string(output), "Connection refused") ||
 			strings.Contains(string(output), "No such file") ||
-			strings.Contains(string(output), "Invalid data found") {
+			strings.Contains(string(output), "Invalid data found") ||
+			strings.Contains(string(output), "Device or resource busy") {
 			return fmt.Errorf("invalid input: %s: %w", string(output), err)
 		}
 		// Some warnings are OK, just return the error

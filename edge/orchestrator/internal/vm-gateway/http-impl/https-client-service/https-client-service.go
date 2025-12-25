@@ -38,6 +38,8 @@ type HTTPSClientService interface {
 	Authenticate(ctx context.Context, edgeID string) error
 	GetConfig(ctx context.Context) (*types.GetConfigResponse, error)
 	SyncCapabilities(ctx context.Context, req *types.SyncCapabilitiesRequest) (*types.SyncCapabilitiesResponse, error)
+	SyncCameras(ctx context.Context, req *types.SyncCamerasRequest) (*types.SyncCamerasResponse, error)
+	SyncScreenshots(ctx context.Context, req *types.SyncScreenshotsRequest) (*types.SyncScreenshotsResponse, error)
 	ReportDeploymentStatus(ctx context.Context, deploymentID string, status string, errorMessage *string, modelPath *string) error
 	Heartbeat(ctx context.Context, req *wgclienttypes.HeartbeatRequest) error
 	SendTelemetry(ctx context.Context, data *wgclienttypes.TelemetryData) error

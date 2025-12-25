@@ -65,3 +65,59 @@ type SyncCapabilitiesResponse struct {
 	Success      bool   `json:"success"`
 	ErrorMessage string `json:"error_message,omitempty"`
 }
+
+// CameraInfo represents basic camera information for sync
+type CameraInfo struct {
+	CameraID string `json:"camera_id"`
+	Name     string `json:"name,omitempty"`
+	Type     string `json:"type,omitempty"`
+	Source   string `json:"source,omitempty"`
+	Enabled  bool   `json:"enabled,omitempty"`
+}
+
+// SyncCamerasRequest contains the payload for syncing discovered cameras to the VM.
+type SyncCamerasRequest struct {
+	EdgeID  string        `json:"edge_id"`
+	Cameras []*CameraInfo `json:"cameras"`
+}
+
+// EnabledCamera represents a camera that VM has decided to enable
+type EnabledCamera struct {
+	CameraID string `json:"camera_id"`
+	Enabled  bool   `json:"enabled"`
+}
+
+// SyncCamerasResponse represents the VM response for camera sync.
+type SyncCamerasResponse struct {
+	Success         bool             `json:"success"`
+	ErrorMessage    string           `json:"error_message,omitempty"`
+	EnabledCameras  []*EnabledCamera `json:"enabled_cameras,omitempty"`
+}
+
+// ScreenshotInfo represents screenshot metadata for sync to VM
+type ScreenshotInfo struct {
+	ScreenshotID string            `json:"screenshot_id"`
+	CameraID     string            `json:"camera_id"`
+	ObjectKey    string            `json:"object_key"` // Path to image in object storage
+	ImageData    string            `json:"image_data,omitempty"` // Base64 encoded image data
+	ImageFormat  string            `json:"image_format,omitempty"` // Image format (e.g., "jpeg", "png")
+	Label        string            `json:"label"`
+	CustomLabel  string            `json:"custom_label,omitempty"`
+	Description  string            `json:"description,omitempty"`
+	Metadata     map[string]interface{} `json:"metadata,omitempty"`
+	CreatedAt    int64             `json:"created_at"` // Unix timestamp
+}
+
+// SyncScreenshotsRequest contains the payload for syncing labeled screenshots to the VM for model training.
+type SyncScreenshotsRequest struct {
+	EdgeID      string          `json:"edge_id"`
+	CameraID    string          `json:"camera_id"`
+	Screenshots []*ScreenshotInfo `json:"screenshots"`
+}
+
+// SyncScreenshotsResponse represents the VM response for screenshot sync.
+type SyncScreenshotsResponse struct {
+	Success      bool   `json:"success"`
+	ErrorMessage string `json:"error_message,omitempty"`
+	Message      string `json:"message,omitempty"`
+}

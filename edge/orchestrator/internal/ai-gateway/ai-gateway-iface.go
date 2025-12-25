@@ -47,6 +47,14 @@ type AIGateway interface {
 	// NotifyModelDeployment notifies the AI service about a deployed model
 	// The AI service will load the model from MinIO using the provided metadata
 	NotifyModelDeployment(ctx context.Context, metadata *types.ModelMetadata) error
+
+	// ProcessFrame processes a frame that was stored in object storage
+	// The AI service will:
+	// 1. Load the model from MinIO (if not already loaded) using model metadata
+	// 2. Process the frame from object storage
+	// 3. Determine if it's similar to training set or has anomalies
+	// 4. Delete normal frames or move suspicious ones to security event bucket
+	ProcessFrame(ctx context.Context, cameraID string, frameKey string, frameData []byte) error
 }
 
 func NewAIGateway(ctx context.Context, config *types.AIGatewayConfig, cctvSvc cctv.CCTVService, logger *zap.Logger) (AIGateway, error) {

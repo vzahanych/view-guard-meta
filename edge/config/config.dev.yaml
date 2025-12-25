@@ -37,7 +37,7 @@ edge:
     access_key: ""
     secret_key: ""
     region: ""
-    data_dir: ./data/db
+    data_dir: ../../infra/dev/data/db
 
   # Object storage configuration (for clips, snapshots files)
   object_storage:

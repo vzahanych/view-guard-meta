@@ -36,6 +36,11 @@ func (g *WebGatewayImpl) handleListScreenshots(c *gin.Context) {
 	if label := c.Query("label"); label != "" {
 		filters["label"] = label
 	}
+	// Support filtering unlabeled screenshots (for user to label)
+	if unlabeled := c.Query("unlabeled"); unlabeled == "true" {
+		filters["label"] = "" // Empty label means unlabeled
+		filters["unlabeled_only"] = true
+	}
 	if customLabel := c.Query("custom_label"); customLabel != "" {
 		filters["custom_label"] = customLabel
 	}
@@ -61,18 +66,42 @@ func (g *WebGatewayImpl) handleListScreenshots(c *gin.Context) {
 		return
 	}
 
+	// Include thumbnails by default so users can see what they're labeling
+	// Can be disabled with include_thumbnails=false
+	includeThumbnails := c.Query("include_thumbnails") != "false"
+	
 	response := make([]gin.H, 0, len(screenshotsList))
 	for _, ss := range screenshotsList {
-		response = append(response, gin.H{
+		screenshotData := gin.H{
 			"id":           ss.ID,
 			"camera_id":    ss.CameraID,
-			"object_key":   ss.ObjectKey,
+			"object_key":   ss.ObjectKey, // Path to image in object storage
+			"thumbnail_key": ss.ThumbnailKey, // Path to thumbnail in object storage
 			"label":        ss.Label,
 			"custom_label": ss.CustomLabel,
 			"description":  ss.Description,
 			"created_at":   ss.CreatedAt.Format(time.RFC3339),
 			"updated_at":   ss.UpdatedAt.Format(time.RFC3339),
-		})
+		}
+		
+		// Include thumbnail as base64 if requested
+		if includeThumbnails && g.objectStorage != nil {
+			thumbnailKey := ss.ThumbnailKey
+			if thumbnailKey == "" {
+				thumbnailKey = ss.ObjectKey // Fallback to full image if no thumbnail
+			}
+			
+			if reader, err := g.objectStorage.LoadSnapshot(c.Request.Context(), thumbnailKey); err == nil {
+				if thumbnailData, err := io.ReadAll(reader); err == nil {
+					reader.Close()
+					// Encode thumbnail as base64 for JSON response
+					thumbnailBase64 := base64.StdEncoding.EncodeToString(thumbnailData)
+					screenshotData["thumbnail"] = fmt.Sprintf("data:image/jpeg;base64,%s", thumbnailBase64)
+				}
+			}
+		}
+		
+		response = append(response, screenshotData)
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -99,17 +128,52 @@ func (g *WebGatewayImpl) handleGetScreenshot(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"id":           screenshot.ID,
-		"camera_id":    screenshot.CameraID,
-		"object_key":   screenshot.ObjectKey,
-		"label":        screenshot.Label,
-		"custom_label": screenshot.CustomLabel,
-		"description":  screenshot.Description,
-		"metadata":     screenshot.Metadata,
-		"created_at":   screenshot.CreatedAt.Format(time.RFC3339),
-		"updated_at":   screenshot.UpdatedAt.Format(time.RFC3339),
-	})
+	// Include thumbnail by default so users can see what they're labeling
+	// Can be disabled with include_thumbnail=false
+	includeThumbnail := c.Query("include_thumbnail") != "false"
+	includeFullImage := c.Query("include_full_image") == "true"
+	
+	response := gin.H{
+		"id":            screenshot.ID,
+		"camera_id":     screenshot.CameraID,
+		"object_key":    screenshot.ObjectKey, // Path to full image in object storage
+		"thumbnail_key": screenshot.ThumbnailKey, // Path to thumbnail in object storage
+		"label":         screenshot.Label,
+		"custom_label":  screenshot.CustomLabel,
+		"description":   screenshot.Description,
+		"metadata":      screenshot.Metadata,
+		"created_at":    screenshot.CreatedAt.Format(time.RFC3339),
+		"updated_at":    screenshot.UpdatedAt.Format(time.RFC3339),
+	}
+	
+	// Include thumbnail as base64 if requested
+	if includeThumbnail && g.objectStorage != nil {
+		thumbnailKey := screenshot.ThumbnailKey
+		if thumbnailKey == "" {
+			thumbnailKey = screenshot.ObjectKey // Fallback to full image if no thumbnail
+		}
+		
+		if reader, err := g.objectStorage.LoadSnapshot(c.Request.Context(), thumbnailKey); err == nil {
+			if thumbnailData, err := io.ReadAll(reader); err == nil {
+				reader.Close()
+				thumbnailBase64 := base64.StdEncoding.EncodeToString(thumbnailData)
+				response["thumbnail"] = fmt.Sprintf("data:image/jpeg;base64,%s", thumbnailBase64)
+			}
+		}
+	}
+	
+	// Include full image as base64 if requested
+	if includeFullImage && g.objectStorage != nil {
+		if reader, err := g.objectStorage.LoadSnapshot(c.Request.Context(), screenshot.ObjectKey); err == nil {
+			if imageData, err := io.ReadAll(reader); err == nil {
+				reader.Close()
+				imageBase64 := base64.StdEncoding.EncodeToString(imageData)
+				response["image"] = fmt.Sprintf("data:image/jpeg;base64,%s", imageBase64)
+			}
+		}
+	}
+	
+	c.JSON(http.StatusOK, response)
 }
 
 // handleGetScreenshotImage handles getting the image file for a screenshot

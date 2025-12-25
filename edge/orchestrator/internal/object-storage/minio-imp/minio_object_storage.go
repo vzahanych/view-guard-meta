@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"path"
+	"path/filepath"
 	"time"
 
 	"github.com/google/uuid"
@@ -290,4 +291,82 @@ func (s *MinIOObjectStorage) DeleteModel(ctx context.Context, modelKey string, m
 	}
 
 	return nil
+}
+
+// Frames
+
+func (s *MinIOObjectStorage) StoreFrame(ctx context.Context, key string, frameData []byte) error {
+	if key == "" {
+		return fmt.Errorf("frame key is required")
+	}
+	if len(frameData) == 0 {
+		return fmt.Errorf("frame data is required")
+	}
+
+	// Store frame in frames bucket
+	frameReader := io.NopCloser(bytes.NewReader(frameData))
+	if err := s.s3Client.UploadFile(ctx, key, frameReader, int64(len(frameData)), "image/jpeg"); err != nil {
+		return fmt.Errorf("failed to store frame: %w", err)
+	}
+
+	return nil
+}
+
+func (s *MinIOObjectStorage) LoadFrame(ctx context.Context, key string) (io.ReadCloser, error) {
+	if key == "" {
+		return nil, fmt.Errorf("frame key is required")
+	}
+	return s.s3Client.DownloadFile(ctx, key)
+}
+
+func (s *MinIOObjectStorage) DeleteFrame(ctx context.Context, key string) error {
+	if key == "" {
+		return fmt.Errorf("frame key is required")
+	}
+	return s.s3Client.DeleteFile(ctx, key)
+}
+
+func (s *MinIOObjectStorage) MoveFrameToSecurityEvent(ctx context.Context, sourceKey string, cameraID string) (string, error) {
+	if sourceKey == "" {
+		return "", fmt.Errorf("source frame key is required")
+	}
+	if cameraID == "" {
+		return "", fmt.Errorf("camera ID is required")
+	}
+
+	// Generate destination key in security-events bucket
+	timestamp := time.Now().Format("2006-01-02")
+	filename := filepath.Base(sourceKey)
+	destKey := fmt.Sprintf("security-events/%s/%s/%s", cameraID, timestamp, filename)
+
+	// Download source frame
+	reader, err := s.s3Client.DownloadFile(ctx, sourceKey)
+	if err != nil {
+		return "", fmt.Errorf("failed to download source frame: %w", err)
+	}
+	defer reader.Close()
+
+	// Read frame data
+	frameData, err := io.ReadAll(reader)
+	if err != nil {
+		return "", fmt.Errorf("failed to read frame data: %w", err)
+	}
+
+	// Upload to security-events bucket
+	frameReader := io.NopCloser(bytes.NewReader(frameData))
+	if err := s.s3Client.UploadFile(ctx, destKey, frameReader, int64(len(frameData)), "image/jpeg"); err != nil {
+		return "", fmt.Errorf("failed to upload frame to security-events: %w", err)
+	}
+
+	// Delete original frame
+	if err := s.s3Client.DeleteFile(ctx, sourceKey); err != nil {
+		s.logger.Warn("Failed to delete source frame after move",
+			zap.String("source_key", sourceKey),
+			zap.String("dest_key", destKey),
+			zap.Error(err),
+		)
+		// Don't fail the operation if delete fails
+	}
+
+	return destKey, nil
 }

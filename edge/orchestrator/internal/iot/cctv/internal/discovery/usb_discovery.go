@@ -62,11 +62,20 @@ func (s *USBDiscoveryService) Name() string {
 func (s *USBDiscoveryService) Start(ctx context.Context) error {
 	s.logger.Info("Starting USB camera discovery service")
 
+	// Update context
+	s.mu.Lock()
+	if s.cancel != nil {
+		s.cancel()
+	}
+	s.ctx, s.cancel = context.WithCancel(ctx)
+	s.mu.Unlock()
+
 	// Start discovery loop
 	go s.discoveryLoop()
 
 	return nil
 }
+
 
 // Stop stops the USB camera discovery service
 func (s *USBDiscoveryService) Stop(ctx context.Context) error {

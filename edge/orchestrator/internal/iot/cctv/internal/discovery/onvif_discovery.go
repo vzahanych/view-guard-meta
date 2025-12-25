@@ -84,11 +84,20 @@ func (s *ONVIFDiscoveryService) Name() string {
 func (s *ONVIFDiscoveryService) Start(ctx context.Context) error {
 	s.logger.Info("Starting ONVIF discovery service")
 
+	// Update context
+	s.mu.Lock()
+	if s.cancel != nil {
+		s.cancel()
+	}
+	s.ctx, s.cancel = context.WithCancel(ctx)
+	s.mu.Unlock()
+
 	// Start discovery loop
 	go s.discoveryLoop()
 
 	return nil
 }
+
 
 // Stop stops the ONVIF discovery service
 func (s *ONVIFDiscoveryService) Stop(ctx context.Context) error {

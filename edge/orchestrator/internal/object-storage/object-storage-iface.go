@@ -36,6 +36,14 @@ type ObjectStorageService interface {
 	DeleteSnapshot(ctx context.Context, key string) error
 	GenerateSnapshotKey(cameraID string, isThumbnail bool) string // Generates a unique key for a snapshot
 
+	// Frames (temporary image files for AI processing)
+	// key is the object key (e.g., "frames/cameraID/date/frameID.jpg")
+	// frameData is the raw image bytes
+	StoreFrame(ctx context.Context, key string, frameData []byte) error
+	LoadFrame(ctx context.Context, key string) (io.ReadCloser, error)
+	DeleteFrame(ctx context.Context, key string) error
+	MoveFrameToSecurityEvent(ctx context.Context, sourceKey string, cameraID string) (string, error) // Moves frame to security-events bucket
+
 	// Models (model files)
 	// modelKey is the object key for the model file (e.g., "models/modelID/model.onnx")
 	// metadataKey is the object key for the metadata file (e.g., "models/modelID/metadata.json")

@@ -98,20 +98,9 @@ func (s *CCTVServiceImpl) Start(ctx context.Context) error {
 	s.ctx, s.cancel = context.WithCancel(ctx)
 	s.mu.Unlock()
 
-	// Start discovery services if available
-	if s.onvifDiscovery != nil {
-		if err := s.onvifDiscovery.Start(s.ctx); err != nil {
-			s.logger.Error("Failed to start ONVIF discovery", zap.Error(err))
-			return err
-		}
-	}
-
-	if s.usbDiscovery != nil {
-		if err := s.usbDiscovery.Start(s.ctx); err != nil {
-			s.logger.Error("Failed to start USB discovery", zap.Error(err))
-			return err
-		}
-	}
+	// NOTE: Discovery services are NOT started automatically.
+	// They will be started by DiscoverCameras() when triggered by state manager
+	// after camera capabilities are confirmed from VM.
 
 	// Subscribe to discovery events
 	if s.eventBus != nil {
@@ -244,8 +233,33 @@ func (s *CCTVServiceImpl) discoveredToCCTV(discovered *discovery.DiscoveredCamer
 }
 
 // DiscoverCameras triggers immediate camera discovery
+// This should only be called by state manager after camera capabilities are confirmed from VM
 func (s *CCTVServiceImpl) DiscoverCameras(ctx context.Context) error {
-	s.logger.Info("Initiating camera discovery")
+	s.logger.Info("Initiating camera discovery (triggered by state manager)")
+	
+	// Start discovery services if they're not already running
+	// This allows discovery to be triggered on-demand rather than automatically on startup
+	// We always start them here since they're not started automatically in Start()
+	if s.onvifDiscovery != nil {
+		if err := s.onvifDiscovery.Start(ctx); err != nil {
+			s.logger.Error("Failed to start ONVIF discovery", zap.Error(err))
+			return fmt.Errorf("failed to start ONVIF discovery: %w", err)
+		}
+		// Trigger immediate discovery
+		s.onvifDiscovery.TriggerDiscovery()
+	}
+
+	if s.usbDiscovery != nil {
+		if err := s.usbDiscovery.Start(ctx); err != nil {
+			s.logger.Error("Failed to start USB discovery", zap.Error(err))
+			return fmt.Errorf("failed to start USB discovery: %w", err)
+		}
+		// Trigger immediate discovery
+		s.usbDiscovery.TriggerDiscovery()
+	}
+	
+	// Wait a moment for discovery to complete
+	time.Sleep(500 * time.Millisecond)
 	
 	// Get all discovered cameras from discovery services
 	discoveredCameras, err := s.GetDiscoveredCameras(ctx)
@@ -542,8 +556,17 @@ func (s *CCTVServiceImpl) CaptureFrame(ctx context.Context, cameraID string) (*c
 		return nil, fmt.Errorf("no valid input source for camera %s", cameraID)
 	}
 
+	// Add timeout to frame capture to prevent hanging
+	// Use parent context if it has a deadline, otherwise add 10 second timeout
+	captureCtx := ctx
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		captureCtx, cancel = context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+	}
+
 	// Use FFmpeg wrapper to capture frame
-	frameData, err := s.ffmpeg.CaptureFrameJPEG(ctx, input, 85)
+	frameData, err := s.ffmpeg.CaptureFrameJPEG(captureCtx, input, 85)
 	if err != nil {
 		return nil, err
 	}

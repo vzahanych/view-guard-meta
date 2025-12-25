@@ -414,9 +414,51 @@ func (s *CCTVServiceImpl) metaToScreenshot(meta metastorage.ScreenshotMetadata) 
 
 // Placeholder implementations for methods that need more work
 
+// CaptureScreenshot captures a screenshot from a camera and saves it
+// This method captures a frame, stores it in object storage, saves metadata in meta-storage,
+// and publishes an event. The screenshot is initially unlabeled.
 func (s *CCTVServiceImpl) CaptureScreenshot(ctx context.Context, cameraID string, eventID string) (string, error) {
-	// TODO: Implement screenshot capture from camera stream
-	return "", fmt.Errorf("not implemented")
+	// Get camera to validate it exists
+	cam, err := s.GetCamera(ctx, cameraID)
+	if err != nil {
+		return "", fmt.Errorf("camera not found: %w", err)
+	}
+
+	// Capture frame from camera
+	frame, err := s.CaptureFrame(ctx, cameraID)
+	if err != nil {
+		return "", fmt.Errorf("failed to capture frame: %w", err)
+	}
+
+	// Create screenshot object (initially unlabeled)
+	screenshot := &cctvtypes.Screenshot{
+		ID:           uuid.New().String(),
+		CameraID:     cameraID,
+		Label:        "", // Unlabeled initially - user will label it later
+		CustomLabel:  "",
+		Description:  fmt.Sprintf("Screenshot captured from camera %s", cam.Name),
+		Metadata:     make(map[string]interface{}),
+		CreatedAt:    time.Now(),
+		UpdatedAt:    time.Now(),
+	}
+
+	// Add event ID to metadata if provided
+	if eventID != "" {
+		screenshot.Metadata["event_id"] = eventID
+	}
+
+	// Save screenshot (this handles object storage, meta-storage, and event publishing)
+	if err := s.SaveScreenshot(ctx, screenshot, frame.Data); err != nil {
+		return "", fmt.Errorf("failed to save screenshot: %w", err)
+	}
+
+	s.logger.Info("Screenshot captured and saved",
+		zap.String("screenshot_id", screenshot.ID),
+		zap.String("camera_id", cameraID),
+		zap.String("event_id", eventID),
+	)
+
+	return screenshot.ID, nil
 }
 
 func (s *CCTVServiceImpl) CaptureScreenshotWithLabel(ctx context.Context, cameraID string, label string, customLabel string, description string) (string, error) {

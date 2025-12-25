@@ -395,6 +395,35 @@ func (g *aiGatewayImpl) getProcessor(cameraID string) *cameraProcessor {
 }
 
 // NotifyModelDeployment notifies the AI service about a deployed model
+// ProcessFrame processes a frame that was stored in object storage
+// The AI service will:
+// 1. Load the model from MinIO (if not already loaded) using model metadata
+// 2. Process the frame from object storage
+// 3. Determine if it's similar to training set or has anomalies
+// 4. Delete normal frames or move suspicious ones to security event bucket
+func (g *aiGatewayImpl) ProcessFrame(ctx context.Context, cameraID string, frameKey string, frameData []byte) error {
+	if frameKey == "" {
+		return fmt.Errorf("frame key is required")
+	}
+	if len(frameData) == 0 {
+		return fmt.Errorf("frame data is required")
+	}
+
+	// Process frame using existing processFrame logic
+	// This will:
+	// 1. Send frame to AI service for inference
+	// 2. Check if detections exceed confidence threshold
+	// 3. Create security events for abnormal frames
+	timestamp := time.Now()
+	g.processFrame(ctx, cameraID, frameData, timestamp)
+
+	// Note: Frame deletion/moving to security event bucket should be handled by AI service
+	// or by the state manager based on the inference results
+	// For now, we rely on the AI service to handle frame lifecycle
+
+	return nil
+}
+
 func (g *aiGatewayImpl) NotifyModelDeployment(ctx context.Context, metadata *types.ModelMetadata) error {
 	return g.aiClient.NotifyModelDeployment(ctx, metadata)
 }

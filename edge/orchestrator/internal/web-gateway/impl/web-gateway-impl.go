@@ -191,6 +191,9 @@ func (g *WebGatewayImpl) setupRoutes() {
 		// Edge application state
 		api.GET("/state", g.handleGetState)
 
+		// Edge capabilities (received from VM)
+		api.GET("/capabilities", g.handleGetCapabilities)
+
 		// Camera endpoints (Step 1.9.5)
 		camerag := api.Group("/cameras")
 		{
@@ -205,6 +208,7 @@ func (g *WebGatewayImpl) setupRoutes() {
 			camerag.PUT("/:id", g.handleUpdateCamera)
 			camerag.DELETE("/:id", g.handleDeleteCamera)
 			camerag.POST("/:id/test", g.handleTestCamera)
+			camerag.POST("/:id/capture", g.handleCaptureScreenshot)
 			// Streaming endpoints (Step 1.9.2)
 			// camerag.GET("/:id/stream", g.handleMJPEGStream)
 			// camerag.GET("/:id/frame", g.handleSingleFrame)
@@ -242,6 +246,7 @@ func (g *WebGatewayImpl) setupRoutes() {
 		{
 			snapshotRequests.GET("", g.handleListSnapshotRequests)
 			snapshotRequests.GET("/:camera_id", g.handleGetSnapshotRequest)
+			snapshotRequests.POST("/:camera_id/ready", g.handleMarkScreenshotSetReady)
 		}
 
 		// Clip and snapshot endpoints (Step 1.9.3)

@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -45,6 +46,8 @@ const (
 	EventTypeCameraRegistered      eventbustypes.EventType = "camera.registered"
 	EventTypeCameraConnected       eventbustypes.EventType = "camera.connected"
 	EventTypeCameraDisconnected    eventbustypes.EventType = "camera.disconnected"
+	EventTypeSnapshotRequested     eventbustypes.EventType = "snapshot.requested"
+	EventTypeScreenshotSetReady    eventbustypes.EventType = "screenshot_set.ready"
 	EventTypeFrameReceived         eventbustypes.EventType = "video.frame_received"
 	EventTypeDetection             eventbustypes.EventType = "ai.detection"
 	EventTypeInference             eventbustypes.EventType = "ai.inference"
@@ -68,7 +71,12 @@ const (
 	EdgeStatusAuthenticated        EdgeStatus = "authenticated"
 	EdgeStatusCapabilitiesReceived EdgeStatus = "capabilities_received"
 	EdgeStatusCameraDiscovered     EdgeStatus = "camera_discovered"
-	EdgeStatusReady                EdgeStatus = "ready"
+	EdgeStatusCameraSynced         EdgeStatus = "camera_synced"
+	// Waiting for user to take and label snapshots for VM request
+	EdgeStatusWaitingForSnapshots  EdgeStatus = "waiting_for_camera_screenshots"
+	EdgeStatusScreenshotSetReady   EdgeStatus = "screenshot_set_ready"
+	EdgeStatusModelDeployed        EdgeStatus = "model_deployed"
+	EdgeStatusFrameProcessing       EdgeStatus = "frame_processing"
 	EdgeStatusError                EdgeStatus = "error"
 	EdgeStatusMetaStorageError     EdgeStatus = "meta_storage_error"
 	EdgeStatusObjectStorageError   EdgeStatus = "object_storage_error"
@@ -123,6 +131,11 @@ type StateManagerImpl struct {
 	// Note: Now stored in database, but kept in memory for fast access
 	pendingSnapshotRequests map[string]*types.PendingSnapshotRequest // cameraID -> request
 
+	// Frame processing state (for continuous monitoring when model is deployed)
+	frameProcessingInterval time.Duration // Interval between frame captures (default: 30s)
+	frameProcessingActive   map[string]context.CancelFunc // cameraID -> cancel function for frame processing
+	frameProcessingMu       sync.RWMutex                  // Mutex for frame processing state
+
 	// Current edge state
 	state EdgeState
 	mu    sync.RWMutex
@@ -165,6 +178,8 @@ func NewStateManagerImpl(bus eventbus.EventBus, log *zap.Logger) (*StateManagerI
 		syncInterval:            5 * time.Minute, // Default sync interval
 		syncTrigger:             make(chan struct{}, 1),
 		pendingSnapshotRequests: make(map[string]*types.PendingSnapshotRequest),
+		frameProcessingInterval: 30 * time.Second, // Default: 30 seconds between frames
+		frameProcessingActive:   make(map[string]context.CancelFunc),
 		ctx:                     ctx,
 		cancel:                  cancel,
 	}, nil
@@ -421,7 +436,7 @@ func (m *StateManagerImpl) updateStateForEvent(ev eventbustypes.Event) (EdgeStat
 			newState.Status = EdgeStatusHTTPSConn
 		}
 	case EventTypeHTTPSDisconnected:
-		if newState.Status == EdgeStatusHTTPSConn || newState.Status == EdgeStatusAuthenticated || newState.Status == EdgeStatusReady {
+		if newState.Status == EdgeStatusHTTPSConn || newState.Status == EdgeStatusAuthenticated || newState.Status == EdgeStatusScreenshotSetReady {
 			newState.Status = EdgeStatusWireGuardConn
 			newState.VMAuthenticated = false
 		}
@@ -440,6 +455,27 @@ func (m *StateManagerImpl) updateStateForEvent(ev eventbustypes.Event) (EdgeStat
 		if newState.Status == EdgeStatusCapabilitiesReceived {
 			newState.Status = EdgeStatusCameraDiscovered
 		}
+
+	// Snapshot request events (VM asks Edge/user for labeled screenshots)
+	case EventTypeSnapshotRequested:
+		// When VM requests labeled screenshots, we enter waiting_for_camera_screenshots
+		// (unless we're already in an error state)
+		if newState.Status != EdgeStatusError &&
+			newState.Status != EdgeStatusMetaStorageError &&
+			newState.Status != EdgeStatusObjectStorageError &&
+			newState.Status != EdgeStatusCCTVServiceError &&
+			newState.Status != EdgeStatusAIGatewayError &&
+			newState.Status != EdgeStatusVMGatewayError &&
+			newState.Status != EdgeStatusWebGatewayError {
+
+			newState.Status = EdgeStatusWaitingForSnapshots
+		}
+	case EventTypeScreenshotSetReady:
+		// When user marks screenshot set as ready, transition from waiting_for_camera_screenshots to screenshot_set_ready
+		if newState.Status == EdgeStatusWaitingForSnapshots {
+			newState.Status = EdgeStatusScreenshotSetReady
+		}
+
 	case EventTypeCameraRegistered:
 		if cameraID, ok := ev.Data["camera_id"].(string); ok {
 			m.logger.Info("Camera registered", zap.String("camera_id", cameraID))
@@ -488,13 +524,9 @@ func (m *StateManagerImpl) updateStateForEvent(ev eventbustypes.Event) (EdgeStat
 		}
 	}
 
-	// Update ready status if all conditions are met
-	if newState.Status == EdgeStatusAuthenticated && newState.NetworkConnected && newState.VMAuthenticated {
-		if newState.Status != EdgeStatusReady {
-			newState.Status = EdgeStatusReady
-			m.logger.Info("Edge appliance is ready for operations")
-		}
-	}
+	// Note: "ready" state has been removed as it was misleading.
+	// Edge operates in specific states: camera_synced, waiting_for_camera_screenshots, screenshot_set_ready, etc.
+	// Each state represents a specific operational phase.
 
 	// Persist state to meta-storage (use background context since we're in an event handler)
 	m.persistStateToStorage(context.Background(), newState)
@@ -506,6 +538,12 @@ func (m *StateManagerImpl) updateStateForEvent(ev eventbustypes.Event) (EdgeStat
 			zap.String("new_status", string(newState.Status)),
 			zap.String("event_type", string(ev.Type)),
 		)
+
+		// Stop frame processing if transitioning away from model_deployed or frame_processing
+		if (oldState.Status == EdgeStatusModelDeployed || oldState.Status == EdgeStatusFrameProcessing) &&
+			newState.Status != EdgeStatusModelDeployed && newState.Status != EdgeStatusFrameProcessing {
+			m.stopAllFrameProcessing()
+		}
 	}
 
 	m.state = newState
@@ -518,7 +556,7 @@ func (m *StateManagerImpl) executeWorkflow(ctx context.Context, ev eventbustypes
 	// Network workflow
 	case EventTypeWireGuardConnected:
 		m.logger.Info("WireGuard connected, waiting for HTTPS connection")
-		// Workflow: WireGuard -> HTTPS -> Auth -> Ready
+		// Workflow: WireGuard -> HTTPS -> Auth -> Capabilities -> Camera Discovery -> Camera Sync -> Screenshot Set Ready
 
 	case EventTypeHTTPSConnected:
 		m.logger.Info("HTTPS connected, initiating authentication")
@@ -538,6 +576,16 @@ func (m *StateManagerImpl) executeWorkflow(ctx context.Context, ev eventbustypes
 	case EventTypeCameraDiscovered:
 		m.logger.Info("Cameras discovered, updating state")
 		m.handleCameraDiscovered(ctx, ev)
+
+	// Snapshot request workflow (VM asks Edge/user for labeled screenshots)
+	case EventTypeSnapshotRequested:
+		m.logger.Info("Snapshot request received from VM, saving to meta-storage and updating state")
+		m.handleSnapshotRequested(ctx, ev)
+
+	case EventTypeScreenshotSetReady:
+		m.logger.Info("Screenshot set marked as ready by user")
+		m.handleScreenshotSetReady(ctx, ev)
+
 	case EventTypeCameraRegistered:
 		m.handleCameraRegistered(ctx, ev)
 	case EventTypeCameraConnected:
@@ -573,8 +621,12 @@ func (m *StateManagerImpl) executeWorkflow(ctx context.Context, ev eventbustypes
 
 	// General state-based workflows
 	switch state.Status {
-	case EdgeStatusReady:
-		m.executeReadyStateWorkflow(ctx, state)
+	case EdgeStatusScreenshotSetReady:
+		m.executeScreenshotSetReadyWorkflow(ctx, state)
+	case EdgeStatusModelDeployed:
+		m.executeModelDeployedWorkflow(ctx, state)
+	case EdgeStatusFrameProcessing:
+		m.executeFrameProcessingWorkflow(ctx, state)
 	case EdgeStatusError:
 		m.handleErrorState(ctx, state)
 	}
@@ -596,10 +648,10 @@ func (m *StateManagerImpl) initializeServicesAfterAuth(ctx context.Context) {
 		})
 	}
 
-	// Ensure AI gateway is ready
-	if m.aiGateway != nil {
-		m.logger.Debug("AI gateway available, ready for processing")
-	}
+		// Ensure AI gateway is available
+		if m.aiGateway != nil {
+			m.logger.Debug("AI gateway available for processing")
+		}
 }
 
 // handleCapabilitiesReceived handles capabilities received from VM
@@ -638,21 +690,376 @@ func (m *StateManagerImpl) handleCapabilitiesReceived(ctx context.Context, ev ev
 // handleCameraDiscovered handles camera discovery events
 func (m *StateManagerImpl) handleCameraDiscovered(ctx context.Context, ev eventbustypes.Event) {
 	cameraID, _ := ev.Data["camera_id"].(string)
-	m.logger.Info("Camera discovered, workflow: register if needed",
+	m.logger.Info("Camera discovered, workflow: sync with VM",
 		zap.String("camera_id", cameraID),
 	)
 
-	// Update state to camera_discovered if we're in capabilities_received state
+	// Check current state and trigger sync if we're in camera_discovered state
+	// (state was already updated to camera_discovered by updateState before this handler runs)
 	m.mu.Lock()
-	if m.state.Status == EdgeStatusCapabilitiesReceived {
-		m.state.Status = EdgeStatusCameraDiscovered
+	currentStatus := m.state.Status
+	m.mu.Unlock()
+
+	// If we're in camera_discovered state, sync cameras with VM
+	// This ensures we sync after transitioning to camera_discovered
+	if currentStatus == EdgeStatusCameraDiscovered {
+		m.logger.Info("State is camera_discovered, syncing cameras with VM")
+		m.syncCamerasWithVM(ctx)
+	} else {
+		m.logger.Debug("State is not camera_discovered, skipping sync",
+			zap.String("current_status", string(currentStatus)),
+		)
+	}
+}
+
+// handleSnapshotRequested handles snapshot capture requests from VM.
+// VM is effectively asking this Edge (and its user) to take labeled screenshots from a camera.
+// We persist this request in meta-storage (via state-mng helpers) and move state to
+// waiting_for_camera_screenshots so that UI can show pending actions.
+func (m *StateManagerImpl) handleSnapshotRequested(ctx context.Context, ev eventbustypes.Event) {
+	cameraID, _ := ev.Data["camera_id"].(string)
+	label, _ := ev.Data["label"].(string)
+	customLabel, _ := ev.Data["custom_label"].(string)
+
+	var count int32
+	if v, ok := ev.Data["count"].(int32); ok {
+		count = v
+	} else if v, ok := ev.Data["count"].(float64); ok {
+		count = int32(v)
+	}
+	if count <= 0 {
+		count = 1
+	}
+
+	m.logger.Info("Handling snapshot request from VM",
+		zap.String("camera_id", cameraID),
+		zap.String("label", label),
+		zap.String("custom_label", customLabel),
+		zap.Int32("count", count),
+	)
+
+	// Persist pending snapshot request metadata via state-manager helper
+	if err := m.SavePendingSnapshotRequest(ctx, cameraID, label, customLabel, count); err != nil {
+		m.logger.Error("Failed to save pending snapshot request",
+			zap.String("camera_id", cameraID),
+			zap.Error(err),
+		)
+		return
+	}
+
+	// Update state to waiting_for_camera_screenshots (unless we're already in an error state)
+	m.mu.Lock()
+	if m.state.Status != EdgeStatusError &&
+		m.state.Status != EdgeStatusMetaStorageError &&
+		m.state.Status != EdgeStatusObjectStorageError &&
+		m.state.Status != EdgeStatusCCTVServiceError &&
+		m.state.Status != EdgeStatusAIGatewayError &&
+		m.state.Status != EdgeStatusVMGatewayError &&
+		m.state.Status != EdgeStatusWebGatewayError {
+
+		m.state.Status = EdgeStatusWaitingForSnapshots
 		m.persistStateToStorage(ctx, m.state)
-		m.logger.Info("State updated to camera_discovered")
+		m.logger.Info("State updated to waiting_for_camera_screenshots")
+	}
+	m.mu.Unlock()
+}
+
+// handleScreenshotSetReady handles user marking screenshot set as ready
+func (m *StateManagerImpl) handleScreenshotSetReady(ctx context.Context, ev eventbustypes.Event) {
+	cameraID, _ := ev.Data["camera_id"].(string)
+	labeledCount, _ := ev.Data["labeled_count"].(int)
+	minRequired, _ := ev.Data["min_required"].(int32)
+
+	m.logger.Info("Screenshot set marked as ready by user",
+		zap.String("camera_id", cameraID),
+		zap.Int("labeled_count", labeledCount),
+		zap.Int32("min_required", minRequired),
+	)
+
+	// Update state to screenshot_set_ready
+	m.mu.Lock()
+	if m.state.Status == EdgeStatusWaitingForSnapshots {
+		m.state.Status = EdgeStatusScreenshotSetReady
+		m.persistStateToStorage(ctx, m.state)
+		m.logger.Info("State updated to screenshot_set_ready")
 	}
 	m.mu.Unlock()
 
-	// Workflow: Auto-register discovered cameras if configured
-	// This would interact with CCTV service to register the camera
+	// Sync screenshots to VM for model training
+	if cameraID != "" && m.vmGateway != nil && m.metaStorage != nil {
+		m.syncScreenshotsToVM(ctx, cameraID)
+	}
+
+	// Clear the pending snapshot request since user has completed it
+	if cameraID != "" {
+		if err := m.ClearPendingSnapshotRequest(ctx, cameraID); err != nil {
+			m.logger.Warn("Failed to clear pending snapshot request",
+				zap.String("camera_id", cameraID),
+				zap.Error(err),
+			)
+		} else {
+			m.logger.Info("Pending snapshot request cleared",
+				zap.String("camera_id", cameraID),
+			)
+		}
+	}
+}
+
+// syncScreenshotsToVM syncs labeled screenshots to VM for model training
+func (m *StateManagerImpl) syncScreenshotsToVM(ctx context.Context, cameraID string) {
+	m.logger.Info("Syncing labeled screenshots to VM for model training",
+		zap.String("camera_id", cameraID),
+	)
+
+	// Get all labeled screenshots for this camera from meta-storage
+	filters := map[string]interface{}{
+		"camera_id": cameraID,
+	}
+	screenshots, err := m.metaStorage.ListScreenshots(ctx, filters)
+	if err != nil {
+		m.logger.Error("Failed to list screenshots from meta-storage",
+			zap.String("camera_id", cameraID),
+			zap.Error(err),
+		)
+		return
+	}
+
+	// Filter to only labeled screenshots and fetch image data
+	labeledScreenshots := make([]*httpsclienttypes.ScreenshotInfo, 0)
+	for _, ss := range screenshots {
+		if ss.Label == "" {
+			continue // Skip unlabeled screenshots
+		}
+
+		// Convert to ScreenshotInfo format
+		screenshotInfo := &httpsclienttypes.ScreenshotInfo{
+			ScreenshotID: ss.ID,
+			CameraID:    ss.CameraID,
+			ObjectKey:   ss.ObjectKey, // Path to image in object storage
+			Label:       ss.Label,
+			CustomLabel: ss.CustomLabel,
+			Description: ss.Description,
+			CreatedAt:   ss.CreatedAt.Unix(),
+		}
+
+		// Add metadata if available
+		if ss.Metadata != nil {
+			screenshotInfo.Metadata = ss.Metadata
+		}
+
+		// Fetch image data from object storage
+		if ss.ObjectKey != "" && m.objectStorage != nil {
+			reader, err := m.objectStorage.LoadSnapshot(ctx, ss.ObjectKey)
+			if err != nil {
+				m.logger.Warn("Failed to load screenshot image from object storage",
+					zap.String("screenshot_id", ss.ID),
+					zap.String("object_key", ss.ObjectKey),
+					zap.Error(err),
+				)
+			} else {
+				// Read image data
+				imageData, err := io.ReadAll(reader)
+				reader.Close()
+				if err != nil {
+					m.logger.Warn("Failed to read screenshot image data",
+						zap.String("screenshot_id", ss.ID),
+						zap.Error(err),
+					)
+				} else {
+					// Encode as base64
+					screenshotInfo.ImageData = base64.StdEncoding.EncodeToString(imageData)
+					
+					// Determine image format from object key extension
+					ext := strings.ToLower(filepath.Ext(ss.ObjectKey))
+					switch ext {
+					case ".jpg", ".jpeg":
+						screenshotInfo.ImageFormat = "jpeg"
+					case ".png":
+						screenshotInfo.ImageFormat = "png"
+					case ".gif":
+						screenshotInfo.ImageFormat = "gif"
+					case ".webp":
+						screenshotInfo.ImageFormat = "webp"
+					default:
+						screenshotInfo.ImageFormat = "jpeg" // Default to JPEG
+					}
+				}
+			}
+		}
+
+		labeledScreenshots = append(labeledScreenshots, screenshotInfo)
+	}
+
+	if len(labeledScreenshots) == 0 {
+		m.logger.Warn("No labeled screenshots found for camera",
+			zap.String("camera_id", cameraID),
+		)
+		return
+	}
+
+	m.logger.Info("Prepared labeled screenshots for sync",
+		zap.String("camera_id", cameraID),
+		zap.Int("count", len(labeledScreenshots)),
+	)
+
+	// Get edge ID from state manager
+	edgeID := m.edgeID
+	if edgeID == "" {
+		m.logger.Warn("Edge ID not available, cannot sync screenshots")
+		return
+	}
+
+	// Create sync request
+	req := &httpsclienttypes.SyncScreenshotsRequest{
+		EdgeID:      edgeID,
+		CameraID:     cameraID,
+		Screenshots: labeledScreenshots,
+	}
+
+	// Call VM gateway to sync screenshots
+	callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	resp, err := m.vmGateway.SyncScreenshots(callCtx, req)
+	if err != nil {
+		m.logger.Error("Failed to sync screenshots to VM",
+			zap.String("camera_id", cameraID),
+			zap.Error(err),
+		)
+		// On error, set state to VM gateway error
+		m.mu.Lock()
+		m.state.Status = EdgeStatusVMGatewayError
+		m.persistStateToStorage(ctx, m.state)
+		m.mu.Unlock()
+		return
+	}
+
+	if !resp.Success {
+		m.logger.Error("VM rejected screenshot sync",
+			zap.String("camera_id", cameraID),
+			zap.String("error", resp.ErrorMessage),
+		)
+		// On error, set state to VM gateway error
+		m.mu.Lock()
+		m.state.Status = EdgeStatusVMGatewayError
+		m.persistStateToStorage(ctx, m.state)
+		m.mu.Unlock()
+		return
+	}
+
+	m.logger.Info("Screenshots synced to VM successfully",
+		zap.String("camera_id", cameraID),
+		zap.Int("count", len(labeledScreenshots)),
+		zap.String("message", resp.Message),
+	)
+}
+
+// syncCamerasWithVM syncs discovered cameras with VM and enables cameras that VM decides to enable
+func (m *StateManagerImpl) syncCamerasWithVM(ctx context.Context) {
+	m.logger.Info("Syncing cameras with VM")
+
+	// Get all discovered cameras
+	cameras, err := m.cctvService.GetDiscoveredCameras(ctx)
+	if err != nil {
+		m.logger.Error("Failed to get discovered cameras", zap.Error(err))
+		return
+	}
+
+	if len(cameras) == 0 {
+		m.logger.Info("No cameras to sync")
+		return
+	}
+
+	// Convert cameras to sync request format
+	cameraInfos := make([]*httpsclienttypes.CameraInfo, 0, len(cameras))
+	for _, cam := range cameras {
+		// Determine source based on camera type
+		source := ""
+		if cam.DevicePath != "" {
+			source = cam.DevicePath
+		} else if cam.ONVIFEndpoint != "" {
+			source = cam.ONVIFEndpoint
+		} else if cam.IPAddress != "" {
+			source = cam.IPAddress
+		}
+
+		cameraInfos = append(cameraInfos, &httpsclienttypes.CameraInfo{
+			CameraID: cam.ID,
+			Name:     cam.Name,
+			Type:     string(cam.Type),
+			Source:   source,
+			Enabled:  cam.Enabled,
+		})
+	}
+
+	// Get edge ID from config or state
+	edgeID := m.edgeID
+	if edgeID == "" {
+		edgeID = "edge-dev-001" // fallback
+	}
+
+	// Sync cameras with VM
+	syncReq := &httpsclienttypes.SyncCamerasRequest{
+		EdgeID:  edgeID,
+		Cameras: cameraInfos,
+	}
+
+	syncResp, err := m.vmGateway.SyncCameras(ctx, syncReq)
+	if err != nil {
+		m.logger.Error("Failed to sync cameras with VM", zap.Error(err))
+		// On error, set state to error (not ready)
+		m.mu.Lock()
+		if m.state.Status == EdgeStatusCameraDiscovered {
+			m.state.Status = EdgeStatusVMGatewayError
+			m.persistStateToStorage(ctx, m.state)
+			m.logger.Error("State updated to vm_gateway_error due to camera sync failure")
+		}
+		m.mu.Unlock()
+		return
+	}
+
+	if !syncResp.Success {
+		m.logger.Error("Camera sync failed", zap.String("error", syncResp.ErrorMessage))
+		// On sync failure, set state to error (not ready)
+		m.mu.Lock()
+		if m.state.Status == EdgeStatusCameraDiscovered {
+			m.state.Status = EdgeStatusVMGatewayError
+			m.persistStateToStorage(ctx, m.state)
+			m.logger.Error("State updated to vm_gateway_error due to camera sync failure")
+		}
+		m.mu.Unlock()
+		return
+	}
+
+	m.logger.Info("Cameras synced with VM successfully",
+		zap.Int("total_cameras", len(cameras)),
+		zap.Int("enabled_cameras", len(syncResp.EnabledCameras)),
+	)
+
+	// Enable cameras that VM decided to enable
+	for _, enabledCam := range syncResp.EnabledCameras {
+		if enabledCam.Enabled {
+			if err := m.cctvService.EnableCamera(ctx, enabledCam.CameraID); err != nil {
+				m.logger.Warn("Failed to enable camera",
+					zap.String("camera_id", enabledCam.CameraID),
+					zap.Error(err),
+				)
+			} else {
+				m.logger.Info("Camera enabled by VM decision",
+					zap.String("camera_id", enabledCam.CameraID),
+				)
+			}
+		}
+	}
+
+	// Update state to camera_synced
+	m.mu.Lock()
+	if m.state.Status == EdgeStatusCameraDiscovered {
+		m.state.Status = EdgeStatusCameraSynced
+		m.persistStateToStorage(ctx, m.state)
+		m.logger.Info("State updated to camera_synced")
+	}
+	m.mu.Unlock()
 }
 
 // handleCameraRegistered handles camera registration events
@@ -750,17 +1157,37 @@ func (m *StateManagerImpl) handleClipRecorded(ctx context.Context, ev eventbusty
 
 // handleModelDeployed handles model deployment events from VM → Edge API
 func (m *StateManagerImpl) handleModelDeployed(ctx context.Context, ev eventbustypes.Event) {
-	if m.aiGateway == nil {
-		m.logger.Warn("AI gateway not available, cannot notify about model deployment")
-		return
-	}
-
 	// Extract event data
 	modelID, ok := ev.Data["model_id"].(string)
 	if !ok || modelID == "" {
 		m.logger.Warn("Model deployment event missing model_id")
 		return
 	}
+
+	m.logger.Info("Handling model deployment event",
+		zap.String("model_id", modelID),
+	)
+
+	// Transition state from screenshot_set_ready to model_deployed
+	m.mu.Lock()
+	currentStatus := m.state.Status
+	if currentStatus == EdgeStatusScreenshotSetReady {
+		m.state.Status = EdgeStatusModelDeployed
+		m.state.LastUpdated = time.Now()
+		m.logger.Info("State transition: screenshot_set_ready → model_deployed",
+			zap.String("model_id", modelID),
+		)
+	} else {
+		m.logger.Debug("Model deployed but state is not screenshot_set_ready, not transitioning",
+			zap.String("current_status", string(currentStatus)),
+			zap.String("model_id", modelID),
+		)
+	}
+	newState := m.state
+	m.mu.Unlock()
+
+	// Persist state update
+	m.persistStateToStorage(ctx, newState)
 
 	// Build ModelMetadata from event data
 	aiMetadata := &aigwtypes.ModelMetadata{
@@ -788,14 +1215,258 @@ func (m *StateManagerImpl) handleModelDeployed(ctx context.Context, ev eventbust
 	}
 
 	// Notify AI gateway about model deployment
-	if err := m.aiGateway.NotifyModelDeployment(ctx, aiMetadata); err != nil {
-		m.logger.Warn("Failed to notify AI gateway about model deployment",
-			zap.String("model_id", modelID),
+	if m.aiGateway != nil {
+		if err := m.aiGateway.NotifyModelDeployment(ctx, aiMetadata); err != nil {
+			m.logger.Warn("Failed to notify AI gateway about model deployment",
+				zap.String("model_id", modelID),
+				zap.Error(err),
+			)
+		} else {
+			m.logger.Info("AI gateway notified about model deployment",
+				zap.String("model_id", modelID),
+			)
+		}
+	} else {
+		m.logger.Warn("AI gateway not available, cannot notify about model deployment")
+	}
+}
+
+// executeFrameProcessingWorkflow executes workflows when frame processing is active
+// This is the final operational state where Edge is actively monitoring cameras
+func (m *StateManagerImpl) executeFrameProcessingWorkflow(ctx context.Context, state EdgeState) {
+	m.logger.Debug("Edge in frame_processing state - actively monitoring cameras",
+		zap.String("status", string(state.Status)),
+	)
+	// Frame processing is active, no additional workflow needed
+	// The frame processing loops are already running
+}
+
+// executeModelDeployedWorkflow executes workflows when model is deployed
+// This starts continuous frame processing for all enabled cameras
+func (m *StateManagerImpl) executeModelDeployedWorkflow(ctx context.Context, state EdgeState) {
+	m.logger.Info("Starting continuous frame processing for model_deployed state")
+
+	// Get all enabled cameras
+	if m.cctvService == nil {
+		m.logger.Warn("CCTV service not available, cannot start frame processing")
+		return
+	}
+
+	cameras, err := m.cctvService.ListCameras(ctx, true) // enabledOnly = true
+	if err != nil {
+		m.logger.Error("Failed to list enabled cameras for frame processing",
 			zap.Error(err),
 		)
+		return
+	}
+
+	if len(cameras) == 0 {
+		m.logger.Info("No enabled cameras found, frame processing not started")
+		return
+	}
+
+	// Start frame processing for each enabled camera
+	startedCount := 0
+	for _, camera := range cameras {
+		if err := m.startFrameProcessingForCamera(ctx, camera.ID); err == nil {
+			startedCount++
+		}
+	}
+
+	if startedCount > 0 {
+		// Transition to frame_processing state when frame processing successfully starts
+		m.mu.Lock()
+		if m.state.Status == EdgeStatusModelDeployed {
+			m.state.Status = EdgeStatusFrameProcessing
+			m.state.LastUpdated = time.Now()
+			m.logger.Info("State transition: model_deployed → frame_processing",
+				zap.Int("cameras_processing", startedCount),
+			)
+			newState := m.state
+			m.mu.Unlock()
+
+			// Persist state update
+			m.persistStateToStorage(ctx, newState)
+		} else {
+			m.mu.Unlock()
+		}
+
+		m.logger.Info("Frame processing started for all enabled cameras",
+			zap.Int("camera_count", startedCount),
+			zap.Duration("interval", m.frameProcessingInterval),
+		)
 	} else {
-		m.logger.Info("AI gateway notified about model deployment",
-			zap.String("model_id", modelID),
+		m.logger.Warn("Failed to start frame processing for any cameras")
+	}
+}
+
+// startFrameProcessingForCamera starts periodic frame capture and processing for a camera
+// Returns error if frame processing cannot be started
+func (m *StateManagerImpl) startFrameProcessingForCamera(ctx context.Context, cameraID string) error {
+	m.frameProcessingMu.Lock()
+	defer m.frameProcessingMu.Unlock()
+
+	// Check if already processing for this camera
+	if _, exists := m.frameProcessingActive[cameraID]; exists {
+		m.logger.Debug("Frame processing already active for camera",
+			zap.String("camera_id", cameraID),
+		)
+		return nil // Already processing, not an error
+	}
+
+	// Verify camera exists and is enabled
+	if m.cctvService == nil {
+		return fmt.Errorf("CCTV service not available")
+	}
+
+	camera, err := m.cctvService.GetCamera(ctx, cameraID)
+	if err != nil {
+		return fmt.Errorf("failed to get camera: %w", err)
+	}
+
+	if !camera.Enabled {
+		return fmt.Errorf("camera is not enabled")
+	}
+
+	// Create cancel context for this camera's frame processing
+	frameCtx, cancel := context.WithCancel(ctx)
+	m.frameProcessingActive[cameraID] = cancel
+
+	// Start frame processing goroutine
+	m.wg.Add(1)
+	go m.frameProcessingLoop(frameCtx, cameraID)
+
+	m.logger.Info("Started frame processing for camera",
+		zap.String("camera_id", cameraID),
+		zap.Duration("interval", m.frameProcessingInterval),
+	)
+
+	return nil
+}
+
+// stopFrameProcessingForCamera stops frame processing for a camera
+func (m *StateManagerImpl) stopFrameProcessingForCamera(cameraID string) {
+	m.frameProcessingMu.Lock()
+	defer m.frameProcessingMu.Unlock()
+
+	cancel, exists := m.frameProcessingActive[cameraID]
+	if !exists {
+		return
+	}
+
+	cancel()
+	delete(m.frameProcessingActive, cameraID)
+
+	m.logger.Info("Stopped frame processing for camera",
+		zap.String("camera_id", cameraID),
+	)
+}
+
+// stopAllFrameProcessing stops frame processing for all cameras
+func (m *StateManagerImpl) stopAllFrameProcessing() {
+	m.frameProcessingMu.Lock()
+	defer m.frameProcessingMu.Unlock()
+
+	for cameraID, cancel := range m.frameProcessingActive {
+		cancel()
+		m.logger.Info("Stopped frame processing for camera",
+			zap.String("camera_id", cameraID),
+		)
+	}
+
+	// Clear the map
+	m.frameProcessingActive = make(map[string]context.CancelFunc)
+
+	m.logger.Info("Stopped frame processing for all cameras")
+}
+
+// frameProcessingLoop continuously captures frames from a camera and processes them
+func (m *StateManagerImpl) frameProcessingLoop(ctx context.Context, cameraID string) {
+	defer m.wg.Done()
+
+	ticker := time.NewTicker(m.frameProcessingInterval)
+	defer ticker.Stop()
+
+	m.logger.Info("Frame processing loop started",
+		zap.String("camera_id", cameraID),
+		zap.Duration("interval", m.frameProcessingInterval),
+	)
+
+	// Process first frame immediately
+	m.processFrameForCamera(ctx, cameraID)
+
+	// Then process frames at regular intervals
+	for {
+		select {
+		case <-ctx.Done():
+			m.logger.Info("Frame processing loop stopped",
+				zap.String("camera_id", cameraID),
+			)
+			return
+		case <-ticker.C:
+			m.processFrameForCamera(ctx, cameraID)
+		}
+	}
+}
+
+// processFrameForCamera captures a frame, stores it in object storage, and sends to AI gateway
+func (m *StateManagerImpl) processFrameForCamera(ctx context.Context, cameraID string) {
+	if m.cctvService == nil {
+		return
+	}
+
+	// Capture frame from camera
+	frame, err := m.cctvService.CaptureFrame(ctx, cameraID)
+	if err != nil {
+		m.logger.Warn("Failed to capture frame from camera",
+			zap.String("camera_id", cameraID),
+			zap.Error(err),
+		)
+		return
+	}
+
+	// Store frame in object storage (frames bucket)
+	frameID := fmt.Sprintf("frame-%s-%d", cameraID, time.Now().Unix())
+	frameKey := fmt.Sprintf("frames/%s/%s/%s.jpg", cameraID, time.Now().Format("2006-01-02"), frameID)
+
+	if m.objectStorage != nil {
+		// Store frame image data
+		err = m.objectStorage.StoreFrame(ctx, frameKey, frame.Data)
+		if err != nil {
+			m.logger.Warn("Failed to store frame in object storage",
+				zap.String("camera_id", cameraID),
+				zap.String("frame_key", frameKey),
+				zap.Error(err),
+			)
+			return
+		}
+
+		m.logger.Debug("Frame stored in object storage",
+			zap.String("camera_id", cameraID),
+			zap.String("frame_key", frameKey),
+		)
+	}
+
+	// Send frame to AI gateway for processing
+	if m.aiGateway != nil {
+		// Use AI gateway to process the frame
+		// The AI gateway will:
+		// 1. Load the model from MinIO (if not already loaded)
+		// 2. Process the frame
+		// 3. Determine if it's similar to training set or has anomalies
+		// 4. Delete normal frames or move suspicious ones to security event bucket
+		err = m.aiGateway.ProcessFrame(ctx, cameraID, frameKey, frame.Data)
+		if err != nil {
+			m.logger.Warn("Failed to process frame with AI gateway",
+				zap.String("camera_id", cameraID),
+				zap.String("frame_key", frameKey),
+				zap.Error(err),
+			)
+		}
+	} else {
+		m.logger.Debug("AI gateway not available, frame stored but not processed",
+			zap.String("camera_id", cameraID),
+			zap.String("frame_key", frameKey),
 		)
 	}
 }
@@ -823,13 +1494,11 @@ func (m *StateManagerImpl) handleScreenshotSaved(ctx context.Context, ev eventbu
 	}
 }
 
-// executeReadyStateWorkflow executes workflows when edge is in ready state
-func (m *StateManagerImpl) executeReadyStateWorkflow(ctx context.Context, state EdgeState) {
-	// Continuous monitoring and coordination in ready state
-	// This runs periodically to ensure all services are coordinated
-
-	// Example: Monitor camera health, AI processing status, storage usage
-	m.logger.Debug("Edge in ready state, monitoring services")
+// executeScreenshotSetReadyWorkflow executes workflows when screenshot set is ready
+// This syncs screenshots and their labels to VM for model training
+func (m *StateManagerImpl) executeScreenshotSetReadyWorkflow(ctx context.Context, state EdgeState) {
+	m.logger.Debug("Edge in screenshot_set_ready state")
+	// Screenshot sync is handled in handleScreenshotSetReady when the event is received
 }
 
 // initiateWireGuardConnection initiates WireGuard connection in production mode

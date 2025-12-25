@@ -307,6 +307,26 @@ func (g *VmGatewayHttpImpl) SyncCapabilities(ctx context.Context, req *httpsclie
 	return g.httpsClientService.SyncCapabilities(ctx, req)
 }
 
+// SyncCameras syncs discovered cameras to the VM. VM decides which cameras should be enabled.
+func (g *VmGatewayHttpImpl) SyncCameras(ctx context.Context, req *httpsclienttypes.SyncCamerasRequest) (*httpsclienttypes.SyncCamerasResponse, error) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	if g.httpsClientService == nil {
+		return nil, fmt.Errorf("HTTPS client not initialized")
+	}
+	return g.httpsClientService.SyncCameras(ctx, req)
+}
+
+// SyncScreenshots syncs labeled screenshots to the VM for model training.
+func (g *VmGatewayHttpImpl) SyncScreenshots(ctx context.Context, req *httpsclienttypes.SyncScreenshotsRequest) (*httpsclienttypes.SyncScreenshotsResponse, error) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	if g.httpsClientService == nil {
+		return nil, fmt.Errorf("HTTPS client not initialized")
+	}
+	return g.httpsClientService.SyncScreenshots(ctx, req)
+}
+
 // ReportDeploymentStatus reports deployment status to the VM
 func (g *VmGatewayHttpImpl) ReportDeploymentStatus(ctx context.Context, deploymentID string, status string, errorMessage *string, modelPath *string) error {
 	g.mu.RLock()

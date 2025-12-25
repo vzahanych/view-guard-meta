@@ -1,6 +1,7 @@
 package impl
 
 import (
+	"fmt"
 	"net/http"
 	"time"
 
@@ -8,6 +9,7 @@ import (
 	evtbusstypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/event-bus/types"
 	cctvtypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/iot/cctv/types"
 	metastorage "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/meta-storage"
+	"go.uber.org/zap"
 )
 
 // handleListCameras handles listing all cameras
@@ -511,4 +513,65 @@ func (g *WebGatewayImpl) cameraToJSON(cam *cctvtypes.Camera) gin.H {
 	}
 }
 
+// handleCaptureScreenshot handles user request to capture a screenshot from a camera
+// Web gateway calls CCTV service which handles all storage and security.
+// Web gateway only reads results from meta-storage to return to user.
+func (g *WebGatewayImpl) handleCaptureScreenshot(c *gin.Context) {
+	cameraID := c.Param("id")
+	if cameraID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Camera ID is required",
+		})
+		return
+	}
 
+	if g.cctvService == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error": "CCTV service not available",
+		})
+		return
+	}
+
+	ctx := c.Request.Context()
+
+	// Call CCTV service to capture screenshot
+	// CCTV service handles: frame capture, object storage, meta-storage, and event publishing
+	// This is the security pattern - web gateway cannot tamper with screenshots
+	screenshotID, err := g.cctvService.CaptureScreenshot(ctx, cameraID, "")
+	if err != nil {
+		g.logger.Error(
+			"Failed to capture screenshot",
+			zap.Error(err),
+			zap.String("camera_id", cameraID),
+		)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": fmt.Sprintf("Failed to capture screenshot: %v", err),
+		})
+		return
+	}
+
+	// Read screenshot metadata from meta-storage to return to user
+	// Web gateway only reads - it never writes storage directly
+	if g.metaStorage != nil {
+		screenshotMeta, found := g.metaStorage.GetScreenshot(ctx, screenshotID)
+		if found {
+			c.JSON(http.StatusOK, gin.H{
+				"success":       true,
+				"id":            screenshotMeta.ID,
+				"camera_id":     screenshotMeta.CameraID,
+				"object_key":    screenshotMeta.ObjectKey,
+				"thumbnail_key": screenshotMeta.ThumbnailKey,
+				"label":         screenshotMeta.Label,
+				"message":       "Screenshot captured successfully. Please label it via PUT /api/screenshots/:id",
+			})
+			return
+		}
+	}
+
+	// Fallback if metadata not found (shouldn't happen, but handle gracefully)
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"id":      screenshotID,
+		"message": "Screenshot captured successfully. Please label it via PUT /api/screenshots/:id",
+	})
+}

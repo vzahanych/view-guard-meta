@@ -71,6 +71,12 @@ type VMGateway interface {
 	// SyncCapabilities syncs camera capabilities to the VM.
 	SyncCapabilities(ctx context.Context, req *httpsclienttypes.SyncCapabilitiesRequest) (*httpsclienttypes.SyncCapabilitiesResponse, error)
 
+	// SyncCameras syncs discovered cameras to the VM. VM decides which cameras should be enabled.
+	SyncCameras(ctx context.Context, req *httpsclienttypes.SyncCamerasRequest) (*httpsclienttypes.SyncCamerasResponse, error)
+
+	// SyncScreenshots syncs labeled screenshots to the VM for model training.
+	SyncScreenshots(ctx context.Context, req *httpsclienttypes.SyncScreenshotsRequest) (*httpsclienttypes.SyncScreenshotsResponse, error)
+
 	// ReportDeploymentStatus reports model deployment status to the VM.
 	ReportDeploymentStatus(ctx context.Context, deploymentID string, status string, errorMessage *string, modelPath *string) error
 

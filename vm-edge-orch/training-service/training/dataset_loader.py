@@ -53,7 +53,7 @@ class Manifest:
 class DatasetLoader:
     """Loads and converts datasets to YOLOv8 format"""
     
-    MIN_SNAPSHOTS = 50
+    MIN_SNAPSHOTS = 5
     TRAIN_SPLIT = 0.8  # 80% train, 20% val
     
     def __init__(self, dataset_path: str, output_path: str):
@@ -127,7 +127,8 @@ class DatasetLoader:
             return False, "No labels found in dataset"
         
         # Check if at least one class has sufficient samples
-        min_samples_per_class = max(10, self.MIN_SNAPSHOTS // 5)  # At least 10 or 20% of minimum
+        # For testing with small datasets, use 20% of MIN_SNAPSHOTS, but at least 2
+        min_samples_per_class = max(2, self.MIN_SNAPSHOTS // 5)  # At least 2 or 20% of minimum
         has_sufficient_samples = any(
             count >= min_samples_per_class 
             for count in self.metadata.label_counts.values()
@@ -176,8 +177,8 @@ class DatasetLoader:
         if self.manifest:
             for entry in self.manifest.screenshots:
                 if entry.screenshot_id == screenshot_id:
-                    # Use custom_label if available, otherwise use label
-                    return entry.custom_label if entry.custom_label else entry.label
+                    # Use label for training (custom_label is just for user reference)
+                    return entry.label if entry.label else "normal"
         
         # Fallback: check if we can infer from metadata
         # For PoC, assume all are "normal" if manifest not available

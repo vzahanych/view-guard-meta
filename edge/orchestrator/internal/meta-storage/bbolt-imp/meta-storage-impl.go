@@ -581,8 +581,16 @@ func (s *BboltMetaStorage) ListScreenshots(ctx context.Context, filters map[stri
 				if cameraID, ok := filters["camera_id"].(string); ok && screenshot.CameraID != cameraID {
 					return nil
 				}
-				if label, ok := filters["label"].(string); ok && screenshot.Label != label {
-					return nil
+				// Handle unlabeled filter (screenshots with empty label)
+				if unlabeledOnly, ok := filters["unlabeled_only"].(bool); ok && unlabeledOnly {
+					if screenshot.Label != "" {
+						return nil
+					}
+				} else if label, ok := filters["label"].(string); ok {
+					// If label filter is provided and not unlabeled_only, match exact label
+					if screenshot.Label != label {
+						return nil
+					}
 				}
 				if customLabel, ok := filters["custom_label"].(string); ok && screenshot.CustomLabel != customLabel {
 					return nil
