@@ -20,6 +20,7 @@ type CameraFilters = types.CameraFilters
 type ScreenshotMetadata = types.ScreenshotMetadata
 type ClipMetadata = types.ClipMetadata
 
+//go:generate go run go.uber.org/mock/mockgen -source=$GOFILE -destination=mocks/mock_meta_storage.go -package=mocks
 // MetaDataStore defines operations for managing metadata about stored objects
 type MetaDataStore interface {
 	// Storage entry metadata (clips and snapshots)

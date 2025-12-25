@@ -16,6 +16,8 @@ import (
 //
 // This service handles the actual object storage operations, while metadata about these objects
 // is managed by MetaDataStore in the meta-storage package.
+
+//go:generate go run go.uber.org/mock/mockgen -source=$GOFILE -destination=mocks/mock_object_storage.go -package=mocks
 type ObjectStorageService interface {
 	// Lifecycle hooks
 	Start(ctx context.Context) error

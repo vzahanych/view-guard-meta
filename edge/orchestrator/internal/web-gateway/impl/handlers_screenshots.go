@@ -273,7 +273,6 @@ func (g *WebGatewayImpl) handleSaveScreenshot(c *gin.Context) {
 		CustomLabel string                 `json:"custom_label,omitempty"`
 		Description string                 `json:"description,omitempty"`
 		Metadata    map[string]interface{} `json:"metadata,omitempty"`
-		ImageData   string                 `json:"image_data,omitempty"`
 		CreatedBy   string                 `json:"created_by,omitempty"`
 	}
 
@@ -291,45 +290,28 @@ func (g *WebGatewayImpl) handleSaveScreenshot(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
-	var imageData []byte
-	var err error
 
-	if req.ImageData != "" {
-		imageData, err = decodeBase64Image(req.ImageData)
-		if err != nil {
-			g.logger.Error(
-				"Invalid screenshot image data",
-				zap.Error(err),
-				zap.String("camera_id", req.CameraID),
-				zap.String("operation", "create"),
-			)
-			c.JSON(http.StatusBadRequest, gin.H{
-				"error": fmt.Sprintf("Invalid image data: %v", err),
-			})
-			return
-		}
-	} else {
-		if g.cctvService == nil {
-			c.JSON(http.StatusServiceUnavailable, gin.H{
-				"error": "CCTV service not available for capturing screenshots",
-			})
-			return
-		}
-
-		frame, err := g.cctvService.CaptureFrame(ctx, req.CameraID)
-		if err != nil {
-			g.logger.Error(
-				"Failed to capture frame from camera",
-				zap.Error(err),
-				zap.String("camera_id", req.CameraID),
-			)
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"error": fmt.Sprintf("Failed to capture screenshot from camera: %v", err),
-			})
-			return
-		}
-		imageData = frame.Data
+	// Screenshots must be captured via CCTV service to ensure provenance
+	if g.cctvService == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error": "CCTV service not available for capturing screenshots",
+		})
+		return
 	}
+
+	frame, err := g.cctvService.CaptureFrame(ctx, req.CameraID)
+	if err != nil {
+		g.logger.Error(
+			"Failed to capture frame from camera",
+			zap.Error(err),
+			zap.String("camera_id", req.CameraID),
+		)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": fmt.Sprintf("Failed to capture screenshot from camera: %v", err),
+		})
+		return
+	}
+	imageData := frame.Data
 
 	screenshotID := uuid.New().String()
 	objectKey := g.objectStorage.GenerateSnapshotKey(req.CameraID, false)

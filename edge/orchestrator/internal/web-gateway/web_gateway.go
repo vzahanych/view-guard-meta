@@ -23,6 +23,8 @@ import (
 //   - Unified lifecycle management
 //   - Coordinated startup and shutdown
 //   - All API endpoints for the Edge UI
+
+//go:generate go run go.uber.org/mock/mockgen -source=$GOFILE -destination=mocks/mock_web_gateway.go -package=mocks
 type WebGateway interface {
 	// Start starts the web gateway server.
 	// This method should be called after all dependencies are configured.

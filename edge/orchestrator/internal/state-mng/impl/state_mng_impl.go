@@ -135,6 +135,7 @@ type StateManagerImpl struct {
 	frameProcessingInterval time.Duration // Interval between frame captures (default: 30s)
 	frameProcessingActive   map[string]context.CancelFunc // cameraID -> cancel function for frame processing
 	frameProcessingMu       sync.RWMutex                  // Mutex for frame processing state
+	frameProcessingWg       sync.WaitGroup                // WaitGroup specifically for frame processing goroutines
 
 	// Current edge state
 	state EdgeState
@@ -343,10 +344,17 @@ func (m *StateManagerImpl) Start(ctx context.Context) error {
 }
 
 // Stop stops processing events and waits for in-flight tasks to complete.
+// It ensures proper shutdown ordering by stopping frame processing before canceling the main context.
 func (m *StateManagerImpl) Stop(ctx context.Context) error {
 	var stopErr error
 	m.stopOnce.Do(func() {
 		m.logger.Info("Stopping edge state manager")
+
+		// Stop frame processing first to ensure proper shutdown ordering
+		// This waits for all frame processing goroutines to finish before proceeding
+		m.stopAllFrameProcessing()
+
+		// Now cancel the main context to signal other goroutines to stop
 		m.cancel()
 
 		done := make(chan struct{})
@@ -1302,19 +1310,21 @@ func (m *StateManagerImpl) executeModelDeployedWorkflow(ctx context.Context, sta
 
 // startFrameProcessingForCamera starts periodic frame capture and processing for a camera
 // Returns error if frame processing cannot be started
+// This function is thread-safe and prevents duplicate goroutines for the same camera
 func (m *StateManagerImpl) startFrameProcessingForCamera(ctx context.Context, cameraID string) error {
-	m.frameProcessingMu.Lock()
-	defer m.frameProcessingMu.Unlock()
+	// First, do a quick check with read lock to see if already processing
+	m.frameProcessingMu.RLock()
+	_, exists := m.frameProcessingActive[cameraID]
+	m.frameProcessingMu.RUnlock()
 
-	// Check if already processing for this camera
-	if _, exists := m.frameProcessingActive[cameraID]; exists {
+	if exists {
 		m.logger.Debug("Frame processing already active for camera",
 			zap.String("camera_id", cameraID),
 		)
 		return nil // Already processing, not an error
 	}
 
-	// Verify camera exists and is enabled
+	// Verify camera exists and is enabled (do this outside the lock to avoid blocking)
 	if m.cctvService == nil {
 		return fmt.Errorf("CCTV service not available")
 	}
@@ -1328,12 +1338,26 @@ func (m *StateManagerImpl) startFrameProcessingForCamera(ctx context.Context, ca
 		return fmt.Errorf("camera is not enabled")
 	}
 
+	// Now acquire write lock and re-check existence to prevent race condition
+	// Another goroutine might have started processing while we were validating
+	m.frameProcessingMu.Lock()
+	defer m.frameProcessingMu.Unlock()
+
+	// Re-check existence inside critical section to prevent duplicate goroutines
+	if _, exists := m.frameProcessingActive[cameraID]; exists {
+		m.logger.Debug("Frame processing already active for camera (re-checked after validation)",
+			zap.String("camera_id", cameraID),
+		)
+		return nil // Another goroutine started it, not an error
+	}
+
 	// Create cancel context for this camera's frame processing
 	frameCtx, cancel := context.WithCancel(ctx)
 	m.frameProcessingActive[cameraID] = cancel
 
 	// Start frame processing goroutine
 	m.wg.Add(1)
+	m.frameProcessingWg.Add(1)
 	go m.frameProcessingLoop(frameCtx, cameraID)
 
 	m.logger.Info("Started frame processing for camera",
@@ -1363,10 +1387,14 @@ func (m *StateManagerImpl) stopFrameProcessingForCamera(cameraID string) {
 }
 
 // stopAllFrameProcessing stops frame processing for all cameras
+// It waits for all frame processing goroutines to finish before clearing the map
 func (m *StateManagerImpl) stopAllFrameProcessing() {
 	m.frameProcessingMu.Lock()
-	defer m.frameProcessingMu.Unlock()
 
+	// Count how many goroutines we're stopping
+	activeCount := len(m.frameProcessingActive)
+	
+	// Cancel all contexts to signal goroutines to stop
 	for cameraID, cancel := range m.frameProcessingActive {
 		cancel()
 		m.logger.Info("Stopped frame processing for camera",
@@ -1374,15 +1402,51 @@ func (m *StateManagerImpl) stopAllFrameProcessing() {
 		)
 	}
 
-	// Clear the map
+	// Unlock mutex to allow goroutines to finish and call frameProcessingWg.Done()
+	m.frameProcessingMu.Unlock()
+
+	// Wait for frame processing goroutines to finish with a timeout
+	// Frame processing loops should exit quickly after context cancellation
+	if activeCount > 0 {
+		done := make(chan struct{})
+		go func() {
+			m.frameProcessingWg.Wait()
+			close(done)
+		}()
+
+		// Wait with timeout (max 10 seconds) for goroutines to finish
+		// Frame processing should exit quickly after context cancellation
+		timeout := 10 * time.Second
+		select {
+		case <-done:
+			// All frame processing goroutines have finished
+			m.logger.Debug("All frame processing goroutines finished",
+				zap.Int("stopped_count", activeCount),
+			)
+		case <-time.After(timeout):
+			m.logger.Warn("Timeout waiting for frame processing goroutines to finish",
+				zap.Int("active_count", activeCount),
+				zap.Duration("timeout", timeout),
+			)
+		}
+	}
+
+	// Lock again to clear the map
+	m.frameProcessingMu.Lock()
+	defer m.frameProcessingMu.Unlock()
+
+	// Clear the map - goroutines should have finished by now
 	m.frameProcessingActive = make(map[string]context.CancelFunc)
 
-	m.logger.Info("Stopped frame processing for all cameras")
+	m.logger.Info("Stopped frame processing for all cameras",
+		zap.Int("stopped_count", activeCount),
+	)
 }
 
 // frameProcessingLoop continuously captures frames from a camera and processes them
 func (m *StateManagerImpl) frameProcessingLoop(ctx context.Context, cameraID string) {
 	defer m.wg.Done()
+	defer m.frameProcessingWg.Done()
 
 	ticker := time.NewTicker(m.frameProcessingInterval)
 	defer ticker.Stop()

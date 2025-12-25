@@ -409,7 +409,6 @@ export default function Screenshots() {
         label: captureLabel,
         custom_label: captureLabel === 'custom' ? captureCustomLabel : undefined,
         description: captureDescription || undefined,
-        image_data: capturedImage,
       })
 
       // Get updated snapshot count from response or refresh

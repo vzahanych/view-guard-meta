@@ -94,8 +94,8 @@ func NewWebGateway(
 	router.Use(ginLogger(log))
 	router.Use(gin.Recovery())
 	router.Use(corsMiddleware())
-
-	return &WebGatewayImpl{
+	
+	gateway := &WebGatewayImpl{
 		config:        cfg,
 		logger:        log,
 		router:        router,
@@ -106,7 +106,18 @@ func NewWebGateway(
 		eventBus:      eventBus,
 		version:       "dev", // Default version, can be set via SetVersion
 		startTime:     time.Now(),
-	}, nil
+	}
+	
+	// Add authentication middleware if enabled
+	if cfg.Auth.Enabled {
+		authMW := gateway.createAuthMiddleware(cfg.Auth)
+		router.Use(authMW)
+		gateway.logger.Info("Web gateway authentication enabled")
+	} else {
+		gateway.logger.Warn("Web gateway authentication is disabled - all endpoints are publicly accessible")
+	}
+
+	return gateway, nil
 }
 
 // Name returns the service name
@@ -390,6 +401,83 @@ func corsMiddleware() gin.HandlerFunc {
 			return
 		}
 
+		c.Next()
+	}
+}
+
+// createAuthMiddleware creates an authentication middleware for API key validation
+func (g *WebGatewayImpl) createAuthMiddleware(authConfig types.AuthConfig) gin.HandlerFunc {
+	// Default public endpoints that don't require authentication
+	publicEndpoints := map[string]bool{
+		"/api/health": true,
+		"/api/status": true,
+	}
+	
+	// Add custom public endpoints from config
+	for _, endpoint := range authConfig.PublicEndpoints {
+		publicEndpoints[endpoint] = true
+	}
+	
+	// Validate API key is set
+	apiKey := authConfig.APIKey
+	if apiKey == "" {
+		g.logger.Warn("Authentication enabled but API key is empty - generating a default key (not recommended for production)")
+		// Generate a simple default key (in production, this should be set explicitly)
+		apiKey = "default-dev-key-change-in-production"
+	}
+	
+	return func(c *gin.Context) {
+		// Check if endpoint is public
+		if publicEndpoints[c.Request.URL.Path] {
+			c.Next()
+			return
+		}
+		
+		// Extract API key from Authorization header (Bearer token format)
+		authHeader := c.GetHeader("Authorization")
+		if authHeader == "" {
+			g.logger.Debug("Authentication failed: missing Authorization header",
+				zap.String("path", c.Request.URL.Path),
+				zap.String("client_ip", c.ClientIP()),
+			)
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"error": "Authentication required",
+				"message": "Missing Authorization header. Provide API key as Bearer token.",
+			})
+			c.Abort()
+			return
+		}
+		
+		// Parse Bearer token
+		const bearerPrefix = "Bearer "
+		if !strings.HasPrefix(authHeader, bearerPrefix) {
+			g.logger.Debug("Authentication failed: invalid Authorization header format",
+				zap.String("path", c.Request.URL.Path),
+				zap.String("client_ip", c.ClientIP()),
+			)
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"error": "Invalid authorization format",
+				"message": "Authorization header must be in format: Bearer <api_key>",
+			})
+			c.Abort()
+			return
+		}
+		
+		token := strings.TrimPrefix(authHeader, bearerPrefix)
+		if token != apiKey {
+			g.logger.Warn("Authentication failed: invalid API key",
+				zap.String("path", c.Request.URL.Path),
+				zap.String("client_ip", c.ClientIP()),
+			)
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"error": "Invalid API key",
+				"message": "The provided API key is invalid.",
+			})
+			c.Abort()
+			return
+		}
+		
+		// Authentication successful
 		c.Next()
 	}
 }

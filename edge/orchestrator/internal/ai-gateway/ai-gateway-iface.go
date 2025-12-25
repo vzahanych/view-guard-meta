@@ -19,6 +19,8 @@ import (
 // AIGateway defines the interface for the AI gateway service.
 // The gateway communicates with the AI service to process frames from CCTV cameras
 // and creates events when abnormal frames are detected.
+
+//go:generate go run go.uber.org/mock/mockgen -source=$GOFILE -destination=mocks/mock_ai_gateway.go -package=mocks
 type AIGateway interface {
 	common.Service
 

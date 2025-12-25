@@ -178,7 +178,6 @@ export default function CameraViewer({
         label: captureLabel,
         custom_label: captureLabel === 'custom' ? captureCustomLabel : undefined,
         description: captureDescription || undefined,
-        image_data: capturedImage,
       })
 
       // Show success message

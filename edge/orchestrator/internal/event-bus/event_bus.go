@@ -14,6 +14,8 @@ import (
 //
 // Implementations can be in-memory, NATS-backed, or anything else that
 // satisfies this contract.
+
+//go:generate go run go.uber.org/mock/mockgen -source=$GOFILE -destination=mocks/mock_event_bus.go -package=mocks
 type EventBus interface {
 	// Name returns the implementation name (e.g. "inmemory-event-bus", "nats-event-bus").
 	Name() string

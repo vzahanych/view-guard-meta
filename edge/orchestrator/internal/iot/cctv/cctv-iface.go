@@ -23,6 +23,8 @@ import (
 //   - meta-storage for camera and media metadata
 //   - object-storage for storing clips and snapshots
 //   - event-bus for publishing camera events
+
+//go:generate go run go.uber.org/mock/mockgen -source=$GOFILE -destination=mocks/mock_cctv_service.go -package=mocks
 type CCTVService interface {
 	// Lifecycle
 	Start(ctx context.Context) error

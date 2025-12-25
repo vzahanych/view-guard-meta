@@ -27,6 +27,8 @@ import (
 //   - Coordinated startup and shutdown
 //   - Complete API for Edge → VM communication
 //   - WireGuard tunnel status and management
+
+//go:generate go run go.uber.org/mock/mockgen -source=$GOFILE -destination=mocks/mock_vm_gateway.go -package=mocks
 type VMGateway interface {
 	// Lifecycle methods
 

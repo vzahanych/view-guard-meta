@@ -344,6 +344,7 @@ This document provides a comprehensive refactoring plan based on the state trans
 ### Section 3.1: Capture Provenance Enforcement
 
 #### Subsection 3.1.1: Remove Client-Supplied image_data
+- **Status:** ✅ DONE
 - **Description:** Remove ability to inject image data directly via API
 - **Scope:** 
   - Remove `image_data` field from POST `/api/screenshots` endpoint
@@ -355,16 +356,30 @@ This document provides a comprehensive refactoring plan based on the state trans
   - Finding #110: image_data allows data poisoning bypassing CCTV capture
 - **Code Locations:**
   - `edge/orchestrator/internal/web-gateway/impl/handlers_screenshots.go:260-350`
+- **Refactoring Details:**
+  - Removed `ImageData` field from request struct in `handleSaveScreenshot` function
+  - Removed conditional logic that processed client-supplied `image_data` (lines 297-310)
+  - Enforced screenshot capture exclusively via CCTV service - removed the else branch and made CCTV service capture mandatory
+  - Updated frontend components (`Screenshots.tsx` and `CameraViewer.tsx`) to remove `image_data` from POST requests
+  - Screenshots are now always captured directly from cameras via CCTV service, ensuring capture provenance and preventing data poisoning attacks
+  - The `decodeBase64Image` function remains in the codebase but is no longer used (can be removed in future cleanup)
 
 #### Subsection 3.1.2: Implement Capture Token Verification (Alternative)
+- **Status:** ❌ CANCELLED - Not needed
 - **Description:** If image_data must be supported, implement signed capture tokens
 - **Scope:** 
   - Generate signed tokens from CCTV service after capture
   - Verify tokens in web gateway before accepting image_data
   - Require tokens for all image uploads
 - **Dependencies:** 3.1.1 (if alternative approach chosen)
+- **Reason for Cancellation:**
+  - Subsection 3.1.1 was implemented, which completely removed client-supplied `image_data` from the API
+  - This alternative approach was only needed if we wanted to keep `image_data` support but secure it with tokens
+  - Since we chose to remove `image_data` entirely (more secure approach), this token verification alternative is no longer applicable
+  - All screenshots are now captured exclusively via CCTV service, eliminating the need for token-based verification of client-supplied data
 
 #### Subsection 3.1.3: Add Web Gateway Authentication
+- **Status:** ✅ DONE
 - **Description:** Add authentication/authorization to web gateway endpoints
 - **Scope:** 
   - Implement authentication middleware
@@ -373,6 +388,20 @@ This document provides a comprehensive refactoring plan based on the state trans
 - **Dependencies:** None
 - **Related Findings:**
   - Finding #53: Screenshot endpoints return data without access control
+- **Code Locations:**
+  - `edge/orchestrator/internal/web-gateway/types/types.go`
+  - `edge/orchestrator/internal/web-gateway/impl/web-gateway-impl.go`
+- **Refactoring Details:**
+  - Added `AuthConfig` struct to `WebGatewayConfig` with fields for enabling/disabling auth, API key, and public endpoints
+  - Implemented `createAuthMiddleware` function that validates Bearer token API keys from Authorization header
+  - Applied authentication middleware globally to all API routes when auth is enabled
+  - Configured default public endpoints (`/api/health`, `/api/status`) that don't require authentication
+  - Added support for custom public endpoints via configuration
+  - Authentication is opt-in (disabled by default) - when enabled, all endpoints except public ones require valid API key
+  - Added security logging for authentication failures (invalid/missing API keys)
+  - Added warning logs when authentication is disabled to raise awareness of security implications
+  - API key is provided via Bearer token format: `Authorization: Bearer <api_key>`
+  - Security model: All sensitive endpoints (screenshots, cameras, events, config) are protected when auth is enabled
 
 ### Section 3.2: TLS and Certificate Management
 
@@ -680,6 +709,7 @@ This document provides a comprehensive refactoring plan based on the state trans
 ### Section 4.2: Goroutine and Resource Management
 
 #### Subsection 4.2.1: Fix stopAllFrameProcessing Resource Cleanup
+- **Status:** ✅ DONE
 - **Description:** Wait for goroutines to finish before clearing maps
 - **Scope:** 
   - Wait for waitgroup before clearing `frameProcessingActive` map
@@ -689,8 +719,20 @@ This document provides a comprehensive refactoring plan based on the state trans
   - Finding #83: stopAllFrameProcessing doesn't wait for goroutines to finish
 - **Code Locations:**
   - `edge/orchestrator/internal/state-mng/impl/state_mng_impl.go:1365-1381`
+- **Refactoring Details:**
+  - Added dedicated `frameProcessingWg` WaitGroup specifically for frame processing goroutines to enable proper synchronization
+  - Updated `startFrameProcessingForCamera` to call both `m.wg.Add(1)` (shared waitgroup) and `m.frameProcessingWg.Add(1)` (frame processing waitgroup)
+  - Updated `frameProcessingLoop` to call both `m.wg.Done()` and `m.frameProcessingWg.Done()` on exit
+  - Modified `stopAllFrameProcessing` to properly wait for goroutines to finish:
+    - Cancel all frame processing contexts first to signal goroutines to stop
+    - Unlock mutex to allow goroutines to finish and call `frameProcessingWg.Done()`
+    - Wait for `frameProcessingWg` with a 10-second timeout using channel-based pattern
+    - Lock mutex again and clear the map only after goroutines have finished
+  - Added logging for timeout cases and completion status
+  - This ensures proper resource cleanup and prevents race conditions where the map is cleared while goroutines are still running
 
 #### Subsection 4.2.2: Fix Stop() Method Shutdown Ordering
+- **Status:** ✅ DONE
 - **Description:** Explicitly stop frame processing before service shutdown
 - **Scope:** 
   - Call `stopAllFrameProcessing()` before canceling main context
@@ -701,8 +743,16 @@ This document provides a comprehensive refactoring plan based on the state trans
   - Finding #84: Stop() doesn't explicitly stop frame processing first
 - **Code Locations:**
   - `edge/orchestrator/internal/state-mng/impl/state_mng_impl.go:346-369`
+- **Refactoring Details:**
+  - Modified `Stop()` method to call `stopAllFrameProcessing()` before canceling the main context
+  - Ensures frame processing goroutines are stopped gracefully and wait for completion before proceeding with shutdown
+  - Added comment explaining the shutdown ordering rationale
+  - Shutdown sequence is now: stop frame processing → cancel main context → wait for all goroutines → complete shutdown
+  - This prevents race conditions and ensures frame processing resources are properly cleaned up before other shutdown operations
+  - Leverages the fix from 4.2.1 which ensures `stopAllFrameProcessing()` properly waits for goroutines to finish
 
 #### Subsection 4.2.3: Prevent Duplicate Frame Processing Goroutines
+- **Status:** ✅ DONE
 - **Description:** Fix race condition in `startFrameProcessingForCamera`
 - **Scope:** 
   - Move existence check inside critical section
@@ -713,8 +763,18 @@ This document provides a comprehensive refactoring plan based on the state trans
   - Finding #85: Goroutine leak risk in startFrameProcessingForCamera
 - **Code Locations:**
   - `edge/orchestrator/internal/state-mng/impl/state_mng_impl.go:1303-1345`
+- **Refactoring Details:**
+  - Fixed race condition by implementing double-check locking pattern
+  - First check: Quick read-lock check to see if camera is already processing (early exit if found)
+  - External validation: Perform camera validation (GetCamera, check enabled) outside the lock to avoid blocking other operations
+  - Second check: Re-check existence with write lock before adding to map - prevents duplicate goroutines if another thread started processing during validation
+  - Changed from holding write lock throughout to: read lock → validate → write lock → re-check → add
+  - This ensures that even if two goroutines call this function concurrently for the same camera, only one will successfully start frame processing
+  - Added comment explaining thread-safety and duplicate prevention
+  - Prevents goroutine leaks by ensuring only one frame processing goroutine per camera can exist
 
 #### Subsection 4.2.4: Add Goroutine Leak Tests
+- **Status:** ✅ DONE
 - **Description:** Add tests to verify goroutines are properly cleaned up
 - **Scope:** 
   - Test frame processing goroutine cleanup
@@ -723,6 +783,29 @@ This document provides a comprehensive refactoring plan based on the state trans
 - **Dependencies:** 4.2.1, 4.2.2, 4.2.3
 - **Related Findings:**
   - Recommendation #129: Add tests for goroutine cleanup
+- **Code Locations:**
+  - `edge/orchestrator/internal/state-mng/impl/state_mng_impl_test.go`
+  - `edge/orchestrator/Makefile` (simplified mock generation)
+  - `edge/orchestrator/internal/*/mocks/` (generated mocks, co-located with each service)
+  - `edge/orchestrator/internal/*/*-iface.go` and `*_gateway.go` (interface files with `//go:generate` directives)
+- **Refactoring Details:**
+  - Set up automated mock generation using `go.uber.org/mock` (formerly gomock) with `//go:generate` directives
+  - Added `//go:generate` directives directly in each interface file (e.g., `cctv-iface.go`, `vm_gateway.go`)
+  - Each interface file contains: `//go:generate go run go.uber.org/mock/mockgen -source=$GOFILE -destination=mocks/mock_*.go -package=mocks`
+  - Simplified Makefile: `generate-mocks` target now just runs `go generate ./...` which discovers all `//go:generate` directives
+  - Mocks are generated into each service's own `mocks/` directory (e.g., `internal/iot/cctv/mocks/`)
+  - This co-location approach keeps mocks close to their corresponding service interfaces for better organization
+  - Each service owns its mock, making it easier to maintain and understand dependencies
+  - Benefits: No need to maintain mock generation commands in Makefile, directives are co-located with interfaces, can generate individual service mocks with `go generate ./internal/iot/cctv/...`
+  - Implemented comprehensive goroutine leak tests using `runtime.NumGoroutine()`:
+    - `TestFrameProcessingGoroutineCleanup`: Verifies single camera frame processing goroutine cleanup
+    - `TestStopAllFrameProcessingCleanup`: Verifies cleanup of multiple frame processing goroutines
+    - `TestShutdownOrdering`: Verifies proper shutdown ordering (frame processing stops before context cancellation)
+    - `TestDuplicateGoroutinePrevention`: Verifies that concurrent calls don't create duplicate goroutines
+  - Tests use generated mocks instead of manual mocks, making them maintainable and scalable
+  - Added `waitForGoroutines` utility function to wait for goroutines to stabilize during cleanup
+  - All tests verify that goroutine counts return to initial levels after cleanup, preventing resource leaks
+  - Mock generation can be run with `make generate-mocks` and should be run when service interfaces change
 
 ### Section 4.3: Resource Leak Prevention
 
