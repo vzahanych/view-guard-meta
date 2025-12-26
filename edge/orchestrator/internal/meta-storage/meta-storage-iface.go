@@ -3,6 +3,7 @@ package metastorage
 import (
 	"context"
 	"fmt"
+	"time"
 
 	bboltimp "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/meta-storage/bbolt-imp"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/meta-storage/types"
@@ -76,6 +77,19 @@ type MetaDataStore interface {
 	// Edge capabilities metadata (capabilities sent by VM)
 	SaveEdgeCapabilities(ctx context.Context, capabilities map[string]interface{}) error
 	GetEdgeCapabilities(ctx context.Context) (map[string]interface{}, bool)
+
+	// Event bus metadata (for event bus persistence)
+	SaveEvent(ctx context.Context, eventID string, eventData map[string]interface{}) error
+	GetEvent(ctx context.Context, eventID string) (map[string]interface{}, bool)
+	ListEvents(ctx context.Context, filters map[string]interface{}) ([]map[string]interface{}, error)
+	DeleteEvent(ctx context.Context, eventID string) error
+	GetEventCount(ctx context.Context) (int, error)
+	
+	// Event processing status and retry tracking
+	UpdateEventProcessingStatus(ctx context.Context, eventID string, status string, retryCount int, lastError string, nextRetryTime *time.Time) error
+	GetFailedEvents(ctx context.Context, beforeTime time.Time) ([]map[string]interface{}, error)
+	GetDeadLetterEvents(ctx context.Context, limit int) ([]map[string]interface{}, error)
+	MoveEventToDeadLetter(ctx context.Context, eventID string) error
 
 	// Close closes the metadata store and releases all resources (e.g., database connections).
 	// After Close, all methods should return errors.

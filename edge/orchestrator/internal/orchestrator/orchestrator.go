@@ -30,8 +30,8 @@ import (
 // Module returns the fx module with all service providers
 // Startup order is enforced via dependencies:
 // 1. Config (provided first, no dependencies)
-// 2. EventBus (depends on Config)
-// 3. MetaStorage (depends on Config and EventBus for startup ordering)
+// 2. MetaStorage (depends on Config) - must be created before EventBus if using "metastorage" provider
+// 3. EventBus (depends on Config and optionally MetaStorage)
 // 4. ObjectStorage (depends on Config and MetaStorage for startup ordering)
 // 5. VMGateway (depends on Config and ObjectStorage for startup ordering)
 // 6. CCTV (depends on Config and VMGateway for startup ordering)
@@ -40,20 +40,28 @@ func Module() fx.Option {
 	return fx.Options(
 		fx.Provide(
 			EdgeIDProvider,
-			// Provide EventBusConfig from Config (EventBus depends on Config)
-			func(cfg *config.Config) *evtbustypes.EventBusConfig {
-				return &cfg.EventBus
-			},
-			// EventBusProvider - depends on Config, will start after Config
-			eventbus.EventBusProvider,
-			// Provide MetaStorageConfig from Config
+			// Provide MetaStorageConfig from Config (MetaStorage must be created before EventBus)
 			func(cfg *config.Config) *metastoragetypes.MetaStorageConfig {
 				return &cfg.MetaStorage
 			},
-			// MetaStorageProvider - depends on Config and EventBus (for startup ordering)
-			// EventBus dependency ensures EventBus starts before MetaStorage
-			func(cfg *config.Config, eventBus eventbus.EventBus, lc fx.Lifecycle, metaCfg *metastoragetypes.MetaStorageConfig, logger *zap.Logger) (metastorage.MetaDataStore, error) {
-				return metastorage.MetaStorageProvider(lc, metaCfg, logger)
+			// MetaStorageProvider - must be created before EventBus
+			// If event-bus provider is "metastorage", meta-storage must be available
+			// Dependencies: Config (via MetaStorageConfig)
+			metastorage.MetaStorageProvider,
+			// Provide EventBusConfig from Config (EventBus depends on Config and MetaStorage)
+			func(cfg *config.Config) *evtbustypes.EventBusConfig {
+				return &cfg.EventBus
+			},
+			// EventBusProvider - depends on Config and MetaStorage (for "metastorage" provider)
+			// MetaStorage dependency ensures MetaStorage is created before EventBus
+			// If provider is "metastorage", MetaStorage must be provided
+			func(cfg *config.Config, lc fx.Lifecycle, evtCfg *evtbustypes.EventBusConfig, logger *zap.Logger, metaStore metastorage.MetaDataStore) (eventbus.EventBus, error) {
+				// Pass meta-storage as pointer (nil if not needed for other providers)
+				var metaStorePtr *metastorage.MetaDataStore
+				if cfg.EventBus.Provider == "metastorage" {
+					metaStorePtr = &metaStore
+				}
+				return eventbus.EventBusProvider(lc, evtCfg, logger, metaStorePtr)
 			},
 			// Provide ObjectStorageConfig from Config
 			func(cfg *config.Config) *objectstoragetypes.ObjectStorageConfig {

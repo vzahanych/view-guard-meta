@@ -11,11 +11,13 @@ import (
 	"go.uber.org/zap/zapcore"
 	"gopkg.in/yaml.v3"
 
+	auditlogtypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/audit-log/types"
 	aigwtypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/ai-gateway/types"
 	evtbustypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/event-bus/types"
 	cctvtypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/iot/cctv/types"
 	metastoragetypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/meta-storage/types"
 	objectstoragetypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/object-storage/types"
+	statemngtypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/state-mng/types"
 	telemetryotel "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/telemetry-otel"
 	vmgatewaytypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/vm-gateway/types"
 	webgatewaytypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/web-gateway/types"
@@ -35,6 +37,8 @@ type Config struct {
 	CCTV          cctvtypes.CCTVServiceConfig            `yaml:"cctv"`
 	Telemetry     telemetryotel.Config                   `yaml:"telemetry"`
 	WebGateway    webgatewaytypes.WebGatewayConfig       `yaml:"web_gateway"`
+	AuditLog      auditlogtypes.AuditLogConfig            `yaml:"audit_log"`
+	StateManager  statemngtypes.StateManagerConfig        `yaml:"state_manager"`
 }
 
 // Load loads configuration from a YAML file.

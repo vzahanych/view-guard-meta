@@ -607,6 +607,58 @@ func (c *HTTPSClient) SyncScreenshots(ctx context.Context, req *httpsclienttypes
 	}, nil
 }
 
+// SyncAuditLogs syncs audit logs to the VM for long-term storage and analysis.
+func (c *HTTPSClient) SyncAuditLogs(ctx context.Context, req *httpsclienttypes.SyncAuditLogsRequest) (*httpsclienttypes.SyncAuditLogsResponse, error) {
+	url := fmt.Sprintf("https://%s/api/v1/audit-logs/sync", c.vmEndpoint)
+
+	reqBody := map[string]interface{}{
+		"edge_id":     req.EdgeID,
+		"start_time":  req.StartTime,
+		"end_time":    req.EndTime,
+		"entry_count": req.EntryCount,
+		"entries":     req.Entries,
+		"format":      req.Format,
+	}
+
+	jsonBody, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonBody))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to sync audit logs: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("sync audit logs failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var result struct {
+		Success      bool   `json:"success"`
+		ErrorMessage string `json:"error_message"`
+		SyncedCount  int    `json:"synced_count"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return &httpsclienttypes.SyncAuditLogsResponse{
+		Success:      result.Success,
+		ErrorMessage: result.ErrorMessage,
+		SyncedCount:  result.SyncedCount,
+	}, nil
+}
+
 // ReportDeploymentStatus reports deployment status to the VM
 func (c *HTTPSClient) ReportDeploymentStatus(ctx context.Context, deploymentID string, status string, errorMessage *string, modelPath *string) error {
 	url := fmt.Sprintf("https://%s/api/deployments/%s/status", c.vmEndpoint, deploymentID)

@@ -12,8 +12,8 @@ import (
 
 // SavePendingSnapshotRequest saves a pending snapshot request from VM
 func (m *StateManagerImpl) SavePendingSnapshotRequest(ctx context.Context, cameraID string, label string, customLabel string, count int32) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.operationalMu.Lock()
+	defer m.operationalMu.Unlock()
 
 	if m.metaStorage == nil {
 		return fmt.Errorf("meta-storage not available")
@@ -56,8 +56,8 @@ func (m *StateManagerImpl) SavePendingSnapshotRequest(ctx context.Context, camer
 
 // GetPendingSnapshotRequest retrieves a pending snapshot request for a camera
 func (m *StateManagerImpl) GetPendingSnapshotRequest(ctx context.Context, cameraID string) (*statetypes.PendingSnapshotRequest, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	m.operationalMu.RLock()
+	defer m.operationalMu.RUnlock()
 
 	if m.metaStorage == nil {
 		return nil, fmt.Errorf("meta-storage not available")
@@ -92,9 +92,6 @@ func (m *StateManagerImpl) GetPendingSnapshotRequest(ctx context.Context, camera
 
 // GetAllPendingSnapshotRequests retrieves all pending snapshot requests
 func (m *StateManagerImpl) GetAllPendingSnapshotRequests(ctx context.Context) (map[string]*statetypes.PendingSnapshotRequest, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
 	if m.metaStorage == nil {
 		return nil, fmt.Errorf("meta-storage not available")
 	}
@@ -121,16 +118,18 @@ func (m *StateManagerImpl) GetAllPendingSnapshotRequests(ctx context.Context) (m
 		result[cameraID] = &request
 	}
 
-	// Update memory cache
+	// Update memory cache - use write lock for map update
+	m.operationalMu.Lock()
 	m.pendingSnapshotRequests = result
+	m.operationalMu.Unlock()
 
 	return result, nil
 }
 
 // ClearPendingSnapshotRequest clears a pending snapshot request for a camera
 func (m *StateManagerImpl) ClearPendingSnapshotRequest(ctx context.Context, cameraID string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.operationalMu.Lock()
+	defer m.operationalMu.Unlock()
 
 	if m.metaStorage == nil {
 		return fmt.Errorf("meta-storage not available")

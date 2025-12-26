@@ -23,12 +23,14 @@ import (
 	aigwtypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/ai-gateway/types"
 	eventbus "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/event-bus"
 	eventbustypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/event-bus/types"
+	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/iot"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/iot/cctv"
 	cctvtypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/iot/cctv/types"
 	metastorage "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/meta-storage"
 	objectstorage "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/object-storage"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/state-mng/types"
 	vmgateway "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/vm-gateway"
+	vmgatewaytypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/vm-gateway/types"
 	httpsclienttypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/vm-gateway/http-impl/https-client-service/types"
 	webgateway "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/web-gateway"
 	"go.uber.org/zap"
@@ -56,68 +58,114 @@ const (
 	EventTypeStorageFull           eventbustypes.EventType = "storage.full"
 	EventTypeStorageWarning        eventbustypes.EventType = "storage.warning"
 	EventTypeModelDeployed         eventbustypes.EventType = "model.deployed"
+	EventTypeModelDeploymentStatus eventbustypes.EventType = "model.deployment.status"
 )
 
-// EdgeStatus represents the current state of the edge appliance.
-type EdgeStatus string
-
-const (
-	EdgeStatusInitializing         EdgeStatus = "initializing"
-	EdgeStatusDisconnected         EdgeStatus = "disconnected"
-	EdgeStatusWGConnecting         EdgeStatus = "wg_connecting"
-	EdgeStatusHTTPConnecting       EdgeStatus = "http_connecting"
-	EdgeStatusWireGuardConn        EdgeStatus = "wireguard_connected"
-	EdgeStatusHTTPSConn            EdgeStatus = "https_connected"
-	EdgeStatusAuthenticated        EdgeStatus = "authenticated"
-	EdgeStatusCapabilitiesReceived EdgeStatus = "capabilities_received"
-	EdgeStatusCameraDiscovered     EdgeStatus = "camera_discovered"
-	EdgeStatusCameraSynced         EdgeStatus = "camera_synced"
-	// Waiting for user to take and label snapshots for VM request
-	EdgeStatusWaitingForSnapshots  EdgeStatus = "waiting_for_camera_screenshots"
-	EdgeStatusScreenshotSetReady   EdgeStatus = "screenshot_set_ready"
-	EdgeStatusModelDeployed        EdgeStatus = "model_deployed"
-	EdgeStatusFrameProcessing       EdgeStatus = "frame_processing"
-	EdgeStatusError                EdgeStatus = "error"
-	EdgeStatusMetaStorageError     EdgeStatus = "meta_storage_error"
-	EdgeStatusObjectStorageError   EdgeStatus = "object_storage_error"
-	EdgeStatusCCTVServiceError     EdgeStatus = "cctv_service_error"
-	EdgeStatusAIGatewayError       EdgeStatus = "ai_gateway_error"
-	EdgeStatusVMGatewayError       EdgeStatus = "vm_gateway_error"
-	EdgeStatusWebGatewayError      EdgeStatus = "web_gateway_error"
-	EdgeStatusWGConnectionError    EdgeStatus = "wg_connection_error"
-	EdgeStatusHTTPConnectionError  EdgeStatus = "http_connection_error"
-)
-
-// EdgeState represents the complete state of the edge appliance
-type EdgeState struct {
-	Status             EdgeStatus
-	NetworkConnected   bool
-	VMAuthenticated    bool
+// OperationalState represents operational metrics and health information
+// that are not part of the state machines (connection or camera)
+type OperationalState struct {
 	CamerasEnabled     int
 	AIProcessingActive bool
 	StorageHealth      string // "healthy", "warning", "full"
 	LastUpdated        time.Time
 }
 
-// stateManager implements the StateManager interface.
+// PendingModelDeployment represents a model deployment event that arrived
+// before the camera was ready (out-of-order event)
+type PendingModelDeployment struct {
+	ModelID    string
+	CameraID   string
+	EventData  map[string]interface{}
+	ReceivedAt time.Time
+}
+
+// StateManagerImpl implements the StateManager interface.
+//
+// Architecture: Pure Workflow Orchestrator
+// =========================================
+// StateManagerImpl is a pure workflow orchestrator that does NOT own state machine implementations.
+// Instead, it:
+//   - Queries connection state from vm-gateway service (via VMGateway interface)
+//   - Queries device state from iot service (via DeviceStateService interface)
+//   - Orchestrates workflows based on observed state from these services
+//   - Handles event processing and workflow triggering
+//   - Coordinates cross-service operations and recovery
+//
+// State Machine Ownership:
+//   - Connection state machines: Owned by vm-gateway service
+//   - Device state machines: Owned by iot.DeviceStateService
+//   - StateManagerImpl: Only queries state, never creates or manages state machines directly
+//
+// Fallback Behavior:
+//   - For backward compatibility during migration, fallback paths exist that create
+//     old-style state machines when services are not available. These should be removed
+//     once all deployments are migrated to the new architecture.
 type StateManagerImpl struct {
 	eventBus eventbus.EventBus
 	logger   *zap.Logger
 	config   *config.Config
 
 	// Service dependencies
-	aiGateway     aigateway.AIGateway
-	cctvService   cctv.CCTVService
-	metaStorage   metastorage.MetaDataStore
-	objectStorage objectstorage.ObjectStorageService
-	vmGateway     vmgateway.VMGateway
-	webGateway    webgateway.WebGateway
+	aiGateway        aigateway.AIGateway
+	cctvService      cctv.CCTVService
+	metaStorage      metastorage.MetaDataStore
+	objectStorage    objectstorage.ObjectStorageService
+	vmGateway        vmgateway.VMGateway
+	webGateway       webgateway.WebGateway
+	deviceStateService iot.DeviceStateService // Device state service (owns device state machines)
 
 	// Capability sync state
-	minSnapshots int
-	syncInterval time.Duration
-	syncTrigger  chan struct{} // Channel to trigger immediate sync
-	pendingSync  bool          // Flag to indicate cameras are waiting to sync
+	minSnapshots  int
+	syncInterval  time.Duration
+	syncTrigger   chan struct{} // Channel to trigger immediate sync
+	pendingSync   bool          // Flag to indicate cameras are waiting to sync
+	pendingSyncMu sync.RWMutex  // Mutex for pendingSync flag
+
+	// Capability sync change detection
+	lastCapabilitySync map[string]time.Time // cameraID -> last sync timestamp
+	capabilitySyncMu   sync.RWMutex         // Mutex for lastCapabilitySync
+
+	// Pending model deployments (for out-of-order events)
+	pendingModelDeployments map[string]*PendingModelDeployment // cameraID -> deployment
+	pendingModelDeployMu    sync.RWMutex                       // Mutex for pending model deployments
+
+	// Frame capture error tracking
+	frameCaptureErrors map[string]int // cameraID -> consecutive error count
+	frameErrorMu       sync.RWMutex   // Mutex for frame capture errors
+
+	// Workflow execution concurrency control
+	workflowSemaphore chan struct{} // Semaphore to limit concurrent workflows (deprecated, kept for backward compatibility)
+	
+	// Worker pool for workflow execution
+	workflowPoolQueue    chan *WorkflowTask // Global queue for workflow tasks
+	workflowPoolWorkers  int                 // Number of worker goroutines in the pool
+	workflowPoolWg       sync.WaitGroup      // WaitGroup for worker pool goroutines
+	workflowPoolStarted  bool                 // Whether worker pool is started
+	workflowPoolMu       sync.RWMutex        // Mutex for worker pool state
+	
+	// Per-source workflow queues for serialized execution
+	workflowQueues     map[string]chan *WorkflowTask // source -> queue
+	workflowQueuesMu   sync.RWMutex                  // Mutex for workflow queues map
+	workflowWorkersWg  sync.WaitGroup                // WaitGroup for workflow queue workers
+	serializeWorkflows bool                          // Whether to serialize workflows per source
+	
+	// Event deduplication for idempotency
+	processedEvents    map[string]time.Time // eventKey -> timestamp (for cleanup)
+	processedEventsMu  sync.RWMutex         // Mutex for processed events map
+	eventDedupWindow   time.Duration         // Time window for event deduplication (default: 1 hour)
+	
+	// Workflow idempotency tracking
+	lastScreenshotSync map[string]time.Time // cameraID -> last sync timestamp
+	screenshotSyncMu   sync.RWMutex         // Mutex for screenshot sync tracking
+	servicesInitialized bool                 // Whether services have been initialized after auth
+	servicesInitMu      sync.RWMutex        // Mutex for services initialized flag
+
+	// Configuration values
+	frameCaptureErrorThreshold int // Threshold for consecutive frame capture failures before error state
+
+	// State persistence retry configuration
+	statePersistenceMaxRetries int           // Maximum retry attempts for persistence failures
+	statePersistenceRetryBackoff time.Duration // Initial backoff duration for retries
 
 	// Dataset upload state
 	edgeID     string // Edge appliance identifier
@@ -132,14 +180,21 @@ type StateManagerImpl struct {
 	pendingSnapshotRequests map[string]*types.PendingSnapshotRequest // cameraID -> request
 
 	// Frame processing state (for continuous monitoring when model is deployed)
-	frameProcessingInterval time.Duration // Interval between frame captures (default: 30s)
+	frameProcessingInterval time.Duration                 // Interval between frame captures (default: 30s)
 	frameProcessingActive   map[string]context.CancelFunc // cameraID -> cancel function for frame processing
 	frameProcessingMu       sync.RWMutex                  // Mutex for frame processing state
 	frameProcessingWg       sync.WaitGroup                // WaitGroup specifically for frame processing goroutines
 
-	// Current edge state
-	state EdgeState
-	mu    sync.RWMutex
+	// Camera state machine adapters cache (for backward compatibility)
+	// Note: Camera state machines are owned by iot.DeviceStateService, not by StateManagerImpl.
+	// We cache adapters here to maintain backward compatibility with the CameraStateMachine interface.
+	// The adapters wrap DeviceStateMachine instances from the iot service.
+	cameraStateMachineAdapters   map[string]types.CameraStateMachine // cameraID -> adapter wrapping DeviceStateMachine
+	cameraStateMachinesMu        sync.RWMutex                        // Mutex for camera state machine adapters map
+
+	// Operational state (metrics and health, not part of state machines)
+	operationalState OperationalState
+	operationalMu    sync.RWMutex
 
 	ctx       context.Context
 	cancel    context.CancelFunc
@@ -168,22 +223,48 @@ func NewStateManagerImpl(bus eventbus.EventBus, log *zap.Logger) (*StateManagerI
 
 	ctx, cancel := context.WithCancel(context.Background())
 
+	// Initialize operational state
+	operationalState := OperationalState{
+		StorageHealth: "healthy",
+		LastUpdated:   time.Now(),
+	}
+
 	return &StateManagerImpl{
-		eventBus: bus,
-		logger:   log,
-		state: EdgeState{
-			Status:        EdgeStatusInitializing,
-			StorageHealth: "healthy",
-			LastUpdated:   time.Now(),
-		},
-		syncInterval:            5 * time.Minute, // Default sync interval
-		syncTrigger:             make(chan struct{}, 1),
-		pendingSnapshotRequests: make(map[string]*types.PendingSnapshotRequest),
-		frameProcessingInterval: 30 * time.Second, // Default: 30 seconds between frames
-		frameProcessingActive:   make(map[string]context.CancelFunc),
-		ctx:                     ctx,
-		cancel:                  cancel,
+		eventBus:                  bus,
+		logger:                    log,
+		cameraStateMachineAdapters: make(map[string]types.CameraStateMachine),
+		operationalState:           operationalState,
+		syncInterval:               5 * time.Minute, // Default sync interval
+		syncTrigger:                make(chan struct{}, 1),
+		lastCapabilitySync:         make(map[string]time.Time),
+		pendingSnapshotRequests:    make(map[string]*types.PendingSnapshotRequest),
+		pendingModelDeployments:    make(map[string]*PendingModelDeployment),
+		frameProcessingInterval:    30 * time.Second, // Default: 30 seconds between frames
+		frameProcessingActive:      make(map[string]context.CancelFunc),
+		frameCaptureErrors:            make(map[string]int),
+		frameCaptureErrorThreshold:    5,                       // Default: 5 consecutive failures
+		workflowSemaphore:             make(chan struct{}, 10), // Default: 10 concurrent workflows (deprecated)
+		workflowPoolQueue:             make(chan *WorkflowTask, 1000), // Global workflow queue (buffer: 1000)
+		workflowPoolWorkers:           10,                     // Default: 10 worker goroutines
+		workflowPoolStarted:           false,
+		statePersistenceMaxRetries:   3,                       // Default: 3 retries
+		statePersistenceRetryBackoff: 1 * time.Second,         // Default: 1 second backoff
+		workflowQueues:                make(map[string]chan *WorkflowTask),
+		serializeWorkflows:            true, // Default: serialize workflows per source (leverages event ordering)
+		processedEvents:               make(map[string]time.Time),
+		eventDedupWindow:              1 * time.Hour, // Default: 1 hour deduplication window
+		lastScreenshotSync:            make(map[string]time.Time),
+		servicesInitialized:           false,
+		ctx:                           ctx,
+		cancel:                        cancel,
 	}, nil
+}
+
+// WorkflowTask represents a workflow execution task
+type WorkflowTask struct {
+	Event           eventbustypes.Event
+	ConnectionState vmgatewaytypes.ConnectionState
+	CameraStates    map[string]types.CameraState
 }
 
 // Name returns the service name.
@@ -193,8 +274,7 @@ func (m *StateManagerImpl) Name() string {
 
 // SetAIGateway sets the AI gateway service dependency
 func (m *StateManagerImpl) SetAIGateway(aiGateway interface{}) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	// No mutex needed - these are set during initialization before Start() is called
 	if gw, ok := aiGateway.(aigateway.AIGateway); ok {
 		m.aiGateway = gw
 	}
@@ -202,8 +282,7 @@ func (m *StateManagerImpl) SetAIGateway(aiGateway interface{}) {
 
 // SetCCTVService sets the CCTV service dependency
 func (m *StateManagerImpl) SetCCTVService(cctvService interface{}) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	// No mutex needed - these are set during initialization before Start() is called
 	if svc, ok := cctvService.(cctv.CCTVService); ok {
 		m.cctvService = svc
 	}
@@ -211,8 +290,7 @@ func (m *StateManagerImpl) SetCCTVService(cctvService interface{}) {
 
 // SetMetaStorage sets the metadata storage service dependency
 func (m *StateManagerImpl) SetMetaStorage(metaStorage interface{}) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	// No mutex needed - these are set during initialization before Start() is called
 	if store, ok := metaStorage.(metastorage.MetaDataStore); ok {
 		m.metaStorage = store
 	}
@@ -220,8 +298,7 @@ func (m *StateManagerImpl) SetMetaStorage(metaStorage interface{}) {
 
 // SetObjectStorage sets the object storage service dependency
 func (m *StateManagerImpl) SetObjectStorage(objectStorage interface{}) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	// No mutex needed - these are set during initialization before Start() is called
 	if store, ok := objectStorage.(objectstorage.ObjectStorageService); ok {
 		m.objectStorage = store
 	}
@@ -229,17 +306,23 @@ func (m *StateManagerImpl) SetObjectStorage(objectStorage interface{}) {
 
 // SetVMGateway sets the VM gateway service dependency
 func (m *StateManagerImpl) SetVMGateway(vmGateway interface{}) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	// No mutex needed - these are set during initialization before Start() is called
 	if gw, ok := vmGateway.(vmgateway.VMGateway); ok {
 		m.vmGateway = gw
 	}
 }
 
+// SetDeviceStateService sets the device state service dependency
+func (m *StateManagerImpl) SetDeviceStateService(deviceStateService interface{}) {
+	// No mutex needed - these are set during initialization before Start() is called
+	if svc, ok := deviceStateService.(iot.DeviceStateService); ok {
+		m.deviceStateService = svc
+	}
+}
+
 // SetWebGateway sets the web gateway service dependency
 func (m *StateManagerImpl) SetWebGateway(webGateway interface{}) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	// No mutex needed - these are set during initialization before Start() is called
 	if gw, ok := webGateway.(webgateway.WebGateway); ok {
 		m.webGateway = gw
 	}
@@ -247,10 +330,90 @@ func (m *StateManagerImpl) SetWebGateway(webGateway interface{}) {
 
 // SetConfig sets the configuration
 func (m *StateManagerImpl) SetConfig(cfg *config.Config) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	// No mutex needed - these are set during initialization before Start() is called
 	m.config = cfg
 	if cfg != nil {
+		// Apply state manager config if provided
+		stateMngConfig := cfg.StateManager
+		stateMngConfig.ApplyDefaults()
+
+		// Update frame processing interval if configured
+		if stateMngConfig.FrameProcessingInterval > 0 {
+			m.frameProcessingInterval = stateMngConfig.FrameProcessingInterval
+			m.logger.Info("Frame processing interval configured",
+				zap.Duration("interval", m.frameProcessingInterval),
+			)
+		}
+
+		// Update capability sync interval if configured
+		if stateMngConfig.CapabilitySyncInterval > 0 {
+			m.syncInterval = stateMngConfig.CapabilitySyncInterval
+			m.logger.Info("Capability sync interval configured",
+				zap.Duration("interval", m.syncInterval),
+			)
+		}
+
+		// Update max concurrent workflows if configured (worker pool size)
+		if stateMngConfig.MaxConcurrentWorkflows > 0 {
+			// Update worker pool size
+			oldWorkers := m.workflowPoolWorkers
+			m.workflowPoolWorkers = stateMngConfig.MaxConcurrentWorkflows
+			
+			// If pool is already started and worker count changed, log warning
+			// (we don't support dynamic resizing, would require restart)
+			m.workflowPoolMu.RLock()
+			poolStarted := m.workflowPoolStarted
+			m.workflowPoolMu.RUnlock()
+			if poolStarted && oldWorkers != m.workflowPoolWorkers {
+				m.logger.Warn("Workflow pool worker count changed but pool is already started",
+					zap.Int("old_workers", oldWorkers),
+					zap.Int("new_workers", m.workflowPoolWorkers),
+					zap.String("note", "restart required to apply new worker count"))
+			}
+			
+			// Also update semaphore for backward compatibility
+			oldSemaphore := m.workflowSemaphore
+			m.workflowSemaphore = make(chan struct{}, stateMngConfig.MaxConcurrentWorkflows)
+			close(oldSemaphore) // Close old channel
+			
+			m.logger.Info("Max concurrent workflows configured",
+				zap.Int("max_workflows", stateMngConfig.MaxConcurrentWorkflows),
+			)
+		}
+
+		// Update frame capture error threshold if configured
+		if stateMngConfig.FrameCaptureErrorThreshold > 0 {
+			m.frameCaptureErrorThreshold = stateMngConfig.FrameCaptureErrorThreshold
+			m.logger.Info("Frame capture error threshold configured",
+				zap.Int("threshold", m.frameCaptureErrorThreshold),
+			)
+		}
+
+		// Update state persistence retry configuration if configured
+		if stateMngConfig.StatePersistenceMaxRetries >= 0 {
+			m.statePersistenceMaxRetries = stateMngConfig.StatePersistenceMaxRetries
+			m.logger.Info("State persistence max retries configured",
+				zap.Int("max_retries", m.statePersistenceMaxRetries),
+			)
+		}
+		if stateMngConfig.StatePersistenceRetryBackoff > 0 {
+			m.statePersistenceRetryBackoff = stateMngConfig.StatePersistenceRetryBackoff
+			m.logger.Info("State persistence retry backoff configured",
+				zap.Duration("backoff", m.statePersistenceRetryBackoff),
+			)
+		}
+
+		// Update serialize workflows setting (default: true)
+		// Default to true if not explicitly set to false
+		m.serializeWorkflows = true
+		if !cfg.StateManager.SerializeWorkflows {
+			// Explicitly set to false
+			m.serializeWorkflows = false
+		}
+		m.logger.Info("Workflow serialization configured",
+			zap.Bool("serialize_workflows", m.serializeWorkflows),
+		)
+
 		// Minimum number of "normal" snapshots required for dataset readiness.
 		// Currently not configurable via config struct, so use a sensible default.
 		if m.minSnapshots <= 0 {
@@ -285,36 +448,194 @@ func (m *StateManagerImpl) SetConfig(cfg *config.Config) {
 
 // SetEdgeID sets the edge ID for dataset uploads
 func (m *StateManagerImpl) SetEdgeID(edgeID string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	// No mutex needed - these are set during initialization before Start() is called
 	m.edgeID = edgeID
+}
+
+// getOrCreateCameraStateMachine gets or creates a camera state machine for the given camera ID.
+//
+// Architecture: This method queries the iot.DeviceStateService (which owns device state machines)
+// and wraps the result in a CameraStateMachineAdapter.
+// StateManagerImpl does NOT own or create state machines directly - it only queries from services.
+//
+// Requires: deviceStateService must be set via SetDeviceStateService() before calling this method.
+func (m *StateManagerImpl) getOrCreateCameraStateMachine(cameraID string) types.CameraStateMachine {
+	// Check cache first
+	m.cameraStateMachinesMu.RLock()
+	if adapter, exists := m.cameraStateMachineAdapters[cameraID]; exists {
+		m.cameraStateMachinesMu.RUnlock()
+		return adapter
+	}
+	m.cameraStateMachinesMu.RUnlock()
+
+	// Device state service is required
+	if m.deviceStateService == nil {
+		m.logger.Error("DeviceStateService is not set, cannot create camera state machine",
+			zap.String("camera_id", cameraID),
+		)
+		return nil
+	}
+
+	// Get or create device state machine from iot service
+	ctx := context.Background()
+	deviceSM, err := m.deviceStateService.GetOrCreateStateMachine(ctx, cameraID, iot.DeviceTypeCamera)
+	if err != nil {
+		m.logger.Error("Failed to get/create device state machine",
+			zap.String("camera_id", cameraID),
+			zap.Error(err),
+		)
+		return nil
+	}
+
+	// Wrap device state machine in adapter
+	adapter := iot.NewCameraStateMachineAdapter(deviceSM)
+
+	// Cache the adapter
+	m.cameraStateMachinesMu.Lock()
+	defer m.cameraStateMachinesMu.Unlock()
+	
+	// Double-check after acquiring write lock
+	if existing, exists := m.cameraStateMachineAdapters[cameraID]; exists {
+		return existing
+	}
+	
+	m.cameraStateMachineAdapters[cameraID] = adapter
+	return adapter
+}
+
+// getCameraStateMachine gets a camera state machine for the given camera ID (returns nil if not found)
+func (m *StateManagerImpl) getCameraStateMachine(cameraID string) types.CameraStateMachine {
+	// Check cache first
+	m.cameraStateMachinesMu.RLock()
+	if adapter, exists := m.cameraStateMachineAdapters[cameraID]; exists {
+		m.cameraStateMachinesMu.RUnlock()
+		return adapter
+	}
+	m.cameraStateMachinesMu.RUnlock()
+
+	// If device state service is available, try to get from there
+	if m.deviceStateService != nil {
+		deviceSM, err := m.deviceStateService.GetStateMachine(cameraID)
+		if err == nil {
+			// Wrap in adapter and cache
+			adapter := iot.NewCameraStateMachineAdapter(deviceSM)
+			m.cameraStateMachinesMu.Lock()
+			m.cameraStateMachineAdapters[cameraID] = adapter
+			m.cameraStateMachinesMu.Unlock()
+			return adapter
+		}
+	}
+
+	return nil
+}
+
+// getAllCameraStateMachines returns all camera state machines
+func (m *StateManagerImpl) getAllCameraStateMachines() map[string]types.CameraStateMachine {
+	// If device state service is available, get all camera state machines from there
+	if m.deviceStateService != nil {
+		allDeviceSMs := m.deviceStateService.GetStateMachinesByType(iot.DeviceTypeCamera)
+		
+		m.cameraStateMachinesMu.Lock()
+		defer m.cameraStateMachinesMu.Unlock()
+		
+		// Ensure all device state machines are wrapped and cached
+		result := make(map[string]types.CameraStateMachine)
+		for _, deviceSM := range allDeviceSMs {
+			cameraID := deviceSM.GetDeviceID()
+			
+			// Check if we already have an adapter cached
+			if adapter, exists := m.cameraStateMachineAdapters[cameraID]; exists {
+				result[cameraID] = adapter
+			} else {
+				// Create and cache new adapter
+				adapter := iot.NewCameraStateMachineAdapter(deviceSM)
+				m.cameraStateMachineAdapters[cameraID] = adapter
+				result[cameraID] = adapter
+			}
+		}
+		
+		// Also include any cached adapters that might not be in the service yet
+		for k, v := range m.cameraStateMachineAdapters {
+			if _, exists := result[k]; !exists {
+				result[k] = v
+			}
+		}
+		
+		return result
+	}
+
+	// Fallback to cached adapters only
+	m.cameraStateMachinesMu.RLock()
+	defer m.cameraStateMachinesMu.RUnlock()
+
+	// Return a copy to avoid external modification
+	result := make(map[string]types.CameraStateMachine)
+	for k, v := range m.cameraStateMachineAdapters {
+		result[k] = v
+	}
+	return result
+}
+
+// updateOperationalState updates operational metrics
+func (m *StateManagerImpl) updateOperationalState(updateFn func(*OperationalState)) {
+	m.operationalMu.Lock()
+	defer m.operationalMu.Unlock()
+	updateFn(&m.operationalState)
+	m.operationalState.LastUpdated = time.Now()
+}
+
+// getOperationalState returns a copy of the operational state
+func (m *StateManagerImpl) getOperationalState() OperationalState {
+	m.operationalMu.RLock()
+	defer m.operationalMu.RUnlock()
+	return m.operationalState
 }
 
 // Start begins processing events from the event bus.
 func (m *StateManagerImpl) Start(ctx context.Context) error {
 	var startErr error
 	m.startOnce.Do(func() {
-		// Initialize and log initial state
-		m.mu.Lock()
-		m.state.Status = EdgeStatusInitializing
-		m.state.LastUpdated = time.Now()
-		initialState := m.state
-		m.mu.Unlock()
+		// Try to restore state from meta-storage first
+		if err := m.restoreStateFromStorage(ctx); err != nil {
+			m.logger.Warn("Failed to restore state from storage, initializing with defaults",
+				zap.Error(err),
+			)
+			// Initialize connection state to disconnected (will be updated by events)
+			if m.vmGateway != nil {
+				_ = m.vmGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateDisconnected, "")
+			}
 
-		// Persist initial state
-		m.persistStateToStorage(ctx, initialState)
+			// Initialize operational state
+			m.updateOperationalState(func(op *OperationalState) {
+				op.StorageHealth = "healthy"
+			})
+		}
+
+		var connectionState vmgatewaytypes.ConnectionState
+		if m.vmGateway != nil {
+			connectionState = m.vmGateway.GetConnectionState()
+		} else {
+			connectionState = vmgatewaytypes.ConnectionStateDisconnected
+		}
+		operationalState := m.getOperationalState()
+
+		// Persist current state (either restored or initialized)
+		m.persistStateToStorage(ctx, connectionState, nil)
 
 		m.logger.Info("Edge state initialized",
-			zap.String("status", string(initialState.Status)),
-			zap.Bool("network_connected", initialState.NetworkConnected),
-			zap.Bool("vm_authenticated", initialState.VMAuthenticated),
-			zap.Int("cameras_enabled", initialState.CamerasEnabled),
-			zap.String("storage_health", initialState.StorageHealth))
+			zap.String("connection_state", string(connectionState)),
+			zap.Int("cameras_enabled", operationalState.CamerasEnabled),
+			zap.String("storage_health", operationalState.StorageHealth),
+			zap.Int("camera_state_machines", len(m.getAllCameraStateMachines())),
+		)
 
-		// Check health of all services after setting initializing status
+		// Check health of all services
 		m.checkServicesHealth(ctx)
 
 		m.logger.Info("Starting edge state manager, subscribing to all events")
+
+		// Start workflow worker pool
+		m.startWorkflowPool()
 
 		events := m.eventBus.SubscribeAll()
 
@@ -325,11 +646,12 @@ func (m *StateManagerImpl) Start(ctx context.Context) error {
 		}()
 
 		// Start capability sync loop if VM gateway is available
+		// Use m.ctx (service lifetime) instead of Start(ctx) for long-lived goroutines
 		if m.vmGateway != nil && m.cctvService != nil {
 			m.wg.Add(1)
 			go func() {
 				defer m.wg.Done()
-				m.capabilitySyncLoop(ctx)
+				m.capabilitySyncLoop(m.ctx)
 			}()
 			m.logger.Info("Capability sync loop started")
 		}
@@ -354,8 +676,24 @@ func (m *StateManagerImpl) Stop(ctx context.Context) error {
 		// This waits for all frame processing goroutines to finish before proceeding
 		m.stopAllFrameProcessing()
 
+		// Stop workflow worker pool first
+		m.stopWorkflowPool()
+
+		// Close workflow queues to stop workers
+		m.workflowQueuesMu.Lock()
+		for source, queue := range m.workflowQueues {
+			close(queue)
+			m.logger.Debug("Closed workflow queue",
+				zap.String("source", source))
+		}
+		m.workflowQueues = make(map[string]chan *WorkflowTask)
+		m.workflowQueuesMu.Unlock()
+
 		// Now cancel the main context to signal other goroutines to stop
 		m.cancel()
+		
+		// Wait for workflow queue workers to finish
+		m.workflowWorkersWg.Wait()
 
 		done := make(chan struct{})
 		go func() {
@@ -398,10 +736,23 @@ func (m *StateManagerImpl) handleEvent(ev eventbustypes.Event) {
 	m.logger.Debug("edge-state-manager: handling event",
 		zap.String("event_type", string(ev.Type)),
 		zap.String("source", ev.Source),
+		zap.Int64("sequence_number", ev.SequenceNumber),
 	)
 
+	// Check for duplicate event (idempotency)
+	if m.isDuplicateEvent(ev) {
+		m.logger.Debug("Duplicate event detected, skipping",
+			zap.String("event_type", string(ev.Type)),
+			zap.String("source", ev.Source),
+			zap.Int64("sequence_number", ev.SequenceNumber))
+		return
+	}
+
+	// Mark event as processed
+	m.markEventProcessed(ev)
+
 	// Update state based on event
-	newState, err := m.updateStateForEvent(ev)
+	connectionState, cameraStates, err := m.updateStateForEvent(ev)
 	if err != nil {
 		m.logger.Warn("edge-state-manager: failed to update state for event",
 			zap.String("event_type", string(ev.Type)),
@@ -410,80 +761,392 @@ func (m *StateManagerImpl) handleEvent(ev eventbustypes.Event) {
 		return
 	}
 
-	// Execute workflow based on the new state
-	m.wg.Add(1)
-	go func() {
-		defer m.wg.Done()
-		m.executeWorkflow(m.ctx, ev, newState)
-	}()
+	// Create workflow task
+	task := &WorkflowTask{
+		Event:           ev,
+		ConnectionState: connectionState,
+		CameraStates:    cameraStates,
+	}
+
+	// Execute workflow based on serialization mode
+	if m.serializeWorkflows && ev.SequenceNumber > 0 {
+		// Serialized execution per source (respects event ordering)
+		m.queueWorkflow(ev.Source, task)
+	} else {
+		// Concurrent execution via worker pool (backward compatible for events without sequence numbers)
+		m.enqueueWorkflowToPool(task)
+	}
 }
 
-// updateStateForEvent updates the edge state based on the event.
-func (m *StateManagerImpl) updateStateForEvent(ev eventbustypes.Event) (EdgeState, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+// enqueueWorkflowToPool enqueues a workflow task to the global worker pool
+func (m *StateManagerImpl) enqueueWorkflowToPool(task *WorkflowTask) {
+	select {
+	case m.workflowPoolQueue <- task:
+		m.logger.Debug("Workflow enqueued to worker pool",
+			zap.String("event_type", string(task.Event.Type)),
+			zap.String("source", task.Event.Source))
+	default:
+		// Queue full - log warning and drop (or could use fallback)
+		m.logger.Warn("Workflow pool queue full, dropping workflow",
+			zap.String("event_type", string(task.Event.Type)),
+			zap.String("source", task.Event.Source))
+	}
+}
 
-	oldState := m.state
-	newState := m.state
-	newState.LastUpdated = time.Now()
+// queueWorkflow queues a workflow task for serialized execution per source
+func (m *StateManagerImpl) queueWorkflow(source string, task *WorkflowTask) {
+	// Get or create workflow queue for this source
+	queue := m.getOrCreateWorkflowQueue(source)
+	
+	// Queue the task (non-blocking, drop if queue is full)
+	select {
+	case queue <- task:
+		m.logger.Debug("Workflow queued for serialized execution",
+			zap.String("source", source),
+			zap.String("event_type", string(task.Event.Type)),
+			zap.Int64("sequence_number", task.Event.SequenceNumber))
+		default:
+			// Queue full - log warning and enqueue to worker pool (fallback)
+			m.logger.Warn("Workflow queue full, enqueuing to worker pool",
+				zap.String("source", source),
+				zap.String("event_type", string(task.Event.Type)),
+				zap.Int64("sequence_number", task.Event.SequenceNumber))
+			m.enqueueWorkflowToPool(task)
+		}
+}
+
+// getOrCreateWorkflowQueue gets or creates a workflow queue for a source
+func (m *StateManagerImpl) getOrCreateWorkflowQueue(source string) chan *WorkflowTask {
+	m.workflowQueuesMu.RLock()
+	queue, exists := m.workflowQueues[source]
+	m.workflowQueuesMu.RUnlock()
+	
+	if exists {
+		return queue
+	}
+	
+	m.workflowQueuesMu.Lock()
+	defer m.workflowQueuesMu.Unlock()
+	
+	// Double-check after acquiring write lock
+	if queue, exists := m.workflowQueues[source]; exists {
+		return queue
+	}
+	
+	// Create new queue and start worker
+	queue = make(chan *WorkflowTask, 100) // Buffer size: 100
+	m.workflowQueues[source] = queue
+	
+	// Start worker for this source
+	m.workflowWorkersWg.Add(1)
+	go m.workflowQueueWorker(source, queue)
+	
+	m.logger.Info("Created workflow queue for source",
+		zap.String("source", source))
+	
+	return queue
+}
+
+// workflowQueueWorker processes workflows from a queue for a specific source
+// This ensures workflows execute sequentially per source, respecting event ordering
+func (m *StateManagerImpl) workflowQueueWorker(source string, queue chan *WorkflowTask) {
+	defer m.workflowWorkersWg.Done()
+	
+	m.logger.Debug("Workflow queue worker started",
+		zap.String("source", source))
+	
+	for {
+		select {
+		case <-m.ctx.Done():
+			m.logger.Debug("Workflow queue worker stopping",
+				zap.String("source", source))
+			return
+		case task, ok := <-queue:
+			if !ok {
+				// Queue closed
+				m.logger.Debug("Workflow queue closed",
+					zap.String("source", source))
+				return
+			}
+			
+			// Execute workflow sequentially (respects event ordering)
+			m.logger.Debug("Executing workflow from queue",
+				zap.String("source", source),
+				zap.String("event_type", string(task.Event.Type)),
+				zap.Int64("sequence_number", task.Event.SequenceNumber))
+			
+			// Enqueue to worker pool for execution (respects global concurrency limit)
+			m.enqueueWorkflowToPool(task)
+		}
+	}
+}
+
+// startWorkflowPool starts the workflow worker pool
+func (m *StateManagerImpl) startWorkflowPool() {
+	m.workflowPoolMu.Lock()
+	defer m.workflowPoolMu.Unlock()
+	
+	if m.workflowPoolStarted {
+		return
+	}
+	
+	m.logger.Info("Starting workflow worker pool",
+		zap.Int("workers", m.workflowPoolWorkers),
+		zap.Int("queue_size", cap(m.workflowPoolQueue)))
+	
+	// Start worker goroutines
+	for i := 0; i < m.workflowPoolWorkers; i++ {
+		m.workflowPoolWg.Add(1)
+		go m.workflowPoolWorker(i)
+	}
+	
+	m.workflowPoolStarted = true
+}
+
+// stopWorkflowPool stops the workflow worker pool
+func (m *StateManagerImpl) stopWorkflowPool() {
+	m.workflowPoolMu.Lock()
+	defer m.workflowPoolMu.Unlock()
+	
+	if !m.workflowPoolStarted {
+		return
+	}
+	
+	m.logger.Info("Stopping workflow worker pool")
+	
+	// Close the queue to signal workers to stop
+	close(m.workflowPoolQueue)
+	
+	// Wait for all workers to finish
+	done := make(chan struct{})
+	go func() {
+		m.workflowPoolWg.Wait()
+		close(done)
+	}()
+	
+	// Wait with timeout
+	select {
+	case <-done:
+		m.logger.Info("Workflow worker pool stopped")
+	case <-time.After(30 * time.Second):
+		m.logger.Warn("Workflow worker pool stop timeout")
+	}
+	
+	m.workflowPoolStarted = false
+	// Recreate queue for potential restart (though we don't support restart)
+	m.workflowPoolQueue = make(chan *WorkflowTask, 1000)
+}
+
+// isDuplicateEvent checks if an event has already been processed (idempotency)
+func (m *StateManagerImpl) isDuplicateEvent(ev eventbustypes.Event) bool {
+	// Generate event key for deduplication
+	eventKey := m.generateEventKey(ev)
+	
+	m.processedEventsMu.RLock()
+	defer m.processedEventsMu.RUnlock()
+	
+	// Check if event was processed recently
+	if processedTime, exists := m.processedEvents[eventKey]; exists {
+		// Check if within deduplication window
+		if time.Since(processedTime) < m.eventDedupWindow {
+			return true
+		}
+		// Event is outside window, consider it new
+	}
+	
+	return false
+}
+
+// markEventProcessed marks an event as processed for deduplication
+func (m *StateManagerImpl) markEventProcessed(ev eventbustypes.Event) {
+	eventKey := m.generateEventKey(ev)
+	
+	m.processedEventsMu.Lock()
+	defer m.processedEventsMu.Unlock()
+	
+	m.processedEvents[eventKey] = time.Now()
+	
+	// Cleanup old events periodically (every 1000 events to avoid overhead)
+	if len(m.processedEvents) > 1000 {
+		m.cleanupOldProcessedEvents()
+	}
+}
+
+// generateEventKey generates a unique key for event deduplication
+func (m *StateManagerImpl) generateEventKey(ev eventbustypes.Event) string {
+	// Use event type, source, sequence number, and key data fields for uniqueness
+	key := fmt.Sprintf("%s:%s:%d", ev.Type, ev.Source, ev.SequenceNumber)
+	
+	// Add camera_id if present (for camera-specific events)
+	if cameraID, ok := ev.Data["camera_id"].(string); ok && cameraID != "" {
+		key += ":" + cameraID
+	}
+	
+	// Add model_id if present (for model deployment events)
+	if modelID, ok := ev.Data["model_id"].(string); ok && modelID != "" {
+		key += ":" + modelID
+	}
+	
+	// Add event_id if present (for events with explicit IDs)
+	if eventID, ok := ev.Data["event_id"].(string); ok && eventID != "" {
+		key += ":" + eventID
+	}
+	
+	return key
+}
+
+// cleanupOldProcessedEvents removes events outside the deduplication window
+func (m *StateManagerImpl) cleanupOldProcessedEvents() {
+	now := time.Now()
+	for key, processedTime := range m.processedEvents {
+		if now.Sub(processedTime) > m.eventDedupWindow {
+			delete(m.processedEvents, key)
+		}
+	}
+}
+
+// workflowPoolWorker is a worker in the workflow pool that processes tasks from the global queue
+func (m *StateManagerImpl) workflowPoolWorker(workerID int) {
+	defer m.workflowPoolWg.Done()
+	
+	m.logger.Debug("Workflow pool worker started",
+		zap.Int("worker_id", workerID))
+	
+	for {
+		select {
+		case <-m.ctx.Done():
+			m.logger.Debug("Workflow pool worker stopping",
+				zap.Int("worker_id", workerID))
+			return
+		case task, ok := <-m.workflowPoolQueue:
+			if !ok {
+				// Queue closed
+				m.logger.Debug("Workflow pool queue closed, worker stopping",
+					zap.Int("worker_id", workerID))
+				return
+			}
+			
+			// Execute workflow
+			m.logger.Debug("Workflow pool worker executing workflow",
+				zap.Int("worker_id", workerID),
+				zap.String("event_type", string(task.Event.Type)),
+				zap.String("source", task.Event.Source),
+				zap.Int64("sequence_number", task.Event.SequenceNumber))
+			
+			m.executeWorkflow(m.ctx, task.Event, task.ConnectionState, task.CameraStates)
+		}
+	}
+}
+
+// getConnectionState returns the current connection state from vm-gateway service.
+//
+// Architecture: StateManagerImpl does NOT own the connection state machine.
+// Connection state is owned and managed by the vm-gateway service.
+// This method queries the state from the service, it does not manage it.
+func (m *StateManagerImpl) getConnectionState() vmgatewaytypes.ConnectionState {
+	if m.vmGateway != nil {
+		return m.vmGateway.GetConnectionState()
+	}
+	return vmgatewaytypes.ConnectionStateDisconnected
+}
+
+// updateStateForEvent updates the connection and camera state machines based on the event.
+// Returns the updated connection state and a map of updated camera states.
+func (m *StateManagerImpl) updateStateForEvent(ev eventbustypes.Event) (vmgatewaytypes.ConnectionState, map[string]types.CameraState, error) {
+	var oldConnectionState vmgatewaytypes.ConnectionState
+	if m.vmGateway != nil {
+		oldConnectionState = m.vmGateway.GetConnectionState()
+	} else {
+		oldConnectionState = vmgatewaytypes.ConnectionStateDisconnected
+	}
+	updatedCameraStates := make(map[string]types.CameraState)
 
 	// Update state based on event type
 	switch ev.Type {
-	// Network events
+	// Network events - update connection state machine (via vm-gateway)
 	case EventTypeWireGuardConnected:
-		newState.NetworkConnected = true
-		if newState.Status == EdgeStatusDisconnected || newState.Status == EdgeStatusInitializing {
-			newState.Status = EdgeStatusWireGuardConn
+		if m.vmGateway != nil {
+			currentState := m.vmGateway.GetConnectionState()
+			if currentState == vmgatewaytypes.ConnectionStateDisconnected {
+				if err := m.vmGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateWGConnecting, ""); err != nil {
+					m.logger.Warn("Failed to transition to wg_connecting", zap.Error(err))
+				} else {
+					if err := m.vmGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateWireGuardConnected, ""); err != nil {
+						m.logger.Warn("Failed to transition to wireguard_connected", zap.Error(err))
+					}
+				}
+			}
 		}
 	case EventTypeWireGuardDisconnected:
-		newState.NetworkConnected = false
-		newState.VMAuthenticated = false
-		newState.Status = EdgeStatusDisconnected
+		// Note: Frame processing continues even when disconnected - Edge should monitor security zone independently
+		// Security events will be queued and synced when connection is restored
+		if m.vmGateway != nil {
+			if err := m.vmGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateDisconnected, ""); err != nil {
+				m.logger.Warn("Failed to transition to disconnected", zap.Error(err))
+			}
+		}
 	case EventTypeHTTPSConnected:
-		if newState.Status == EdgeStatusWireGuardConn {
-			newState.Status = EdgeStatusHTTPSConn
+		if m.vmGateway != nil {
+			currentState := m.vmGateway.GetConnectionState()
+			if currentState == vmgatewaytypes.ConnectionStateWireGuardConnected {
+				if err := m.vmGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateHTTPConnecting, ""); err != nil {
+					m.logger.Warn("Failed to transition to http_connecting", zap.Error(err))
+				} else {
+					if err := m.vmGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateHTTPSConnected, ""); err != nil {
+						m.logger.Warn("Failed to transition to https_connected", zap.Error(err))
+					}
+				}
+			}
 		}
 	case EventTypeHTTPSDisconnected:
-		if newState.Status == EdgeStatusHTTPSConn || newState.Status == EdgeStatusAuthenticated || newState.Status == EdgeStatusScreenshotSetReady {
-			newState.Status = EdgeStatusWireGuardConn
-			newState.VMAuthenticated = false
+		if m.vmGateway != nil {
+			currentState := m.vmGateway.GetConnectionState()
+			if currentState == vmgatewaytypes.ConnectionStateHTTPSConnected || currentState == vmgatewaytypes.ConnectionStateAuthenticated {
+				// Note: Frame processing continues even when HTTPS disconnects - Edge should monitor security zone independently
+				// Security events will be queued and synced when connection is restored
+				if err := m.vmGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateWireGuardConnected, ""); err != nil {
+					m.logger.Warn("Failed to transition to wireguard_connected", zap.Error(err))
+				}
+			}
 		}
 	case EventTypeEdgeAuthenticated:
-		if newState.Status == EdgeStatusHTTPSConn {
-			newState.Status = EdgeStatusAuthenticated
-			newState.VMAuthenticated = true
+		if m.vmGateway != nil {
+			currentState := m.vmGateway.GetConnectionState()
+			if currentState == vmgatewaytypes.ConnectionStateHTTPSConnected {
+				if err := m.vmGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateAuthenticated, ""); err != nil {
+					m.logger.Warn("Failed to transition to authenticated", zap.Error(err))
+				}
+			}
 		}
 	case EventTypeCapabilitiesReceived:
-		if newState.Status == EdgeStatusAuthenticated || newState.Status == EdgeStatusHTTPSConn {
-			newState.Status = EdgeStatusCapabilitiesReceived
+		if m.vmGateway != nil {
+			currentState := m.vmGateway.GetConnectionState()
+			if currentState == vmgatewaytypes.ConnectionStateAuthenticated || currentState == vmgatewaytypes.ConnectionStateHTTPSConnected {
+				if err := m.vmGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateCapabilitiesReceived, ""); err != nil {
+					m.logger.Warn("Failed to transition to capabilities_received", zap.Error(err))
+				}
+			}
 		}
 
-	// Camera events
+	// Camera events - update camera state machines
 	case EventTypeCameraDiscovered:
-		if newState.Status == EdgeStatusCapabilitiesReceived {
-			newState.Status = EdgeStatusCameraDiscovered
+		if cameraID, ok := ev.Data["camera_id"].(string); ok {
+			cameraSM := m.getOrCreateCameraStateMachine(cameraID)
+			if cameraSM == nil {
+				m.logger.Error("Failed to get/create camera state machine",
+					zap.String("camera_id", cameraID),
+				)
+				return oldConnectionState, updatedCameraStates, nil
+			}
+			currentState := cameraSM.GetState()
+			if currentState == types.CameraStateUndiscovered {
+				if err := cameraSM.Transition(types.CameraStateDiscovered, ""); err != nil {
+					m.logger.Warn("Failed to transition camera to discovered", zap.String("camera_id", cameraID), zap.Error(err))
+				} else {
+					updatedCameraStates[cameraID] = cameraSM.GetState()
+				}
+			}
 		}
-
-	// Snapshot request events (VM asks Edge/user for labeled screenshots)
-	case EventTypeSnapshotRequested:
-		// When VM requests labeled screenshots, we enter waiting_for_camera_screenshots
-		// (unless we're already in an error state)
-		if newState.Status != EdgeStatusError &&
-			newState.Status != EdgeStatusMetaStorageError &&
-			newState.Status != EdgeStatusObjectStorageError &&
-			newState.Status != EdgeStatusCCTVServiceError &&
-			newState.Status != EdgeStatusAIGatewayError &&
-			newState.Status != EdgeStatusVMGatewayError &&
-			newState.Status != EdgeStatusWebGatewayError {
-
-			newState.Status = EdgeStatusWaitingForSnapshots
-		}
-	case EventTypeScreenshotSetReady:
-		// When user marks screenshot set as ready, transition from waiting_for_camera_screenshots to screenshot_set_ready
-		if newState.Status == EdgeStatusWaitingForSnapshots {
-			newState.Status = EdgeStatusScreenshotSetReady
-		}
-
 	case EventTypeCameraRegistered:
 		if cameraID, ok := ev.Data["camera_id"].(string); ok {
 			m.logger.Info("Camera registered", zap.String("camera_id", cameraID))
@@ -496,8 +1159,54 @@ func (m *StateManagerImpl) updateStateForEvent(ev eventbustypes.Event) (EdgeStat
 		}
 	case EventTypeCameraDisconnected:
 		if cameraID, ok := ev.Data["camera_id"].(string); ok {
+			cameraSM := m.getCameraStateMachine(cameraID)
+			if cameraSM != nil {
+				if err := cameraSM.Transition(types.CameraStateDisconnected, ""); err != nil {
+					m.logger.Warn("Failed to transition camera to disconnected", zap.String("camera_id", cameraID), zap.Error(err))
+				} else {
+					updatedCameraStates[cameraID] = cameraSM.GetState()
+				}
+			}
 			m.logger.Info("Camera disconnected", zap.String("camera_id", cameraID))
-			// State updated via workflow
+		}
+
+	// Snapshot request events - update camera state machines
+	case EventTypeSnapshotRequested:
+		if cameraID, ok := ev.Data["camera_id"].(string); ok {
+			cameraSM := m.getOrCreateCameraStateMachine(cameraID)
+			if cameraSM == nil {
+				m.logger.Error("Failed to get/create camera state machine",
+					zap.String("camera_id", cameraID),
+				)
+				return oldConnectionState, updatedCameraStates, nil
+			}
+			currentState := cameraSM.GetState()
+			// Can transition to waiting_for_screenshots from synced or later states
+			if currentState == types.CameraStateSynced || currentState == types.CameraStateWaitingForScreenshots {
+				if err := cameraSM.Transition(types.CameraStateWaitingForScreenshots, ""); err != nil {
+					m.logger.Warn("Failed to transition camera to waiting_for_screenshots", zap.String("camera_id", cameraID), zap.Error(err))
+				} else {
+					updatedCameraStates[cameraID] = cameraSM.GetState()
+				}
+			}
+		}
+	case EventTypeScreenshotSetReady:
+		if cameraID, ok := ev.Data["camera_id"].(string); ok {
+			cameraSM := m.getOrCreateCameraStateMachine(cameraID)
+			if cameraSM == nil {
+				m.logger.Error("Failed to get/create camera state machine",
+					zap.String("camera_id", cameraID),
+				)
+				return oldConnectionState, updatedCameraStates, nil
+			}
+			currentState := cameraSM.GetState()
+			if currentState == types.CameraStateWaitingForScreenshots {
+				if err := cameraSM.Transition(types.CameraStateScreenshotSetReady, ""); err != nil {
+					m.logger.Warn("Failed to transition camera to screenshot_set_ready", zap.String("camera_id", cameraID), zap.Error(err))
+				} else {
+					updatedCameraStates[cameraID] = cameraSM.GetState()
+				}
+			}
 		}
 
 	// AI events
@@ -507,14 +1216,20 @@ func (m *StateManagerImpl) updateStateForEvent(ev eventbustypes.Event) (EdgeStat
 			// State updated via workflow
 		}
 	case EventTypeInference:
-		// Track AI processing activity
-		newState.AIProcessingActive = true
+		// Track AI processing activity in operational state
+		m.updateOperationalState(func(op *OperationalState) {
+			op.AIProcessingActive = true
+		})
 
-	// Storage events
+	// Storage events - update operational state
 	case EventTypeStorageWarning:
-		newState.StorageHealth = "warning"
+		m.updateOperationalState(func(op *OperationalState) {
+			op.StorageHealth = "warning"
+		})
 	case EventTypeStorageFull:
-		newState.StorageHealth = "full"
+		m.updateOperationalState(func(op *OperationalState) {
+			op.StorageHealth = "full"
+		})
 		m.logger.Warn("Storage full, may need cleanup")
 
 	// Video events
@@ -532,34 +1247,51 @@ func (m *StateManagerImpl) updateStateForEvent(ev eventbustypes.Event) (EdgeStat
 		}
 	}
 
-	// Note: "ready" state has been removed as it was misleading.
-	// Edge operates in specific states: camera_synced, waiting_for_camera_screenshots, screenshot_set_ready, etc.
-	// Each state represents a specific operational phase.
-
-	// Persist state to meta-storage (use background context since we're in an event handler)
-	m.persistStateToStorage(context.Background(), newState)
-
-	// Log state transition if status changed
-	if oldState.Status != newState.Status {
-		m.logger.Info("edge-state-manager: state transition",
-			zap.String("old_status", string(oldState.Status)),
-			zap.String("new_status", string(newState.Status)),
-			zap.String("event_type", string(ev.Type)),
-		)
-
-		// Stop frame processing if transitioning away from model_deployed or frame_processing
-		if (oldState.Status == EdgeStatusModelDeployed || oldState.Status == EdgeStatusFrameProcessing) &&
-			newState.Status != EdgeStatusModelDeployed && newState.Status != EdgeStatusFrameProcessing {
-			m.stopAllFrameProcessing()
-		}
+	// Get current connection state
+	var newConnectionState vmgatewaytypes.ConnectionState
+	if m.vmGateway != nil {
+		newConnectionState = m.vmGateway.GetConnectionState()
+	} else {
+		newConnectionState = vmgatewaytypes.ConnectionStateDisconnected
 	}
 
-	m.state = newState
-	return newState, nil
+	// Log state transitions
+	if oldConnectionState != newConnectionState {
+		m.logger.Info("edge-state-manager: connection state transition",
+			zap.String("old_state", string(oldConnectionState)),
+			zap.String("new_state", string(newConnectionState)),
+			zap.String("event_type", string(ev.Type)),
+		)
+	}
+
+	// Log camera state transitions
+	for cameraID, newState := range updatedCameraStates {
+		m.logger.Info("edge-state-manager: camera state transition",
+			zap.String("camera_id", cameraID),
+			zap.String("new_state", string(newState)),
+			zap.String("event_type", string(ev.Type)),
+		)
+	}
+
+	// Persist state to meta-storage with timeout (use service context with timeout)
+	timeout := 5 * time.Second
+	if m.config != nil && m.config.StateManager.StatePersistenceTimeout > 0 {
+		timeout = m.config.StateManager.StatePersistenceTimeout
+	}
+	persistCtx, cancel := context.WithTimeout(m.ctx, timeout)
+	defer cancel()
+	if err := m.persistStateToStorage(persistCtx, newConnectionState, updatedCameraStates); err != nil {
+		m.logger.Warn("Failed to persist state to storage",
+			zap.Error(err),
+			zap.String("connection_state", string(newConnectionState)),
+		)
+	}
+
+	return newConnectionState, updatedCameraStates, nil
 }
 
-// executeWorkflow determines and executes the workflow based on the event and current state.
-func (m *StateManagerImpl) executeWorkflow(ctx context.Context, ev eventbustypes.Event, state EdgeState) {
+// executeWorkflow determines and executes the workflow based on the event and current states.
+func (m *StateManagerImpl) executeWorkflow(ctx context.Context, ev eventbustypes.Event, connectionState vmgatewaytypes.ConnectionState, cameraStates map[string]types.CameraState) {
 	switch ev.Type {
 	// Network workflow
 	case EventTypeWireGuardConnected:
@@ -574,6 +1306,13 @@ func (m *StateManagerImpl) executeWorkflow(ctx context.Context, ev eventbustypes
 		m.logger.Info("Edge authenticated, initializing services")
 		// Workflow: After authentication, ensure cameras are discovered and AI is ready
 		m.initializeServicesAfterAuth(ctx)
+		// Sync pending security events that were queued during disconnection
+		// This ensures all security events detected during disconnection are transmitted to VM
+		m.wg.Add(1)
+		go func() {
+			defer m.wg.Done()
+			m.syncPendingSecurityEvents(m.ctx)
+		}()
 
 	case EventTypeCapabilitiesReceived:
 		m.logger.Info("Capabilities received from VM, checking for camera capability")
@@ -603,8 +1342,10 @@ func (m *StateManagerImpl) executeWorkflow(ctx context.Context, ev eventbustypes
 	case EventTypeDetection:
 		m.handleAIDetection(ctx, ev)
 	case EventTypeInference:
-		// Track inference activity
-		m.state.AIProcessingActive = true
+		// Track inference activity in operational state
+		m.updateOperationalState(func(op *OperationalState) {
+			op.AIProcessingActive = true
+		})
 
 	// Storage workflow
 	case EventTypeStorageWarning:
@@ -625,23 +1366,72 @@ func (m *StateManagerImpl) executeWorkflow(ctx context.Context, ev eventbustypes
 	// Model deployment workflow
 	case EventTypeModelDeployed:
 		m.handleModelDeployed(ctx, ev)
+	case EventTypeModelDeploymentStatus:
+		m.handleModelDeploymentStatus(ctx, ev)
+	default:
+		// Unhandled event - log for observability
+		m.logger.Warn("Unhandled event type in workflow execution",
+			zap.String("event_type", string(ev.Type)),
+			zap.String("source", ev.Source),
+			zap.Int64("sequence_number", ev.SequenceNumber),
+			zap.Time("timestamp", ev.Timestamp),
+		)
 	}
 
-	// General state-based workflows
-	switch state.Status {
-	case EdgeStatusScreenshotSetReady:
-		m.executeScreenshotSetReadyWorkflow(ctx, state)
-	case EdgeStatusModelDeployed:
-		m.executeModelDeployedWorkflow(ctx, state)
-	case EdgeStatusFrameProcessing:
-		m.executeFrameProcessingWorkflow(ctx, state)
-	case EdgeStatusError:
-		m.handleErrorState(ctx, state)
+	// General state-based workflows - check connection state
+	switch connectionState {
+	case vmgatewaytypes.ConnectionStateCapabilitiesReceived:
+		// After capabilities received, check for cameras that need workflows
+		// Use all camera state machines, not just the delta from the event
+		// This ensures workflows run even when only connection state changes
+		allCameraSMs := m.getAllCameraStateMachines()
+		for cameraID, cameraSM := range allCameraSMs {
+			cameraState := cameraSM.GetState()
+			switch cameraState {
+			case types.CameraStateScreenshotSetReady:
+				m.executeScreenshotSetReadyWorkflowForCamera(ctx, cameraID)
+			case types.CameraStateModelDeployed:
+				m.executeModelDeployedWorkflowForCamera(ctx, cameraID)
+			case types.CameraStateFrameProcessing:
+				m.executeFrameProcessingWorkflowForCamera(ctx, cameraID)
+			}
+		}
+	case vmgatewaytypes.ConnectionStateError:
+		m.handleConnectionErrorState(ctx, connectionState)
+	}
+
+	// Check all camera states for workflows
+	for cameraID := range cameraStates {
+		cameraSM := m.getCameraStateMachine(cameraID)
+		if cameraSM == nil {
+			continue
+		}
+		cameraState := cameraSM.GetState()
+		switch cameraState {
+		case types.CameraStateScreenshotSetReady:
+			m.executeScreenshotSetReadyWorkflowForCamera(ctx, cameraID)
+		case types.CameraStateModelDeployed:
+			m.executeModelDeployedWorkflowForCamera(ctx, cameraID)
+		case types.CameraStateFrameProcessing:
+			m.executeFrameProcessingWorkflowForCamera(ctx, cameraID)
+		case types.CameraStateError:
+			m.handleCameraErrorState(ctx, cameraID, cameraState)
+		}
 	}
 }
 
 // initializeServicesAfterAuth initializes services after authentication
 func (m *StateManagerImpl) initializeServicesAfterAuth(ctx context.Context) {
+	// Idempotency check: only initialize once
+	m.servicesInitMu.Lock()
+	if m.servicesInitialized {
+		m.servicesInitMu.Unlock()
+		m.logger.Debug("Services already initialized after auth, skipping")
+		return
+	}
+	m.servicesInitialized = true
+	m.servicesInitMu.Unlock()
+
 	m.logger.Info("Initializing services after authentication")
 
 	// Trigger camera discovery if CCTV service is available
@@ -656,10 +1446,10 @@ func (m *StateManagerImpl) initializeServicesAfterAuth(ctx context.Context) {
 		})
 	}
 
-		// Ensure AI gateway is available
-		if m.aiGateway != nil {
-			m.logger.Debug("AI gateway available for processing")
-		}
+	// Ensure AI gateway is available
+	if m.aiGateway != nil {
+		m.logger.Debug("AI gateway available for processing")
+	}
 }
 
 // handleCapabilitiesReceived handles capabilities received from VM
@@ -679,11 +1469,12 @@ func (m *StateManagerImpl) handleCapabilitiesReceived(ctx context.Context, ev ev
 		if m.cctvService != nil {
 			if err := m.cctvService.DiscoverCameras(ctx); err != nil {
 				m.logger.Error("Failed to initiate camera discovery", zap.Error(err))
-				// Update state to error
-				m.mu.Lock()
-				m.state.Status = EdgeStatusCCTVServiceError
-				m.persistStateToStorage(ctx, m.state)
-				m.mu.Unlock()
+				// Update connection state to error
+				if m.vmGateway != nil {
+					_ = m.vmGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateError, fmt.Sprintf("CCTV service error: %v", err))
+				}
+				connectionState := m.getConnectionState()
+				m.persistStateToStorage(ctx, connectionState, nil)
 				return
 			}
 			m.logger.Info("Camera discovery initiated")
@@ -702,20 +1493,36 @@ func (m *StateManagerImpl) handleCameraDiscovered(ctx context.Context, ev eventb
 		zap.String("camera_id", cameraID),
 	)
 
-	// Check current state and trigger sync if we're in camera_discovered state
-	// (state was already updated to camera_discovered by updateState before this handler runs)
-	m.mu.Lock()
-	currentStatus := m.state.Status
-	m.mu.Unlock()
+	// Get camera state machine
+	cameraSM := m.getOrCreateCameraStateMachine(cameraID)
+	if cameraSM == nil {
+		m.logger.Error("Failed to get/create camera state machine for camera discovery",
+			zap.String("camera_id", cameraID),
+		)
+		return
+	}
+	currentCameraState := cameraSM.GetState()
 
-	// If we're in camera_discovered state, sync cameras with VM
-	// This ensures we sync after transitioning to camera_discovered
-	if currentStatus == EdgeStatusCameraDiscovered {
-		m.logger.Info("State is camera_discovered, syncing cameras with VM")
+	// Check connection state - need to be authenticated to sync
+	connectionState := m.getConnectionState()
+	if connectionState != vmgatewaytypes.ConnectionStateCapabilitiesReceived {
+		m.logger.Debug("Connection not ready for camera sync",
+			zap.String("camera_id", cameraID),
+			zap.String("connection_state", string(connectionState)),
+		)
+		return
+	}
+
+	// If camera is in discovered state, sync with VM
+	if currentCameraState == types.CameraStateDiscovered {
+		m.logger.Info("Camera is in discovered state, syncing with VM",
+			zap.String("camera_id", cameraID),
+		)
 		m.syncCamerasWithVM(ctx)
 	} else {
-		m.logger.Debug("State is not camera_discovered, skipping sync",
-			zap.String("current_status", string(currentStatus)),
+		m.logger.Debug("Camera is not in discovered state, skipping sync",
+			zap.String("camera_id", cameraID),
+			zap.String("current_state", string(currentCameraState)),
 		)
 	}
 }
@@ -724,6 +1531,7 @@ func (m *StateManagerImpl) handleCameraDiscovered(ctx context.Context, ev eventb
 // VM is effectively asking this Edge (and its user) to take labeled screenshots from a camera.
 // We persist this request in meta-storage (via state-mng helpers) and move state to
 // waiting_for_camera_screenshots so that UI can show pending actions.
+// This function is idempotent: it checks if a request already exists before creating a new one.
 func (m *StateManagerImpl) handleSnapshotRequested(ctx context.Context, ev eventbustypes.Event) {
 	cameraID, _ := ev.Data["camera_id"].(string)
 	label, _ := ev.Data["label"].(string)
@@ -746,6 +1554,16 @@ func (m *StateManagerImpl) handleSnapshotRequested(ctx context.Context, ev event
 		zap.Int32("count", count),
 	)
 
+	// Idempotency check: check if request already exists
+	if existing, err := m.GetPendingSnapshotRequest(ctx, cameraID); err == nil && existing != nil {
+		m.logger.Debug("Pending snapshot request already exists, skipping duplicate",
+			zap.String("camera_id", cameraID),
+			zap.String("existing_label", existing.Label),
+			zap.String("existing_custom_label", existing.CustomLabel))
+		// Request already exists, workflow is idempotent
+		return
+	}
+
 	// Persist pending snapshot request metadata via state-manager helper
 	if err := m.SavePendingSnapshotRequest(ctx, cameraID, label, customLabel, count); err != nil {
 		m.logger.Error("Failed to save pending snapshot request",
@@ -755,21 +1573,11 @@ func (m *StateManagerImpl) handleSnapshotRequested(ctx context.Context, ev event
 		return
 	}
 
-	// Update state to waiting_for_camera_screenshots (unless we're already in an error state)
-	m.mu.Lock()
-	if m.state.Status != EdgeStatusError &&
-		m.state.Status != EdgeStatusMetaStorageError &&
-		m.state.Status != EdgeStatusObjectStorageError &&
-		m.state.Status != EdgeStatusCCTVServiceError &&
-		m.state.Status != EdgeStatusAIGatewayError &&
-		m.state.Status != EdgeStatusVMGatewayError &&
-		m.state.Status != EdgeStatusWebGatewayError {
-
-		m.state.Status = EdgeStatusWaitingForSnapshots
-		m.persistStateToStorage(ctx, m.state)
-		m.logger.Info("State updated to waiting_for_camera_screenshots")
-	}
-	m.mu.Unlock()
+	// Update camera state to waiting_for_screenshots (state transition handled in updateStateForEvent)
+	// This handler just ensures the workflow is executed
+	m.logger.Info("Snapshot request workflow executed",
+		zap.String("camera_id", cameraID),
+	)
 }
 
 // handleScreenshotSetReady handles user marking screenshot set as ready
@@ -784,14 +1592,11 @@ func (m *StateManagerImpl) handleScreenshotSetReady(ctx context.Context, ev even
 		zap.Int32("min_required", minRequired),
 	)
 
-	// Update state to screenshot_set_ready
-	m.mu.Lock()
-	if m.state.Status == EdgeStatusWaitingForSnapshots {
-		m.state.Status = EdgeStatusScreenshotSetReady
-		m.persistStateToStorage(ctx, m.state)
-		m.logger.Info("State updated to screenshot_set_ready")
-	}
-	m.mu.Unlock()
+	// Update camera state to screenshot_set_ready (state transition handled in updateStateForEvent)
+	// This handler just ensures the workflow is executed
+	m.logger.Info("Screenshot set ready workflow executed",
+		zap.String("camera_id", cameraID),
+	)
 
 	// Sync screenshots to VM for model training
 	if cameraID != "" && m.vmGateway != nil && m.metaStorage != nil {
@@ -810,11 +1615,46 @@ func (m *StateManagerImpl) handleScreenshotSetReady(ctx context.Context, ev even
 				zap.String("camera_id", cameraID),
 			)
 		}
+
+		// Check if there's a pending model deployment for this camera
+		m.pendingModelDeployMu.Lock()
+		pendingDeployment, hasPending := m.pendingModelDeployments[cameraID]
+		if hasPending {
+			delete(m.pendingModelDeployments, cameraID)
+			m.pendingModelDeployMu.Unlock()
+			// Process the pending model deployment
+			m.logger.Info("Processing pending model deployment",
+				zap.String("camera_id", cameraID),
+				zap.String("model_id", pendingDeployment.ModelID),
+			)
+			// Create a synthetic event to trigger model deployment
+			ev := eventbustypes.Event{
+				Type:   EventTypeModelDeployed,
+				Source: "state-manager",
+				Data:   pendingDeployment.EventData,
+			}
+			m.handleModelDeployed(ctx, ev)
+		} else {
+			m.pendingModelDeployMu.Unlock()
+		}
 	}
 }
 
 // syncScreenshotsToVM syncs labeled screenshots to VM for model training
+// This function is idempotent: it checks if screenshots were recently synced to avoid duplicate syncs
 func (m *StateManagerImpl) syncScreenshotsToVM(ctx context.Context, cameraID string) {
+	// Idempotency check: avoid syncing too frequently (within 5 minutes)
+	m.screenshotSyncMu.RLock()
+	lastSync, recentlySynced := m.lastScreenshotSync[cameraID]
+	m.screenshotSyncMu.RUnlock()
+	
+	if recentlySynced && time.Since(lastSync) < 5*time.Minute {
+		m.logger.Debug("Screenshots recently synced, skipping duplicate sync",
+			zap.String("camera_id", cameraID),
+			zap.Duration("time_since_sync", time.Since(lastSync)))
+		return
+	}
+
 	m.logger.Info("Syncing labeled screenshots to VM for model training",
 		zap.String("camera_id", cameraID),
 	)
@@ -842,12 +1682,12 @@ func (m *StateManagerImpl) syncScreenshotsToVM(ctx context.Context, cameraID str
 		// Convert to ScreenshotInfo format
 		screenshotInfo := &httpsclienttypes.ScreenshotInfo{
 			ScreenshotID: ss.ID,
-			CameraID:    ss.CameraID,
-			ObjectKey:   ss.ObjectKey, // Path to image in object storage
-			Label:       ss.Label,
-			CustomLabel: ss.CustomLabel,
-			Description: ss.Description,
-			CreatedAt:   ss.CreatedAt.Unix(),
+			CameraID:     ss.CameraID,
+			ObjectKey:    ss.ObjectKey, // Path to image in object storage
+			Label:        ss.Label,
+			CustomLabel:  ss.CustomLabel,
+			Description:  ss.Description,
+			CreatedAt:    ss.CreatedAt.Unix(),
 		}
 
 		// Add metadata if available
@@ -876,7 +1716,7 @@ func (m *StateManagerImpl) syncScreenshotsToVM(ctx context.Context, cameraID str
 				} else {
 					// Encode as base64
 					screenshotInfo.ImageData = base64.StdEncoding.EncodeToString(imageData)
-					
+
 					// Determine image format from object key extension
 					ext := strings.ToLower(filepath.Ext(ss.ObjectKey))
 					switch ext {
@@ -917,48 +1757,87 @@ func (m *StateManagerImpl) syncScreenshotsToVM(ctx context.Context, cameraID str
 		return
 	}
 
-	// Create sync request
-	req := &httpsclienttypes.SyncScreenshotsRequest{
-		EdgeID:      edgeID,
-		CameraID:     cameraID,
-		Screenshots: labeledScreenshots,
-	}
+	// Batch screenshots to avoid loading all into memory at once
+	// Process in batches of 20 screenshots
+	batchSize := 20
+	for i := 0; i < len(labeledScreenshots); i += batchSize {
+		end := i + batchSize
+		if end > len(labeledScreenshots) {
+			end = len(labeledScreenshots)
+		}
+		batch := labeledScreenshots[i:end]
 
-	// Call VM gateway to sync screenshots
-	callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
+		// Create sync request for this batch
+		req := &httpsclienttypes.SyncScreenshotsRequest{
+			EdgeID:      edgeID,
+			CameraID:    cameraID,
+			Screenshots: batch,
+		}
 
-	resp, err := m.vmGateway.SyncScreenshots(callCtx, req)
-	if err != nil {
-		m.logger.Error("Failed to sync screenshots to VM",
+		// Call VM gateway to sync screenshots batch
+		callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		resp, err := m.vmGateway.SyncScreenshots(callCtx, req)
+		cancel()
+
+		if err != nil {
+			m.logger.Error("Failed to sync screenshot batch to VM",
+				zap.String("camera_id", cameraID),
+				zap.Int("batch_start", i),
+				zap.Int("batch_size", len(batch)),
+				zap.Error(err),
+			)
+			// On error, set connection state to error
+			if m.vmGateway != nil {
+				_ = m.vmGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateError, fmt.Sprintf("VM gateway error: %v", err))
+			}
+			connectionState := m.getConnectionState()
+			timeout := 5 * time.Second
+			if m.config != nil && m.config.StateManager.StatePersistenceTimeout > 0 {
+				timeout = m.config.StateManager.StatePersistenceTimeout
+			}
+			persistCtx, cancelPersist := context.WithTimeout(ctx, timeout)
+			_ = m.persistStateToStorage(persistCtx, connectionState, nil)
+			cancelPersist()
+			return
+		}
+
+		if !resp.Success {
+			m.logger.Error("VM rejected screenshot batch sync",
+				zap.String("camera_id", cameraID),
+				zap.Int("batch_start", i),
+				zap.Int("batch_size", len(batch)),
+				zap.String("error", resp.ErrorMessage),
+			)
+			// On error, set connection state to error
+			if m.vmGateway != nil {
+				_ = m.vmGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateError, fmt.Sprintf("VM gateway error: %s", resp.ErrorMessage))
+			}
+			connectionState := m.getConnectionState()
+			timeout := 5 * time.Second
+			if m.config != nil && m.config.StateManager.StatePersistenceTimeout > 0 {
+				timeout = m.config.StateManager.StatePersistenceTimeout
+			}
+			persistCtx, cancelPersist := context.WithTimeout(ctx, timeout)
+			_ = m.persistStateToStorage(persistCtx, connectionState, nil)
+			cancelPersist()
+			return
+		}
+
+		m.logger.Info("Screenshot batch synced to VM successfully",
 			zap.String("camera_id", cameraID),
-			zap.Error(err),
+			zap.Int("batch_start", i),
+			zap.Int("batch_size", len(batch)),
 		)
-		// On error, set state to VM gateway error
-		m.mu.Lock()
-		m.state.Status = EdgeStatusVMGatewayError
-		m.persistStateToStorage(ctx, m.state)
-		m.mu.Unlock()
-		return
 	}
 
-	if !resp.Success {
-		m.logger.Error("VM rejected screenshot sync",
-			zap.String("camera_id", cameraID),
-			zap.String("error", resp.ErrorMessage),
-		)
-		// On error, set state to VM gateway error
-		m.mu.Lock()
-		m.state.Status = EdgeStatusVMGatewayError
-		m.persistStateToStorage(ctx, m.state)
-		m.mu.Unlock()
-		return
-	}
+	// Mark sync as complete (idempotency tracking)
+	m.screenshotSyncMu.Lock()
+	m.lastScreenshotSync[cameraID] = time.Now()
+	m.screenshotSyncMu.Unlock()
 
-	m.logger.Info("Screenshots synced to VM successfully",
+	m.logger.Info("All screenshot batches synced to VM successfully",
 		zap.String("camera_id", cameraID),
-		zap.Int("count", len(labeledScreenshots)),
-		zap.String("message", resp.Message),
+		zap.Int("total_count", len(labeledScreenshots)),
 	)
 }
 
@@ -1015,27 +1894,25 @@ func (m *StateManagerImpl) syncCamerasWithVM(ctx context.Context) {
 	syncResp, err := m.vmGateway.SyncCameras(ctx, syncReq)
 	if err != nil {
 		m.logger.Error("Failed to sync cameras with VM", zap.Error(err))
-		// On error, set state to error (not ready)
-		m.mu.Lock()
-		if m.state.Status == EdgeStatusCameraDiscovered {
-			m.state.Status = EdgeStatusVMGatewayError
-			m.persistStateToStorage(ctx, m.state)
-			m.logger.Error("State updated to vm_gateway_error due to camera sync failure")
+		// On error, set connection state to error
+		if m.vmGateway != nil {
+			_ = m.vmGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateError, fmt.Sprintf("VM gateway error during camera sync: %v", err))
 		}
-		m.mu.Unlock()
+		connectionState := m.getConnectionState()
+		m.persistStateToStorage(ctx, connectionState, nil)
+		m.logger.Error("Connection state updated to error due to camera sync failure")
 		return
 	}
 
 	if !syncResp.Success {
 		m.logger.Error("Camera sync failed", zap.String("error", syncResp.ErrorMessage))
-		// On sync failure, set state to error (not ready)
-		m.mu.Lock()
-		if m.state.Status == EdgeStatusCameraDiscovered {
-			m.state.Status = EdgeStatusVMGatewayError
-			m.persistStateToStorage(ctx, m.state)
-			m.logger.Error("State updated to vm_gateway_error due to camera sync failure")
+		// On sync failure, set connection state to error
+		if m.vmGateway != nil {
+			_ = m.vmGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateError, fmt.Sprintf("VM gateway error: %s", syncResp.ErrorMessage))
 		}
-		m.mu.Unlock()
+		connectionState := m.getConnectionState()
+		m.persistStateToStorage(ctx, connectionState, nil)
+		m.logger.Error("Connection state updated to error due to camera sync failure")
 		return
 	}
 
@@ -1060,14 +1937,45 @@ func (m *StateManagerImpl) syncCamerasWithVM(ctx context.Context) {
 		}
 	}
 
-	// Update state to camera_synced
-	m.mu.Lock()
-	if m.state.Status == EdgeStatusCameraDiscovered {
-		m.state.Status = EdgeStatusCameraSynced
-		m.persistStateToStorage(ctx, m.state)
-		m.logger.Info("State updated to camera_synced")
+	// Update camera states to synced for all discovered cameras
+	updatedCameraStates := make(map[string]types.CameraState)
+	for _, cam := range cameras {
+		cameraSM := m.getOrCreateCameraStateMachine(cam.ID)
+		if cameraSM == nil {
+			m.logger.Warn("Failed to get/create camera state machine for camera sync",
+				zap.String("camera_id", cam.ID),
+			)
+			continue
+		}
+		currentState := cameraSM.GetState()
+		if currentState == types.CameraStateDiscovered {
+			if err := cameraSM.Transition(types.CameraStateSynced, ""); err != nil {
+				m.logger.Warn("Failed to transition camera to synced",
+					zap.String("camera_id", cam.ID),
+					zap.Error(err),
+				)
+			} else {
+				updatedCameraStates[cam.ID] = cameraSM.GetState()
+				m.logger.Info("Camera state updated to synced",
+					zap.String("camera_id", cam.ID),
+				)
+			}
+		}
 	}
-	m.mu.Unlock()
+
+	// Persist updated camera states
+	if len(updatedCameraStates) > 0 {
+		connectionState := m.getConnectionState()
+		if err := m.persistStateToStorage(ctx, connectionState, updatedCameraStates); err != nil {
+			m.logger.Warn("Failed to persist camera states after sync",
+				zap.Error(err),
+				zap.String("connection_state", string(connectionState)),
+				zap.Int("camera_count", len(updatedCameraStates)),
+			)
+		} else {
+			m.logger.Info("Camera states updated to synced", zap.Int("count", len(updatedCameraStates)))
+		}
+	}
 }
 
 // handleCameraRegistered handles camera registration events
@@ -1082,7 +1990,9 @@ func (m *StateManagerImpl) handleCameraRegistered(ctx context.Context, ev eventb
 	// 2. Start frame capture
 	// 3. Start AI processing for this camera
 	// 4. Mark as pending and attempt capability sync
+	m.pendingSyncMu.Lock()
 	m.pendingSync = true
+	m.pendingSyncMu.Unlock()
 	select {
 	case m.syncTrigger <- struct{}{}:
 		// Sync attempt triggered
@@ -1164,6 +2074,7 @@ func (m *StateManagerImpl) handleClipRecorded(ctx context.Context, ev eventbusty
 }
 
 // handleModelDeployed handles model deployment events from VM → Edge API
+// This function is idempotent: it checks if the model is already deployed before processing.
 func (m *StateManagerImpl) handleModelDeployed(ctx context.Context, ev eventbustypes.Event) {
 	// Extract event data
 	modelID, ok := ev.Data["model_id"].(string)
@@ -1176,26 +2087,82 @@ func (m *StateManagerImpl) handleModelDeployed(ctx context.Context, ev eventbust
 		zap.String("model_id", modelID),
 	)
 
-	// Transition state from screenshot_set_ready to model_deployed
-	m.mu.Lock()
-	currentStatus := m.state.Status
-	if currentStatus == EdgeStatusScreenshotSetReady {
-		m.state.Status = EdgeStatusModelDeployed
-		m.state.LastUpdated = time.Now()
-		m.logger.Info("State transition: screenshot_set_ready → model_deployed",
+	// Get camera ID from event (model deployment is per-camera)
+	cameraID, _ := ev.Data["camera_id"].(string)
+	if cameraID == "" {
+		m.logger.Warn("Model deployment event missing camera_id")
+		return
+	}
+
+	// Transition camera state from screenshot_set_ready to model_deployed
+	cameraSM := m.getOrCreateCameraStateMachine(cameraID)
+	if cameraSM == nil {
+		m.logger.Error("Failed to get/create camera state machine for model deployment",
+			zap.String("camera_id", cameraID),
+		)
+		return
+	}
+	
+	// Idempotency check: if model is already deployed and matches, skip
+	if metadataSM, ok := cameraSM.(types.CameraStateMachineWithMetadata); ok {
+		currentModelID := metadataSM.GetStateInfo().ModelID
+		currentState := cameraSM.GetState()
+		if currentModelID == modelID && (currentState == types.CameraStateModelDeployed || currentState == types.CameraStateFrameProcessing) {
+			m.logger.Debug("Model already deployed for camera, skipping duplicate deployment",
+				zap.String("camera_id", cameraID),
+				zap.String("model_id", modelID),
+				zap.String("current_state", string(currentState)))
+			return
+		}
+	}
+	
+	currentCameraState := cameraSM.GetState()
+	if currentCameraState == types.CameraStateScreenshotSetReady {
+		// Set model ID if cameraSM supports metadata
+		if metadataSM, ok := cameraSM.(types.CameraStateMachineWithMetadata); ok {
+			metadataSM.SetModelID(modelID)
+		} else {
+			m.logger.Warn("Camera state machine does not support metadata, cannot set model ID",
+				zap.String("camera_id", cameraID),
+				zap.String("model_id", modelID),
+			)
+		}
+		// Transition to model_deployed
+		if err := cameraSM.Transition(types.CameraStateModelDeployed, ""); err != nil {
+			m.logger.Warn("Failed to transition camera to model_deployed",
+				zap.String("camera_id", cameraID),
+				zap.String("model_id", modelID),
+				zap.Error(err),
+			)
+		} else {
+			m.logger.Info("Camera state transition: screenshot_set_ready → model_deployed",
+				zap.String("camera_id", cameraID),
+				zap.String("model_id", modelID),
+			)
+			// Persist state update
+			cameraStates := map[string]types.CameraState{cameraID: cameraSM.GetState()}
+			m.persistStateToStorage(ctx, m.getConnectionState(), cameraStates)
+		}
+	} else {
+		// Queue model deployment for later processing when camera reaches screenshot_set_ready
+		m.logger.Info("Model deployed but camera state is not screenshot_set_ready, queuing deployment",
+			zap.String("camera_id", cameraID),
+			zap.String("current_state", string(currentCameraState)),
 			zap.String("model_id", modelID),
 		)
-	} else {
-		m.logger.Debug("Model deployed but state is not screenshot_set_ready, not transitioning",
-			zap.String("current_status", string(currentStatus)),
+		m.pendingModelDeployMu.Lock()
+		m.pendingModelDeployments[cameraID] = &PendingModelDeployment{
+			ModelID:    modelID,
+			CameraID:   cameraID,
+			EventData:  ev.Data,
+			ReceivedAt: time.Now(),
+		}
+		m.pendingModelDeployMu.Unlock()
+		m.logger.Info("Model deployment queued, will process when camera reaches screenshot_set_ready",
+			zap.String("camera_id", cameraID),
 			zap.String("model_id", modelID),
 		)
 	}
-	newState := m.state
-	m.mu.Unlock()
-
-	// Persist state update
-	m.persistStateToStorage(ctx, newState)
 
 	// Build ModelMetadata from event data
 	aiMetadata := &aigwtypes.ModelMetadata{
@@ -1239,73 +2206,168 @@ func (m *StateManagerImpl) handleModelDeployed(ctx context.Context, ev eventbust
 	}
 }
 
-// executeFrameProcessingWorkflow executes workflows when frame processing is active
-// This is the final operational state where Edge is actively monitoring cameras
-func (m *StateManagerImpl) executeFrameProcessingWorkflow(ctx context.Context, state EdgeState) {
-	m.logger.Debug("Edge in frame_processing state - actively monitoring cameras",
-		zap.String("status", string(state.Status)),
-	)
-	// Frame processing is active, no additional workflow needed
-	// The frame processing loops are already running
-}
-
-// executeModelDeployedWorkflow executes workflows when model is deployed
-// This starts continuous frame processing for all enabled cameras
-func (m *StateManagerImpl) executeModelDeployedWorkflow(ctx context.Context, state EdgeState) {
-	m.logger.Info("Starting continuous frame processing for model_deployed state")
-
-	// Get all enabled cameras
-	if m.cctvService == nil {
-		m.logger.Warn("CCTV service not available, cannot start frame processing")
+// executeFrameProcessingWorkflowForCamera executes workflows when a camera is in frame_processing state
+// This is the final operational state where Edge is actively monitoring a camera
+func (m *StateManagerImpl) executeFrameProcessingWorkflowForCamera(ctx context.Context, cameraID string) {
+	cameraSM := m.getCameraStateMachine(cameraID)
+	if cameraSM == nil {
 		return
 	}
 
-	cameras, err := m.cctvService.ListCameras(ctx, true) // enabledOnly = true
+	m.logger.Debug("Camera in frame_processing state - actively monitoring",
+		zap.String("camera_id", cameraID),
+		zap.String("state", string(cameraSM.GetState())),
+	)
+	// Frame processing is active, no additional workflow needed
+	// The frame processing loop is already running
+}
+
+// executeModelDeployedWorkflowForCamera executes workflows when a camera's model is deployed
+// This starts continuous frame processing for the specific camera
+func (m *StateManagerImpl) executeModelDeployedWorkflowForCamera(ctx context.Context, cameraID string) {
+	cameraSM := m.getCameraStateMachine(cameraID)
+	if cameraSM == nil {
+		return
+	}
+
+	m.logger.Info("Starting continuous frame processing for camera with deployed model",
+		zap.String("camera_id", cameraID),
+	)
+
+	// Verify camera exists and is enabled
+	if m.cctvService == nil {
+		m.logger.Warn("CCTV service not available, cannot start frame processing",
+			zap.String("camera_id", cameraID),
+		)
+		return
+	}
+
+	camera, err := m.cctvService.GetCamera(ctx, cameraID)
 	if err != nil {
-		m.logger.Error("Failed to list enabled cameras for frame processing",
+		m.logger.Error("Failed to get camera for frame processing",
+			zap.String("camera_id", cameraID),
 			zap.Error(err),
 		)
 		return
 	}
 
-	if len(cameras) == 0 {
-		m.logger.Info("No enabled cameras found, frame processing not started")
+	if !camera.Enabled {
+		m.logger.Warn("Camera is not enabled, skipping frame processing",
+			zap.String("camera_id", cameraID),
+		)
 		return
 	}
 
-	// Start frame processing for each enabled camera
-	startedCount := 0
-	for _, camera := range cameras {
-		if err := m.startFrameProcessingForCamera(ctx, camera.ID); err == nil {
-			startedCount++
-		}
-	}
-
-	if startedCount > 0 {
-		// Transition to frame_processing state when frame processing successfully starts
-		m.mu.Lock()
-		if m.state.Status == EdgeStatusModelDeployed {
-			m.state.Status = EdgeStatusFrameProcessing
-			m.state.LastUpdated = time.Now()
-			m.logger.Info("State transition: model_deployed → frame_processing",
-				zap.Int("cameras_processing", startedCount),
-			)
-			newState := m.state
-			m.mu.Unlock()
-
-			// Persist state update
-			m.persistStateToStorage(ctx, newState)
-		} else {
-			m.mu.Unlock()
-		}
-
-		m.logger.Info("Frame processing started for all enabled cameras",
-			zap.Int("camera_count", startedCount),
-			zap.Duration("interval", m.frameProcessingInterval),
+	// Start frame processing for this camera
+	if err := m.startFrameProcessingForCamera(ctx, cameraID); err != nil {
+		m.logger.Error("Failed to start frame processing for camera",
+			zap.String("camera_id", cameraID),
+			zap.Error(err),
 		)
-	} else {
-		m.logger.Warn("Failed to start frame processing for any cameras")
+		return
 	}
+
+	// Transition camera to frame_processing state when frame processing successfully starts
+	if cameraSM.CanTransition(types.CameraStateFrameProcessing) {
+		if err := cameraSM.Transition(types.CameraStateFrameProcessing, ""); err != nil {
+			m.logger.Warn("Failed to transition camera to frame_processing",
+				zap.String("camera_id", cameraID),
+				zap.Error(err),
+			)
+		} else {
+			m.logger.Info("Camera state transition: model_deployed → frame_processing",
+				zap.String("camera_id", cameraID),
+			)
+			// Persist state update
+			cameraStates := map[string]types.CameraState{cameraID: cameraSM.GetState()}
+			m.persistStateToStorage(ctx, m.getConnectionState(), cameraStates)
+		}
+	}
+
+	m.logger.Info("Frame processing started for camera",
+		zap.String("camera_id", cameraID),
+		zap.Duration("interval", m.frameProcessingInterval),
+	)
+}
+
+// handleModelDeploymentStatus handles model deployment status events
+// These events are published when a model is deployed and need to be reported to the VM
+func (m *StateManagerImpl) handleModelDeploymentStatus(ctx context.Context, ev eventbustypes.Event) {
+	// Extract event data
+	deploymentID, _ := ev.Data["deployment_id"].(string)
+	status, _ := ev.Data["status"].(string)
+	modelPath, _ := ev.Data["model_path"].(string)
+	modelID, _ := ev.Data["model_id"].(string)
+
+	if deploymentID == "" {
+		m.logger.Warn("Model deployment status event missing deployment_id")
+		return
+	}
+
+	if status == "" {
+		m.logger.Warn("Model deployment status event missing status")
+		return
+	}
+
+	m.logger.Info("Handling model deployment status event",
+		zap.String("deployment_id", deploymentID),
+		zap.String("status", status),
+		zap.String("model_id", modelID),
+		zap.String("model_path", modelPath),
+	)
+
+	// Report deployment status to VM via VM gateway
+	if m.vmGateway == nil {
+		m.logger.Warn("VM gateway not available, cannot report deployment status",
+			zap.String("deployment_id", deploymentID),
+		)
+		return
+	}
+
+	// Check if HTTPS is connected (required for reporting status)
+	if !m.vmGateway.IsHTTPConnected() {
+		m.logger.Debug("HTTPS not connected, cannot report deployment status",
+			zap.String("deployment_id", deploymentID),
+		)
+		// Don't log as warning - this is expected during disconnection
+		return
+	}
+
+	// Prepare error message if status indicates failure
+	var errorMsg *string
+	if status == "failed" || status == "error" {
+		if errMsg, ok := ev.Data["error"].(string); ok && errMsg != "" {
+			errorMsg = &errMsg
+		} else {
+			msg := "Model deployment failed"
+			errorMsg = &msg
+		}
+	}
+
+	// Prepare model path pointer
+	var modelPathPtr *string
+	if modelPath != "" {
+		modelPathPtr = &modelPath
+	}
+
+	// Report status to VM with timeout
+	callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	if err := m.vmGateway.ReportDeploymentStatus(callCtx, deploymentID, status, errorMsg, modelPathPtr); err != nil {
+		m.logger.Error("Failed to report deployment status to VM",
+			zap.String("deployment_id", deploymentID),
+			zap.String("status", status),
+			zap.Error(err),
+		)
+		return
+	}
+
+	m.logger.Info("Model deployment status reported to VM",
+		zap.String("deployment_id", deploymentID),
+		zap.String("status", status),
+		zap.String("model_id", modelID),
+	)
 }
 
 // startFrameProcessingForCamera starts periodic frame capture and processing for a camera
@@ -1393,7 +2455,7 @@ func (m *StateManagerImpl) stopAllFrameProcessing() {
 
 	// Count how many goroutines we're stopping
 	activeCount := len(m.frameProcessingActive)
-	
+
 	// Cancel all contexts to signal goroutines to stop
 	for cameraID, cancel := range m.frameProcessingActive {
 		cancel()
@@ -1479,23 +2541,47 @@ func (m *StateManagerImpl) processFrameForCamera(ctx context.Context, cameraID s
 		return
 	}
 
-	// Capture frame from camera
-	frame, err := m.cctvService.CaptureFrame(ctx, cameraID)
+	// Capture frame from camera with timeout
+	captureCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	frame, err := m.cctvService.CaptureFrame(captureCtx, cameraID)
 	if err != nil {
 		m.logger.Warn("Failed to capture frame from camera",
 			zap.String("camera_id", cameraID),
 			zap.Error(err),
 		)
+		// Track consecutive failures
+		m.frameErrorMu.Lock()
+		m.frameCaptureErrors[cameraID]++
+		errorCount := m.frameCaptureErrors[cameraID]
+		m.frameErrorMu.Unlock()
+		// If too many consecutive failures, transition to error state
+		if errorCount >= m.frameCaptureErrorThreshold {
+			m.logger.Error("Too many consecutive frame capture failures, transitioning camera to error state",
+				zap.String("camera_id", cameraID),
+				zap.Int("error_count", errorCount),
+			)
+			cameraSM := m.getCameraStateMachine(cameraID)
+			if cameraSM != nil && cameraSM.CanTransition(types.CameraStateError) {
+				_ = cameraSM.Transition(types.CameraStateError, fmt.Sprintf("Frame capture failed %d times", errorCount))
+			}
+		}
 		return
 	}
+	// Reset error count on success
+	m.frameErrorMu.Lock()
+	delete(m.frameCaptureErrors, cameraID)
+	m.frameErrorMu.Unlock()
 
 	// Store frame in object storage (frames bucket)
 	frameID := fmt.Sprintf("frame-%s-%d", cameraID, time.Now().Unix())
 	frameKey := fmt.Sprintf("frames/%s/%s/%s.jpg", cameraID, time.Now().Format("2006-01-02"), frameID)
 
 	if m.objectStorage != nil {
-		// Store frame image data
-		err = m.objectStorage.StoreFrame(ctx, frameKey, frame.Data)
+		// Store frame image data with timeout
+		storeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		err = m.objectStorage.StoreFrame(storeCtx, frameKey, frame.Data)
 		if err != nil {
 			m.logger.Warn("Failed to store frame in object storage",
 				zap.String("camera_id", cameraID),
@@ -1511,7 +2597,7 @@ func (m *StateManagerImpl) processFrameForCamera(ctx context.Context, cameraID s
 		)
 	}
 
-	// Send frame to AI gateway for processing
+	// Send frame to AI gateway for processing with timeout
 	if m.aiGateway != nil {
 		// Use AI gateway to process the frame
 		// The AI gateway will:
@@ -1519,7 +2605,9 @@ func (m *StateManagerImpl) processFrameForCamera(ctx context.Context, cameraID s
 		// 2. Process the frame
 		// 3. Determine if it's similar to training set or has anomalies
 		// 4. Delete normal frames or move suspicious ones to security event bucket
-		err = m.aiGateway.ProcessFrame(ctx, cameraID, frameKey, frame.Data)
+		processCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		err = m.aiGateway.ProcessFrame(processCtx, cameraID, frameKey, frame.Data)
 		if err != nil {
 			m.logger.Warn("Failed to process frame with AI gateway",
 				zap.String("camera_id", cameraID),
@@ -1560,8 +2648,17 @@ func (m *StateManagerImpl) handleScreenshotSaved(ctx context.Context, ev eventbu
 
 // executeScreenshotSetReadyWorkflow executes workflows when screenshot set is ready
 // This syncs screenshots and their labels to VM for model training
-func (m *StateManagerImpl) executeScreenshotSetReadyWorkflow(ctx context.Context, state EdgeState) {
-	m.logger.Debug("Edge in screenshot_set_ready state")
+// executeScreenshotSetReadyWorkflowForCamera executes workflows when a camera's screenshot set is ready
+func (m *StateManagerImpl) executeScreenshotSetReadyWorkflowForCamera(ctx context.Context, cameraID string) {
+	cameraSM := m.getCameraStateMachine(cameraID)
+	if cameraSM == nil {
+		return
+	}
+
+	m.logger.Debug("Camera in screenshot_set_ready state",
+		zap.String("camera_id", cameraID),
+		zap.String("state", string(cameraSM.GetState())),
+	)
 	// Screenshot sync is handled in handleScreenshotSetReady when the event is received
 }
 
@@ -1569,11 +2666,6 @@ func (m *StateManagerImpl) executeScreenshotSetReadyWorkflow(ctx context.Context
 func (m *StateManagerImpl) initiateWireGuardConnection(ctx context.Context) {
 	if m.vmGateway == nil {
 		m.logger.Error("VM gateway not available, cannot establish WireGuard connection")
-		m.mu.Lock()
-		m.state.Status = EdgeStatusVMGatewayError
-		m.state.LastUpdated = time.Now()
-		m.persistStateToStorage(ctx, m.state)
-		m.mu.Unlock()
 		return
 	}
 
@@ -1582,22 +2674,22 @@ func (m *StateManagerImpl) initiateWireGuardConnection(ctx context.Context) {
 	// Check if already connected
 	if m.vmGateway.IsConnected() {
 		m.logger.Info("WireGuard already connected")
-		// Update state to wireguard_connected
-		m.mu.Lock()
-		if m.state.Status == EdgeStatusWGConnecting || m.state.Status == EdgeStatusInitializing || m.state.Status == EdgeStatusDisconnected {
-			m.state.Status = EdgeStatusWireGuardConn
-			m.state.NetworkConnected = true
-			m.state.LastUpdated = time.Now()
+		// Update connection state to wireguard_connected
+		currentState := m.getConnectionState()
+		if currentState == vmgatewaytypes.ConnectionStateDisconnected || currentState == vmgatewaytypes.ConnectionStateWGConnecting {
+			if m.vmGateway != nil {
+				if err := m.vmGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateWireGuardConnected, ""); err != nil {
+					m.logger.Warn("Failed to transition to wireguard_connected", zap.Error(err))
+				} else {
+					connectionState := m.getConnectionState()
+					m.persistStateToStorageWithErrorHandling(ctx, connectionState, nil, "wireguard_connected")
+				}
+			}
 		}
-		newState := m.state
-		m.mu.Unlock()
 
-		// Persist state update
-		m.persistStateToStorage(ctx, newState)
-
-		m.logger.Info("Edge state updated",
-			zap.String("status", string(newState.Status)),
-			zap.Bool("network_connected", newState.NetworkConnected))
+		m.logger.Info("Connection state updated",
+			zap.String("connection_state", string(m.getConnectionState())),
+		)
 
 		// WireGuard is started via fx lifecycle, we just monitor connection status
 		return
@@ -1616,33 +2708,34 @@ func (m *StateManagerImpl) initiateWireGuardConnection(ctx context.Context) {
 			return
 		case <-timeout.C:
 			m.logger.Error("WireGuard connection timeout - connection not established within 60 seconds")
-			m.mu.Lock()
-			if m.state.Status == EdgeStatusWGConnecting {
-				m.state.Status = EdgeStatusWGConnectionError
-				m.state.LastUpdated = time.Now()
-				m.persistStateToStorage(ctx, m.state)
+			currentState := m.getConnectionState()
+			if currentState == vmgatewaytypes.ConnectionStateWGConnecting {
+				if m.vmGateway != nil {
+					_ = m.vmGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateWGConnectionError, "Connection timeout")
+					connectionState := m.getConnectionState()
+					m.persistStateToStorageWithErrorHandling(ctx, connectionState, nil, "wireguard_timeout")
+				}
 			}
-			m.mu.Unlock()
 			return
 		case <-ticker.C:
 			if m.vmGateway.IsConnected() {
 				m.logger.Info("WireGuard connection established")
-				// Update state to wireguard_connected
-				m.mu.Lock()
-				if m.state.Status == EdgeStatusWGConnecting {
-					m.state.Status = EdgeStatusWireGuardConn
-					m.state.NetworkConnected = true
-					m.state.LastUpdated = time.Now()
+				// Update connection state to wireguard_connected
+				currentState := m.getConnectionState()
+				if currentState == vmgatewaytypes.ConnectionStateWGConnecting {
+					if m.vmGateway != nil {
+						if err := m.vmGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateWireGuardConnected, ""); err != nil {
+							m.logger.Warn("Failed to transition to wireguard_connected", zap.Error(err))
+						} else {
+							connectionState := m.getConnectionState()
+							m.persistStateToStorageWithErrorHandling(ctx, connectionState, nil, "wireguard_connected_after_retry")
+						}
+					}
 				}
-				newState := m.state
-				m.mu.Unlock()
 
-				// Persist state update
-				m.persistStateToStorage(ctx, newState)
-
-				m.logger.Info("Edge state updated",
-					zap.String("status", string(newState.Status)),
-					zap.Bool("network_connected", newState.NetworkConnected))
+				m.logger.Info("Connection state updated",
+					zap.String("connection_state", string(m.getConnectionState())),
+				)
 				return
 			}
 		}
@@ -1653,11 +2746,6 @@ func (m *StateManagerImpl) initiateWireGuardConnection(ctx context.Context) {
 func (m *StateManagerImpl) initiateHTTPConnection(ctx context.Context) {
 	if m.vmGateway == nil {
 		m.logger.Error("VM gateway not available, cannot establish HTTP connection")
-		m.mu.Lock()
-		m.state.Status = EdgeStatusVMGatewayError
-		m.state.LastUpdated = time.Now()
-		m.persistStateToStorage(ctx, m.state)
-		m.mu.Unlock()
 		return
 	}
 
@@ -1682,85 +2770,226 @@ func (m *StateManagerImpl) initiateHTTPConnection(ctx context.Context) {
 	if err != nil {
 		m.logger.Error("HTTP connection test failed - VM is not reachable or not running",
 			zap.Error(err))
-		m.mu.Lock()
-		if m.state.Status == EdgeStatusHTTPConnecting {
-			m.state.Status = EdgeStatusHTTPConnectionError
-			m.state.LastUpdated = time.Now()
-			m.persistStateToStorage(ctx, m.state)
+		currentState := m.getConnectionState()
+		if currentState == vmgatewaytypes.ConnectionStateHTTPConnecting {
+			if m.vmGateway != nil {
+				_ = m.vmGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateHTTPConnectionError, fmt.Sprintf("Authentication failed: %v", err))
+				connectionState := m.getConnectionState()
+				m.persistStateToStorageWithErrorHandling(ctx, connectionState, nil, "http_auth_error")
+			}
 		}
-		m.mu.Unlock()
 		return
 	}
 
 	// Connection successful
 	m.logger.Info("HTTP connection established and authenticated (dev mode)")
-	m.mu.Lock()
-	if m.state.Status == EdgeStatusHTTPConnecting {
-		m.state.Status = EdgeStatusHTTPSConn
-		m.state.NetworkConnected = true
-		m.state.VMAuthenticated = true
-		m.state.LastUpdated = time.Now()
+	currentState := m.getConnectionState()
+	if currentState == vmgatewaytypes.ConnectionStateHTTPConnecting {
+		if m.vmGateway != nil {
+			if err := m.vmGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateHTTPSConnected, ""); err != nil {
+				m.logger.Warn("Failed to transition to https_connected", zap.Error(err))
+			} else {
+				// After HTTPS connection, try to authenticate
+				if m.vmGateway != nil {
+					if err := m.vmGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateAuthenticated, ""); err != nil {
+						m.logger.Warn("Failed to transition to authenticated", zap.Error(err))
+					}
+					connectionState := m.getConnectionState()
+					m.persistStateToStorageWithErrorHandling(ctx, connectionState, nil, "http_authenticated")
+				}
+			}
+		}
 	}
-	newState := m.state
-	m.mu.Unlock()
 
-	// Persist state update
-	m.persistStateToStorage(ctx, newState)
-
-	m.logger.Info("Edge state updated",
-		zap.String("status", string(newState.Status)),
-		zap.Bool("network_connected", newState.NetworkConnected),
-		zap.Bool("vm_authenticated", newState.VMAuthenticated))
+	var connectionStateInfo vmgatewaytypes.ConnectionStateInfo
+	if m.vmGateway != nil {
+		connectionStateInfo = m.vmGateway.GetConnectionStateInfo()
+	}
+	m.logger.Info("Connection state updated",
+		zap.String("connection_state", string(m.getConnectionState())),
+		zap.Bool("vm_reachable", connectionStateInfo.VMReachable))
 }
 
 // handleErrorState handles error state
-func (m *StateManagerImpl) handleErrorState(ctx context.Context, state EdgeState) {
-	m.logger.Warn("Edge in error state, attempting recovery")
+// handleConnectionErrorState handles connection-level error states
+func (m *StateManagerImpl) handleConnectionErrorState(ctx context.Context, connectionState vmgatewaytypes.ConnectionState) {
+	m.logger.Warn("Edge in connection error state, attempting recovery",
+		zap.String("connection_state", string(connectionState)),
+	)
 
-	// Workflow: Error recovery
-	// 1. Identify error source
-	// 2. Attempt recovery
-	// 3. Alert if recovery fails
+	// Identify error source from connection state
+	var errorMessage string
+	if m.vmGateway != nil {
+		connectionStateInfo := m.vmGateway.GetConnectionStateInfo()
+		if connectionStateInfo.Error != "" {
+			errorMessage = connectionStateInfo.Error
+		}
+	}
+
+	// Attempt recovery based on error type
+	switch connectionState {
+	case vmgatewaytypes.ConnectionStateWGConnectionError:
+		m.logger.Info("Attempting WireGuard connection recovery",
+			zap.String("error", errorMessage),
+		)
+		// Retry WireGuard connection after a delay
+		m.wg.Add(1)
+		go func() {
+			defer m.wg.Done()
+			time.Sleep(10 * time.Second) // Wait before retry
+			if m.getConnectionState() == vmgatewaytypes.ConnectionStateWGConnectionError {
+				m.logger.Info("Retrying WireGuard connection")
+				if m.vmGateway != nil {
+					_ = m.vmGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateDisconnected, "")
+					m.initiateWireGuardConnection(m.ctx)
+				}
+			}
+		}()
+
+	case vmgatewaytypes.ConnectionStateHTTPConnectionError:
+		m.logger.Info("Attempting HTTP connection recovery",
+			zap.String("error", errorMessage),
+		)
+		// Retry HTTP connection after a delay
+		m.wg.Add(1)
+		go func() {
+			defer m.wg.Done()
+			time.Sleep(10 * time.Second) // Wait before retry
+			if m.getConnectionState() == vmgatewaytypes.ConnectionStateHTTPConnectionError {
+				m.logger.Info("Retrying HTTP connection")
+				if m.vmGateway != nil {
+					_ = m.vmGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateDisconnected, "")
+					m.initiateHTTPConnection(m.ctx)
+				}
+			}
+		}()
+
+	case vmgatewaytypes.ConnectionStateError:
+		m.logger.Info("Attempting general error recovery",
+			zap.String("error", errorMessage),
+		)
+		// Check service health and retry connection
+		m.wg.Add(1)
+		go func() {
+			defer m.wg.Done()
+			time.Sleep(30 * time.Second) // Wait longer for general errors
+			if m.getConnectionState() == vmgatewaytypes.ConnectionStateError {
+				m.logger.Info("Retrying connection after error recovery")
+				m.checkServicesHealth(m.ctx)
+			}
+		}()
+
+	default:
+		m.logger.Debug("No specific recovery strategy for connection state",
+			zap.String("connection_state", string(connectionState)),
+		)
+	}
 }
 
-// GetStatus returns the current edge status (thread-safe).
-func (m *StateManagerImpl) GetStatus() EdgeStatus {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.state.Status
-}
+// handleCameraErrorState handles camera-level error states
+func (m *StateManagerImpl) handleCameraErrorState(ctx context.Context, cameraID string, cameraState types.CameraState) {
+	cameraSM := m.getCameraStateMachine(cameraID)
+	if cameraSM == nil {
+		return
+	}
 
-// GetState returns the current edge state (thread-safe).
-func (m *StateManagerImpl) GetState() EdgeState {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.state
+	stateInfo := cameraSM.GetStateInfo()
+	m.logger.Warn("Camera in error state, attempting recovery",
+		zap.String("camera_id", cameraID),
+		zap.String("camera_state", string(cameraState)),
+		zap.String("error", stateInfo.Error),
+	)
+
+	// Identify error source from error message
+	errorMessage := stateInfo.Error
+
+	// Attempt recovery based on error type
+	if strings.Contains(errorMessage, "Frame capture failed") {
+		// Frame capture error - try to recover by resetting error count and retrying discovery
+		m.logger.Info("Attempting camera recovery from frame capture errors",
+			zap.String("camera_id", cameraID),
+		)
+
+		// Reset frame capture error count
+		m.frameErrorMu.Lock()
+		delete(m.frameCaptureErrors, cameraID)
+		m.frameErrorMu.Unlock()
+
+		// Retry camera discovery after a delay
+		m.wg.Add(1)
+		go func() {
+			defer m.wg.Done()
+			time.Sleep(30 * time.Second) // Wait before retry
+			if cameraSM.GetState() == types.CameraStateError {
+				m.logger.Info("Retrying camera discovery after error recovery",
+					zap.String("camera_id", cameraID),
+				)
+				// Try to transition back to discovered state
+				if cameraSM.CanTransition(types.CameraStateDiscovered) {
+					_ = cameraSM.Transition(types.CameraStateDiscovered, "")
+					// Trigger camera discovery workflow
+					if m.cctvService != nil {
+						// Camera should be rediscovered on next capability sync or discovery event
+						m.logger.Info("Camera state reset to discovered, will be rediscovered",
+							zap.String("camera_id", cameraID),
+						)
+					}
+				}
+			}
+		}()
+	} else {
+		// Other camera errors - try to recover by resetting to discovered state
+		m.logger.Info("Attempting general camera error recovery",
+			zap.String("camera_id", cameraID),
+			zap.String("error", errorMessage),
+		)
+
+		m.wg.Add(1)
+		go func() {
+			defer m.wg.Done()
+			time.Sleep(30 * time.Second) // Wait before retry
+			if cameraSM.GetState() == types.CameraStateError {
+				m.logger.Info("Retrying camera recovery",
+					zap.String("camera_id", cameraID),
+				)
+				// Try to transition back to discovered state
+				if cameraSM.CanTransition(types.CameraStateDiscovered) {
+					_ = cameraSM.Transition(types.CameraStateDiscovered, "")
+					m.logger.Info("Camera state reset to discovered",
+						zap.String("camera_id", cameraID),
+					)
+				}
+			}
+		}()
+	}
 }
 
 // checkServicesHealth checks the health of all services and updates status if any are unhealthy
 func (m *StateManagerImpl) checkServicesHealth(ctx context.Context) {
-	m.mu.Lock()
-
-	// Only check health if status is initializing
-	if m.state.Status != EdgeStatusInitializing {
-		m.mu.Unlock()
+	// Check connection state - only check health if in disconnected state (initial state)
+	connectionState := m.getConnectionState()
+	if connectionState != vmgatewaytypes.ConnectionStateDisconnected {
 		return
 	}
 
 	// Check meta-storage health (required service)
 	if m.metaStorage == nil {
 		m.logger.Error("Meta-storage is not available")
-		m.state.Status = EdgeStatusMetaStorageError
-		m.state.LastUpdated = time.Now()
-		m.persistStateToStorage(ctx, m.state)
+		if m.vmGateway != nil {
+			_ = m.vmGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateError, "Meta-storage is not available")
+			connectionState := m.getConnectionState()
+			m.persistStateToStorageWithErrorHandling(ctx, connectionState, nil, "health_check_meta_storage_unavailable")
+		}
 		return
 	}
 	_, err := m.metaStorage.GetStorageStats(ctx)
 	if err != nil {
 		m.logger.Error("Meta-storage health check failed", zap.Error(err))
-		m.state.Status = EdgeStatusMetaStorageError
-		m.state.LastUpdated = time.Now()
-		m.persistStateToStorage(ctx, m.state)
+		if m.vmGateway != nil {
+			_ = m.vmGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateError, fmt.Sprintf("Meta-storage health check failed: %v", err))
+			connectionState := m.getConnectionState()
+			m.persistStateToStorageWithErrorHandling(ctx, connectionState, nil, "health_check_meta_storage_failed")
+		}
 		return
 	}
 	m.logger.Debug("Meta-storage health check passed")
@@ -1777,9 +3006,11 @@ func (m *StateManagerImpl) checkServicesHealth(ctx context.Context) {
 	// Check CCTV service health (required service)
 	if m.cctvService == nil {
 		m.logger.Error("CCTV service is not available")
-		m.state.Status = EdgeStatusCCTVServiceError
-		m.state.LastUpdated = time.Now()
-		m.persistStateToStorage(ctx, m.state)
+		if m.vmGateway != nil {
+			_ = m.vmGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateError, "CCTV service is not available")
+			connectionState := m.getConnectionState()
+			m.persistStateToStorageWithErrorHandling(ctx, connectionState, nil, "health_check_cctv_unavailable")
+		}
 		return
 	}
 	m.logger.Debug("CCTV service is available")
@@ -1787,9 +3018,11 @@ func (m *StateManagerImpl) checkServicesHealth(ctx context.Context) {
 	// Check AI gateway health (required service)
 	if m.aiGateway == nil {
 		m.logger.Error("AI gateway is not available")
-		m.state.Status = EdgeStatusAIGatewayError
-		m.state.LastUpdated = time.Now()
-		m.persistStateToStorage(ctx, m.state)
+		if m.vmGateway != nil {
+			_ = m.vmGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateError, "AI gateway is not available")
+			connectionState := m.getConnectionState()
+			m.persistStateToStorageWithErrorHandling(ctx, connectionState, nil, "health_check_ai_gateway_unavailable")
+		}
 		return
 	}
 	m.logger.Debug("AI gateway is available")
@@ -1806,18 +3039,17 @@ func (m *StateManagerImpl) checkServicesHealth(ctx context.Context) {
 	// Check web gateway health (required service)
 	if m.webGateway == nil {
 		m.logger.Error("Web gateway is not available")
-		m.state.Status = EdgeStatusWebGatewayError
-		m.state.LastUpdated = time.Now()
-		m.persistStateToStorage(ctx, m.state)
+		if m.vmGateway != nil {
+			_ = m.vmGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateError, "Web gateway is not available")
+			connectionState := m.getConnectionState()
+			m.persistStateToStorageWithErrorHandling(ctx, connectionState, nil, "health_check_web_gateway_unavailable")
+		}
 		return
 	}
 	m.logger.Debug("Web gateway is available")
 
 	// All required services are healthy, now initiate connection
 	m.logger.Info("All services health checks passed, initiating connection")
-
-	// Unlock mutex before calling initiateConnection (it will lock its own mutex)
-	m.mu.Unlock()
 
 	// Initiate connection based on WireGuard configuration
 	m.initiateConnection(ctx)
@@ -1826,24 +3058,19 @@ func (m *StateManagerImpl) checkServicesHealth(ctx context.Context) {
 // initiateConnection initiates WireGuard or HTTP connection based on configuration
 func (m *StateManagerImpl) initiateConnection(ctx context.Context) {
 	m.logger.Info("initiateConnection called")
-	m.mu.Lock()
 
-	// Only proceed if status is still initializing
-	currentStatus := m.state.Status
-	m.logger.Info("Current status check", zap.String("status", string(currentStatus)))
-	if currentStatus != EdgeStatusInitializing {
-		m.logger.Debug("Status is not initializing, skipping connection initiation", zap.String("status", string(currentStatus)))
-		m.mu.Unlock()
+	// Only proceed if connection state is still disconnected
+	currentState := m.getConnectionState()
+	m.logger.Info("Current connection state check", zap.String("connection_state", string(currentState)))
+	if currentState != vmgatewaytypes.ConnectionStateDisconnected {
+		m.logger.Debug("Connection state is not disconnected, skipping connection initiation", zap.String("connection_state", string(currentState)))
 		return
 	}
 
 	// Check if VM gateway is available
 	if m.vmGateway == nil {
 		m.logger.Warn("VM gateway is not available, cannot establish connection")
-		m.state.Status = EdgeStatusVMGatewayError
-		m.state.LastUpdated = time.Now()
-		m.persistStateToStorage(ctx, m.state)
-		m.mu.Unlock()
+		// Note: Cannot transition state if vmGateway is nil, so we just return
 		return
 	}
 	m.logger.Info("VM gateway is available")
@@ -1862,10 +3089,16 @@ func (m *StateManagerImpl) initiateConnection(ctx context.Context) {
 	if wireGuardEnabled {
 		// WireGuard is enabled - initiate WireGuard connection
 		m.logger.Info("WireGuard is enabled, initiating WireGuard connection")
-		m.state.Status = EdgeStatusWGConnecting
-		m.state.LastUpdated = time.Now()
-		m.persistStateToStorage(ctx, m.state)
-		m.mu.Unlock()
+		if m.vmGateway != nil {
+			_ = m.vmGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateWGConnecting, "")
+		}
+		connectionState := m.getConnectionState()
+		if err := m.persistStateToStorage(ctx, connectionState, nil); err != nil {
+			m.logger.Warn("Failed to persist state during WireGuard connection initiation",
+				zap.Error(err),
+				zap.String("connection_state", string(connectionState)),
+			)
+		}
 
 		// Start WireGuard connection in a goroutine
 		m.wg.Add(1)
@@ -1876,36 +3109,466 @@ func (m *StateManagerImpl) initiateConnection(ctx context.Context) {
 	} else {
 		// WireGuard is disabled (dev mode) - connect via HTTP directly
 		m.logger.Info("WireGuard is disabled, connecting via HTTP (localhost/dev mode)")
-		m.state.Status = EdgeStatusHTTPConnecting
-		m.state.LastUpdated = time.Now()
-		m.persistStateToStorage(ctx, m.state)
-		m.mu.Unlock()
+		if m.vmGateway != nil {
+			_ = m.vmGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateHTTPConnecting, "")
+		}
+		connectionState := m.getConnectionState()
+		if err := m.persistStateToStorage(ctx, connectionState, nil); err != nil {
+			m.logger.Warn("Failed to persist state during HTTP connection initiation",
+				zap.Error(err),
+				zap.String("connection_state", string(connectionState)),
+			)
+		}
 
 		// Call HTTP connection synchronously so we can update status based on result
 		m.initiateHTTPConnection(ctx)
 	}
 }
 
-// persistStateToStorage persists the edge state to meta-storage
-func (m *StateManagerImpl) persistStateToStorage(ctx context.Context, state EdgeState) {
+// persistStateToStorageWithErrorHandling is a helper that calls persistStateToStorage and logs errors
+// This is used in error paths where we want to persist state but don't want to fail the operation if persistence fails
+func (m *StateManagerImpl) persistStateToStorageWithErrorHandling(ctx context.Context, connectionState vmgatewaytypes.ConnectionState, cameraStates map[string]types.CameraState, operation string) {
+	if err := m.persistStateToStorage(ctx, connectionState, cameraStates); err != nil {
+		m.logger.Warn("Failed to persist state",
+			zap.Error(err),
+			zap.String("operation", operation),
+			zap.String("connection_state", string(connectionState)),
+			zap.Int("camera_states_count", len(cameraStates)),
+		)
+	}
+}
+
+// persistStateToStorage persists the connection state and camera states to meta-storage
+// This method saves both connection state and per-camera states separately for better state management
+// Implements retry logic with exponential backoff for transient failures
+// Returns error if persistence fails after all retry attempts
+func (m *StateManagerImpl) persistStateToStorage(ctx context.Context, connectionState vmgatewaytypes.ConnectionState, cameraStates map[string]types.CameraState) error {
 	if m.metaStorage == nil {
-		return
+		return fmt.Errorf("meta-storage not available")
 	}
 
-	// Convert EdgeState to map for storage
+	// Get connection state info
+	var connectionStateInfo vmgatewaytypes.ConnectionStateInfo
+	if m.vmGateway != nil {
+		connectionStateInfo = m.vmGateway.GetConnectionStateInfo()
+	} else {
+		connectionStateInfo = vmgatewaytypes.ConnectionStateInfo{
+			State:         connectionState,
+			LastUpdated:   time.Now(),
+			VMReachable:   false,
+			NetworkHealth: "unhealthy",
+		}
+	}
+	operationalState := m.getOperationalState()
+
+	// Build comprehensive state map with connection state and operational metrics
 	stateMap := map[string]interface{}{
-		"status":               string(state.Status),
-		"network_connected":    state.NetworkConnected,
-		"vm_authenticated":     state.VMAuthenticated,
-		"cameras_enabled":      state.CamerasEnabled,
-		"ai_processing_active": state.AIProcessingActive,
-		"storage_health":       state.StorageHealth,
-		"last_updated":         state.LastUpdated.Format(time.RFC3339),
+		"connection_state":         string(connectionState),
+		"connection_error":         connectionStateInfo.Error,
+		"network_health":           connectionStateInfo.NetworkHealth,
+		"vm_reachable":             connectionStateInfo.VMReachable,
+		"connection_last_updated":  connectionStateInfo.LastUpdated.Format(time.RFC3339),
+		"cameras_enabled":          operationalState.CamerasEnabled,
+		"ai_processing_active":     operationalState.AIProcessingActive,
+		"storage_health":            operationalState.StorageHealth,
+		"operational_last_updated": operationalState.LastUpdated.Format(time.RFC3339),
+		"last_updated":             time.Now().Format(time.RFC3339), // Overall state timestamp
 	}
 
-	if err := m.metaStorage.SaveEdgeState(ctx, stateMap); err != nil {
-		m.logger.Warn("failed to persist edge state to storage", zap.Error(err))
+	// Add camera states separately - each camera state is stored with its full info
+	if cameraStates != nil && len(cameraStates) > 0 {
+		cameraStatesMap := make(map[string]interface{})
+		for cameraID, state := range cameraStates {
+			// Get full camera state info if state machine exists
+			cameraSM := m.getCameraStateMachine(cameraID)
+			if cameraSM != nil {
+				stateInfo := cameraSM.GetStateInfo()
+				cameraStatesMap[cameraID] = map[string]interface{}{
+					"state":         string(state),
+					"error":         stateInfo.Error,
+					"model_id":      stateInfo.ModelID,
+					"dataset_id":    stateInfo.DatasetID,
+					"is_processing": stateInfo.IsProcessing,
+					"last_updated":  stateInfo.LastUpdated.Format(time.RFC3339),
+				}
+			} else {
+				// Fallback: just store the state if state machine doesn't exist yet
+				cameraStatesMap[cameraID] = map[string]interface{}{
+					"state":        string(state),
+					"last_updated": time.Now().Format(time.RFC3339),
+				}
+			}
+		}
+		stateMap["camera_states"] = cameraStatesMap
+	} else {
+		// If no camera states provided, persist all current camera states
+		allCameraSMs := m.getAllCameraStateMachines()
+		if len(allCameraSMs) > 0 {
+			cameraStatesMap := make(map[string]interface{})
+			for cameraID, cameraSM := range allCameraSMs {
+				stateInfo := cameraSM.GetStateInfo()
+				cameraStatesMap[cameraID] = map[string]interface{}{
+					"state":         string(stateInfo.State),
+					"error":         stateInfo.Error,
+					"model_id":      stateInfo.ModelID,
+					"dataset_id":    stateInfo.DatasetID,
+					"is_processing": stateInfo.IsProcessing,
+					"last_updated":  stateInfo.LastUpdated.Format(time.RFC3339),
+				}
+			}
+			stateMap["camera_states"] = cameraStatesMap
+		}
 	}
+
+	// Attempt persistence with retry logic
+	maxRetries := m.statePersistenceMaxRetries
+	backoff := m.statePersistenceRetryBackoff
+	var lastErr error
+
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		// Check context cancellation before each attempt
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("context cancelled during state persistence: %w", ctx.Err())
+		default:
+		}
+
+		// Attempt to persist
+		err := m.metaStorage.SaveEdgeState(ctx, stateMap)
+		if err == nil {
+			// Success - log if retry was needed
+			if attempt > 0 {
+				m.logger.Info("Edge state persisted successfully after retry",
+					zap.Int("attempt", attempt+1),
+					zap.String("connection_state", string(connectionState)),
+					zap.Int("camera_states_count", len(cameraStates)),
+				)
+			} else {
+				m.logger.Debug("Edge state persisted successfully",
+					zap.String("connection_state", string(connectionState)),
+					zap.Int("camera_states_count", len(cameraStates)),
+				)
+			}
+			return nil
+		}
+
+		lastErr = err
+
+		// If this was the last attempt, don't wait
+		if attempt >= maxRetries {
+			break
+		}
+
+		// Calculate exponential backoff: backoff * 2^attempt
+		multiplier := 1 << attempt // 2^attempt
+		waitTime := time.Duration(int64(backoff) * int64(multiplier))
+		if waitTime > 10*time.Second {
+			waitTime = 10 * time.Second // Cap at 10 seconds
+		}
+
+		m.logger.Warn("Failed to persist edge state to storage, retrying",
+			zap.Error(err),
+			zap.Int("attempt", attempt+1),
+			zap.Int("max_retries", maxRetries),
+			zap.Duration("backoff", waitTime),
+			zap.String("connection_state", string(connectionState)),
+			zap.Int("camera_states_count", len(cameraStates)),
+		)
+
+		// Wait with exponential backoff, respecting context cancellation
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("context cancelled during state persistence retry: %w", ctx.Err())
+		case <-time.After(waitTime):
+			// Continue to next retry attempt
+		}
+	}
+
+	// All retries exhausted - log error and return
+	m.logger.Error("Failed to persist edge state to storage after all retry attempts",
+		zap.Error(lastErr),
+		zap.Int("total_attempts", maxRetries+1),
+		zap.String("connection_state", string(connectionState)),
+		zap.Int("camera_states_count", len(cameraStates)),
+	)
+	return fmt.Errorf("failed to persist state after %d attempts: %w", maxRetries+1, lastErr)
+}
+
+// restoreStateFromStorage restores connection state and camera states from meta-storage
+// This is called on startup to recover the previous state
+func (m *StateManagerImpl) restoreStateFromStorage(ctx context.Context) error {
+	if m.metaStorage == nil {
+		return fmt.Errorf("meta-storage not available")
+	}
+
+	// Get current edge state from meta-storage
+	stateMap, exists := m.metaStorage.GetCurrentEdgeState(ctx)
+	if !exists {
+		m.logger.Info("No previous edge state found in storage, starting fresh")
+		return fmt.Errorf("no previous state found")
+	}
+
+	// Restore connection state
+	if connectionStateStr, ok := stateMap["connection_state"].(string); ok {
+		connectionState := vmgatewaytypes.ConnectionState(connectionStateStr)
+		// Validate connection state before restoring
+		if connectionState == vmgatewaytypes.ConnectionStateDisconnected ||
+			connectionState == vmgatewaytypes.ConnectionStateWGConnecting ||
+			connectionState == vmgatewaytypes.ConnectionStateWireGuardConnected ||
+			connectionState == vmgatewaytypes.ConnectionStateHTTPConnecting ||
+			connectionState == vmgatewaytypes.ConnectionStateHTTPSConnected ||
+			connectionState == vmgatewaytypes.ConnectionStateAuthenticated ||
+			connectionState == vmgatewaytypes.ConnectionStateCapabilitiesReceived ||
+			connectionState == vmgatewaytypes.ConnectionStateError ||
+			connectionState == vmgatewaytypes.ConnectionStateWGConnectionError ||
+			connectionState == vmgatewaytypes.ConnectionStateHTTPConnectionError {
+
+			// Get error message if present
+			errorMsg := ""
+			if errStr, ok := stateMap["connection_error"].(string); ok {
+				errorMsg = errStr
+			}
+
+			if m.vmGateway != nil {
+				if err := m.vmGateway.TransitionConnectionState(connectionState, errorMsg); err != nil {
+					m.logger.Warn("Failed to restore connection state, using disconnected",
+						zap.String("restored_state", string(connectionState)),
+						zap.Error(err),
+					)
+					_ = m.vmGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateDisconnected, "")
+				} else {
+					m.logger.Info("Connection state restored from storage",
+						zap.String("connection_state", string(connectionState)),
+					)
+				}
+			}
+		} else {
+			m.logger.Warn("Invalid connection state in storage, using disconnected",
+				zap.String("invalid_state", connectionStateStr),
+			)
+			if m.vmGateway != nil {
+				_ = m.vmGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateDisconnected, "")
+			}
+		}
+	}
+
+	// Restore operational state
+	if storageHealth, ok := stateMap["storage_health"].(string); ok {
+		m.updateOperationalState(func(op *OperationalState) {
+			op.StorageHealth = storageHealth
+		})
+	}
+	if camerasEnabled, ok := stateMap["cameras_enabled"].(int); ok {
+		m.updateOperationalState(func(op *OperationalState) {
+			op.CamerasEnabled = camerasEnabled
+		})
+	}
+	if aiProcessingActive, ok := stateMap["ai_processing_active"].(bool); ok {
+		m.updateOperationalState(func(op *OperationalState) {
+			op.AIProcessingActive = aiProcessingActive
+		})
+	}
+
+	// Restore camera states
+	if cameraStatesRaw, ok := stateMap["camera_states"].(map[string]interface{}); ok {
+		restoredCount := 0
+		for cameraID, cameraStateRaw := range cameraStatesRaw {
+			cameraStateMap, ok := cameraStateRaw.(map[string]interface{})
+			if !ok {
+				// Try string format (backward compatibility)
+				if stateStr, ok := cameraStateRaw.(string); ok {
+					cameraState := types.CameraState(stateStr)
+					cameraSM := m.getOrCreateCameraStateMachine(cameraID)
+					if cameraSM == nil {
+						m.logger.Warn("Failed to get/create camera state machine for state restoration",
+							zap.String("camera_id", cameraID),
+						)
+						continue
+					}
+					if err := cameraSM.Transition(cameraState, ""); err == nil {
+						restoredCount++
+					}
+				}
+				continue
+			}
+
+			// Restore camera state with full info
+			if stateStr, ok := cameraStateMap["state"].(string); ok {
+				cameraState := types.CameraState(stateStr)
+				cameraSM := m.getOrCreateCameraStateMachine(cameraID)
+				if cameraSM == nil {
+					m.logger.Warn("Failed to get/create camera state machine for state restoration",
+						zap.String("camera_id", cameraID),
+					)
+					continue
+				}
+
+				// Restore state
+				errorMsg := ""
+				if errStr, ok := cameraStateMap["error"].(string); ok {
+					errorMsg = errStr
+				}
+
+				if err := cameraSM.Transition(cameraState, errorMsg); err != nil {
+					m.logger.Warn("Failed to restore camera state",
+						zap.String("camera_id", cameraID),
+						zap.String("state", stateStr),
+						zap.Error(err),
+					)
+					continue
+				}
+
+				// Restore model ID and dataset ID if present
+				if metadataSM, ok := cameraSM.(types.CameraStateMachineWithMetadata); ok {
+					if modelID, ok := cameraStateMap["model_id"].(string); ok && modelID != "" {
+						metadataSM.SetModelID(modelID)
+					}
+					if datasetID, ok := cameraStateMap["dataset_id"].(string); ok && datasetID != "" {
+						metadataSM.SetDatasetID(datasetID)
+					}
+				} else {
+					m.logger.Warn("Camera state machine does not support metadata, cannot restore model/dataset ID",
+						zap.String("camera_id", cameraID),
+					)
+				}
+
+				restoredCount++
+				m.logger.Debug("Camera state restored from storage",
+					zap.String("camera_id", cameraID),
+					zap.String("state", string(cameraState)),
+				)
+			}
+		}
+		m.logger.Info("Camera states restored from storage",
+			zap.Int("restored_count", restoredCount),
+			zap.Int("total_in_storage", len(cameraStatesRaw)),
+		)
+	}
+
+	// After restoring states, recover active workflows
+	m.recoverActiveWorkflows(ctx)
+
+	return nil
+}
+
+// recoverActiveWorkflows recovers active workflows based on restored states
+// This includes resuming frame processing for cameras that were in frame_processing state,
+// and re-establishing connections if needed
+func (m *StateManagerImpl) recoverActiveWorkflows(ctx context.Context) {
+	connectionState := m.getConnectionState()
+
+	// Recover connection workflows if needed
+	if connectionState == vmgatewaytypes.ConnectionStateWGConnecting {
+		m.logger.Info("Recovering WireGuard connection workflow")
+		// Connection attempt was in progress, re-initiate
+		m.wg.Add(1)
+		go func() {
+			defer m.wg.Done()
+			m.initiateWireGuardConnection(ctx)
+		}()
+	} else if connectionState == vmgatewaytypes.ConnectionStateHTTPConnecting {
+		m.logger.Info("Recovering HTTP connection workflow")
+		// HTTP connection attempt was in progress, re-initiate
+		m.initiateHTTPConnection(ctx)
+	} else if connectionState == vmgatewaytypes.ConnectionStateError ||
+		connectionState == vmgatewaytypes.ConnectionStateWGConnectionError ||
+		connectionState == vmgatewaytypes.ConnectionStateHTTPConnectionError {
+		m.logger.Info("Recovering from connection error state",
+			zap.String("connection_state", string(connectionState)),
+		)
+		// Transition to disconnected to allow retry
+		if m.vmGateway != nil {
+			_ = m.vmGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateDisconnected, "")
+		}
+		// Re-initiate connection
+		m.initiateConnection(ctx)
+	} else if connectionState == vmgatewaytypes.ConnectionStateCapabilitiesReceived {
+		m.logger.Info("Recovering capabilities workflow - checking for cameras to sync")
+		// Capabilities were received, check if we need to sync cameras
+		if m.cctvService != nil {
+			// Trigger camera discovery/sync if needed
+			m.wg.Add(1)
+			go func() {
+				defer m.wg.Done()
+				// Check if cameras need to be synced
+				cameras, err := m.cctvService.GetDiscoveredCameras(ctx)
+				if err == nil && len(cameras) > 0 {
+					m.syncCamerasWithVM(ctx)
+				}
+			}()
+		}
+	}
+
+	// Recover camera workflows
+	allCameraSMs := m.getAllCameraStateMachines()
+	for cameraID, cameraSM := range allCameraSMs {
+		cameraState := cameraSM.GetState()
+		stateInfo := cameraSM.GetStateInfo()
+
+		// Recover frame processing for cameras that were in frame_processing state
+		if cameraState == types.CameraStateFrameProcessing {
+			m.logger.Info("Recovering frame processing workflow for camera",
+				zap.String("camera_id", cameraID),
+			)
+			// Resume frame processing for this camera
+			if err := m.startFrameProcessingForCamera(ctx, cameraID); err != nil {
+				m.logger.Warn("Failed to resume frame processing for camera",
+					zap.String("camera_id", cameraID),
+					zap.Error(err),
+				)
+				// Transition to error state if we can't resume
+				_ = cameraSM.Transition(types.CameraStateError, fmt.Sprintf("Failed to resume frame processing: %v", err))
+			}
+		} else if cameraState == types.CameraStateModelDeployed {
+			m.logger.Info("Recovering model deployment workflow for camera",
+				zap.String("camera_id", cameraID),
+				zap.String("model_id", stateInfo.ModelID),
+			)
+			// Model was deployed, start frame processing
+			if err := m.startFrameProcessingForCamera(ctx, cameraID); err != nil {
+				m.logger.Warn("Failed to start frame processing for camera after recovery",
+					zap.String("camera_id", cameraID),
+					zap.Error(err),
+				)
+			} else {
+				// Transition to frame_processing if successful
+				if cameraSM.CanTransition(types.CameraStateFrameProcessing) {
+					_ = cameraSM.Transition(types.CameraStateFrameProcessing, "")
+				}
+			}
+		} else if cameraState == types.CameraStateError {
+			m.logger.Info("Recovering from camera error state",
+				zap.String("camera_id", cameraID),
+				zap.String("error", stateInfo.Error),
+			)
+			// Camera was in error state, attempt recovery by transitioning to discovered
+			// This allows the camera to go through the normal workflow again
+			if cameraSM.CanTransition(types.CameraStateDiscovered) {
+				_ = cameraSM.Transition(types.CameraStateDiscovered, "")
+				m.logger.Info("Camera error state cleared, reset to discovered",
+					zap.String("camera_id", cameraID),
+				)
+			}
+		} else if cameraState == types.CameraStateScreenshotSetReady {
+			m.logger.Info("Recovering screenshot set ready workflow for camera",
+				zap.String("camera_id", cameraID),
+				zap.String("dataset_id", stateInfo.DatasetID),
+			)
+			// Screenshot set was ready, check if we need to sync to VM
+			if m.vmGateway != nil && m.vmGateway.IsConnected() {
+				m.wg.Add(1)
+				go func() {
+					defer m.wg.Done()
+					m.syncScreenshotsToVM(ctx, cameraID)
+				}()
+			}
+		}
+	}
+
+	m.logger.Info("Active workflows recovery completed",
+		zap.String("connection_state", string(connectionState)),
+		zap.Int("cameras_recovered", len(allCameraSMs)),
+	)
 }
 
 // SyncCameraCapabilities syncs capabilities for a single camera to the VM
@@ -1977,7 +3640,10 @@ func (m *StateManagerImpl) capabilitySyncLoop(ctx context.Context) {
 			m.syncOnce(ctx)
 		case <-retryTicker.C:
 			// Retry pending syncs if HTTPS connection becomes ready
-			if m.pendingSync {
+			m.pendingSyncMu.RLock()
+			shouldRetry := m.pendingSync
+			m.pendingSyncMu.RUnlock()
+			if shouldRetry {
 				m.logger.Debug("Retrying capability sync for pending cameras")
 				m.syncOnce(ctx)
 			}
@@ -1993,7 +3659,9 @@ func (m *StateManagerImpl) syncOnce(ctx context.Context) {
 	// Check HTTPS connection first
 	if m.vmGateway == nil || !m.vmGateway.IsHTTPConnected() {
 		m.logger.Debug("Skipping capability sync - HTTPS not connected (will retry when connection is ready)")
+		m.pendingSyncMu.Lock()
 		m.pendingSync = true // Mark as pending so we retry when connection is ready
+		m.pendingSyncMu.Unlock()
 		return
 	}
 
@@ -2013,7 +3681,9 @@ func (m *StateManagerImpl) syncOnce(ctx context.Context) {
 
 	if len(cameras) == 0 {
 		m.logger.Debug("Skipping capability sync - no cameras discovered yet")
+		m.pendingSyncMu.Lock()
 		m.pendingSync = false
+		m.pendingSyncMu.Unlock()
 		return
 	}
 
@@ -2025,10 +3695,28 @@ func (m *StateManagerImpl) syncOnce(ctx context.Context) {
 		SyncedAt: time.Now().UnixNano(),
 	}
 
+	// Track which cameras have changed since last sync
+	now := time.Now()
+	changedCameras := make(map[string]bool)
+
 	for _, cam := range cameras {
-		status := m.buildDatasetStatus(ctx, cam)
-		if status != nil {
-			req.Cameras = append(req.Cameras, m.toCameraCapability(cam, status))
+		// Check if camera has changed since last sync
+		m.capabilitySyncMu.RLock()
+		lastSync, hasLastSync := m.lastCapabilitySync[cam.ID]
+		m.capabilitySyncMu.RUnlock()
+
+		// Sync if:
+		// 1. Never synced before
+		// 2. Last sync was more than syncInterval ago
+		// 3. Camera metadata changed (we'll sync all for now, can be optimized later)
+		shouldSync := !hasLastSync || now.Sub(lastSync) >= m.syncInterval
+
+		if shouldSync {
+			status := m.buildDatasetStatus(ctx, cam)
+			if status != nil {
+				req.Cameras = append(req.Cameras, m.toCameraCapability(cam, status))
+				changedCameras[cam.ID] = true
+			}
 		}
 	}
 
@@ -2041,7 +3729,9 @@ func (m *StateManagerImpl) syncOnce(ctx context.Context) {
 
 	if m.vmGateway == nil {
 		m.logger.Debug("Skipping capability sync - VM gateway not available")
+		m.pendingSyncMu.Lock()
 		m.pendingSync = true
+		m.pendingSyncMu.Unlock()
 		return
 	}
 
@@ -2052,13 +3742,17 @@ func (m *StateManagerImpl) syncOnce(ctx context.Context) {
 			m.logger.Debug("Capability sync failed - authentication not ready, will retry",
 				zap.Error(err),
 			)
+			m.pendingSyncMu.Lock()
 			m.pendingSync = true
+			m.pendingSyncMu.Unlock()
 			return
 		}
 		m.logger.Warn("Capability sync failed",
 			zap.Error(err),
 		)
+		m.pendingSyncMu.Lock()
 		m.pendingSync = true // Retry on other errors too
+		m.pendingSyncMu.Unlock()
 		return
 	}
 
@@ -2068,20 +3762,37 @@ func (m *StateManagerImpl) syncOnce(ctx context.Context) {
 			m.logger.Debug("Capability sync rejected - authentication not ready, will retry",
 				zap.String("error", resp.ErrorMessage),
 			)
+			m.pendingSyncMu.Lock()
 			m.pendingSync = true
+			m.pendingSyncMu.Unlock()
 			return
 		}
 		m.logger.Info("Capability sync rejected",
 			zap.String("error", resp.ErrorMessage),
 		)
+		m.pendingSyncMu.Lock()
 		m.pendingSync = true
+		m.pendingSyncMu.Unlock()
 		return
 	}
 
-	// Success - clear pending flag
+	// Success - clear pending flag and update last sync timestamps
+	m.pendingSyncMu.Lock()
 	m.pendingSync = false
+	m.pendingSyncMu.Unlock()
+
+	// Update last sync timestamp for successfully synced cameras
+	if len(changedCameras) > 0 {
+		m.capabilitySyncMu.Lock()
+		for cameraID := range changedCameras {
+			m.lastCapabilitySync[cameraID] = now
+		}
+		m.capabilitySyncMu.Unlock()
+	}
+
 	m.logger.Info("Capability sync sent successfully",
 		zap.Int("cameras", len(req.Cameras)),
+		zap.Int("changed_cameras", len(changedCameras)),
 	)
 }
 
@@ -2155,10 +3866,10 @@ func contains(s, substr string) bool {
 
 // UploadDatasetForCamera packages and uploads all screenshots for a camera to the VM
 func (m *StateManagerImpl) UploadDatasetForCamera(ctx context.Context, cameraID string, screenshotList []interface{}) (string, error) {
-	m.mu.RLock()
+	m.operationalMu.RLock()
 	config := m.config
 	edgeID := m.edgeID
-	m.mu.RUnlock()
+	m.operationalMu.RUnlock()
 
 	// Convert screenshot list to CCTV screenshot type
 	screenshots := make([]*cctvtypes.Screenshot, 0, len(screenshotList))
@@ -2447,10 +4158,10 @@ func (m *StateManagerImpl) calculateFileChecksum(filePath string) ([]byte, error
 
 // uploadDataset uploads a dataset archive to the VM
 func (m *StateManagerImpl) uploadDataset(ctx context.Context, archivePath string, cameraID string, checksum string, edgeID string) (string, error) {
-	m.mu.RLock()
+	m.operationalMu.RLock()
 	httpClient := m.httpClient
 	vmEndpoint := m.vmEndpoint
-	m.mu.RUnlock()
+	m.operationalMu.RUnlock()
 
 	if httpClient == nil {
 		return "", fmt.Errorf("HTTP client not initialized")

@@ -121,3 +121,38 @@ type SyncScreenshotsResponse struct {
 	ErrorMessage string `json:"error_message,omitempty"`
 	Message      string `json:"message,omitempty"`
 }
+
+// AuditLogEntry represents a single audit log entry for sync to VM
+type AuditLogEntry struct {
+	ID           string                 `json:"id"`
+	Type         string                 `json:"type"`
+	Timestamp    int64                  `json:"timestamp"` // Unix timestamp
+	EdgeID       string                 `json:"edge_id"`
+	UserID       string                 `json:"user_id,omitempty"`
+	IPAddress    string                 `json:"ip_address,omitempty"`
+	UserAgent    string                 `json:"user_agent,omitempty"`
+	Result       string                 `json:"result"`
+	Error        string                 `json:"error,omitempty"`
+	PreviousHash string                 `json:"previous_hash,omitempty"`
+	Hash         string                 `json:"hash"`
+	Data         map[string]interface{} `json:"data"` // Entry-specific data
+	Format       string                 `json:"format,omitempty"` // "json" or "cef"
+	CEF          string                 `json:"cef,omitempty"` // CEF formatted entry if format is "cef"
+}
+
+// SyncAuditLogsRequest contains the payload for syncing audit logs to the VM.
+type SyncAuditLogsRequest struct {
+	EdgeID     string           `json:"edge_id"`
+	StartTime  int64            `json:"start_time"`  // Unix timestamp of first entry
+	EndTime    int64            `json:"end_time"`     // Unix timestamp of last entry
+	EntryCount int              `json:"entry_count"`  // Number of entries in this batch
+	Entries    []*AuditLogEntry `json:"entries"`      // Audit log entries
+	Format     string           `json:"format"`       // "json" or "cef"
+}
+
+// SyncAuditLogsResponse represents the VM response for audit log sync.
+type SyncAuditLogsResponse struct {
+	Success      bool   `json:"success"`
+	ErrorMessage string `json:"error_message,omitempty"`
+	SyncedCount  int    `json:"synced_count,omitempty"` // Number of entries successfully synced
+}

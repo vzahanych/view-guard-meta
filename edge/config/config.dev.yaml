@@ -7,8 +7,16 @@ edge:
 
   # Event bus configuration
   event_bus:
-    provider: inmemory
+    provider: metastorage
     buffer_size: 100
+    max_retries: 3
+    initial_backoff: 1s
+    max_backoff: 60s
+    backoff_multiplier: 2.0
+    retry_interval: 10s
+    ordering_mode: best_effort  # Event ordering: "none", "best_effort", "strict"
+    ordering_buffer_size: 100   # Buffer size for out-of-order events
+    ordering_timeout: 30s        # Timeout for waiting for missing sequences in strict mode
 
   # AI Gateway configuration
   ai:

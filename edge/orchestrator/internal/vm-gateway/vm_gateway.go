@@ -91,6 +91,25 @@ type VMGateway interface {
 	// SendEvents sends events to the VM.
 	SendEvents(ctx context.Context, events []*wgclienttypes.Event) error
 
+	// SyncAuditLogs syncs audit logs to the VM for long-term storage and analysis.
+	// Audit logs are sent in batches with metadata for efficient transfer.
+	SyncAuditLogs(ctx context.Context, req *httpsclienttypes.SyncAuditLogsRequest) (*httpsclienttypes.SyncAuditLogsResponse, error)
+
+	// Connection state machine methods
+
+	// GetConnectionState returns the current connection state
+	GetConnectionState() types.ConnectionState
+
+	// GetConnectionStateInfo returns detailed connection state information
+	GetConnectionStateInfo() types.ConnectionStateInfo
+
+	// TransitionConnectionState transitions to a new connection state
+	// Returns error if transition is invalid
+	TransitionConnectionState(newState types.ConnectionState, errorMsg string) error
+
+	// CanTransitionConnectionState checks if a transition from current state to new state is valid
+	CanTransitionConnectionState(newState types.ConnectionState) bool
+
 	// Access to underlying services (for advanced use cases)
 
 	// GetWGClientService returns the underlying WireGuard client service.

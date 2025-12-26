@@ -53,6 +53,8 @@ const (
 	COCOClassTruck      = 7
 )
 
+// ToEventState and SecurityEventFromEventState have been moved to impl/event_storage.go
+
 // ClassIDToSecurityEventType maps COCO class IDs to security event types
 var ClassIDToSecurityEventType = map[int]string{
 	COCOClassPerson:     SecurityEventTypePersonDetected,
@@ -72,9 +74,6 @@ func NewSecurityEvent() *SecurityEvent {
 		Metadata:  make(map[string]interface{}),
 	}
 }
-
-// ToEventState and SecurityEventFromEventState have been moved to impl/event_storage.go
-// These functions are now internal to the state-mng implementation
 
 // IsSignificant returns true if the security event is significant enough to be stored
 func (e *SecurityEvent) IsSignificant(minConfidence float64) bool {

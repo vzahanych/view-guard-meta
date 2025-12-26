@@ -13,6 +13,7 @@ import (
 	httpsclient "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/vm-gateway/http-impl/https-client-service"
 	httpsclienttypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/vm-gateway/http-impl/https-client-service/types"
 	httpsserver "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/vm-gateway/http-impl/https-server-service"
+	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/vm-gateway/connection-state-machine/impl"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/vm-gateway/types"
 	wgclient "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/vm-gateway/wg-client-service"
 	wgclienttypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/vm-gateway/wg-client-service/types"
@@ -20,13 +21,14 @@ import (
 
 // vmGateway implements the VMGateway interface
 type VmGatewayHttpImpl struct {
-	wgClientService    wgclient.WGClientService
-	httpsServerService httpsserver.HTTPSServerService
-	httpsClientService httpsclient.HTTPSClientService // Use interface instead of concrete type
-	wgCfg              *wgclienttypes.WGClientConfig
-	logger             *zap.Logger
-	mu                 sync.RWMutex
-	started            bool
+	wgClientService       wgclient.WGClientService
+	httpsServerService    httpsserver.HTTPSServerService
+	httpsClientService    httpsclient.HTTPSClientService // Use interface instead of concrete type
+	connectionStateMachine types.ConnectionStateMachine
+	wgCfg                 *wgclienttypes.WGClientConfig
+	logger                *zap.Logger
+	mu                    sync.RWMutex
+	started               bool
 }
 
 // NewVMGateway creates a new VMGateway implementation that composes
@@ -73,11 +75,12 @@ func NewVmGatewayHttpImpl(
 	}
 
 	return &VmGatewayHttpImpl{
-		wgClientService:    wgClientSvc,
-		httpsServerService: httpsServerSvc,
-		httpsClientService: httpsClientSvc,
-		wgCfg:              &cfg.WireGuard,
-		logger:             logger,
+		wgClientService:       wgClientSvc,
+		httpsServerService:    httpsServerSvc,
+		httpsClientService:    httpsClientSvc,
+		connectionStateMachine: impl.NewConnectionStateMachine(),
+		wgCfg:                 &cfg.WireGuard,
+		logger:                logger,
 	}, nil
 }
 
@@ -327,6 +330,16 @@ func (g *VmGatewayHttpImpl) SyncScreenshots(ctx context.Context, req *httpsclien
 	return g.httpsClientService.SyncScreenshots(ctx, req)
 }
 
+// SyncAuditLogs syncs audit logs to the VM for long-term storage and analysis.
+func (g *VmGatewayHttpImpl) SyncAuditLogs(ctx context.Context, req *httpsclienttypes.SyncAuditLogsRequest) (*httpsclienttypes.SyncAuditLogsResponse, error) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	if g.httpsClientService == nil {
+		return nil, fmt.Errorf("HTTPS client not initialized")
+	}
+	return g.httpsClientService.SyncAuditLogs(ctx, req)
+}
+
 // ReportDeploymentStatus reports deployment status to the VM
 func (g *VmGatewayHttpImpl) ReportDeploymentStatus(ctx context.Context, deploymentID string, status string, errorMessage *string, modelPath *string) error {
 	g.mu.RLock()
@@ -365,4 +378,34 @@ func (g *VmGatewayHttpImpl) SendEvents(ctx context.Context, events []*wgclientty
 		return fmt.Errorf("HTTPS client not initialized")
 	}
 	return g.httpsClientService.SendEvents(ctx, events)
+}
+
+// Connection state machine methods
+
+// GetConnectionState returns the current connection state
+func (g *VmGatewayHttpImpl) GetConnectionState() types.ConnectionState {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.connectionStateMachine.GetState()
+}
+
+// GetConnectionStateInfo returns detailed connection state information
+func (g *VmGatewayHttpImpl) GetConnectionStateInfo() types.ConnectionStateInfo {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.connectionStateMachine.GetStateInfo()
+}
+
+// TransitionConnectionState transitions to a new connection state
+func (g *VmGatewayHttpImpl) TransitionConnectionState(newState types.ConnectionState, errorMsg string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.connectionStateMachine.Transition(newState, errorMsg)
+}
+
+// CanTransitionConnectionState checks if a transition from current state to new state is valid
+func (g *VmGatewayHttpImpl) CanTransitionConnectionState(newState types.ConnectionState) bool {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.connectionStateMachine.CanTransition(newState)
 }

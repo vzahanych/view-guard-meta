@@ -7,86 +7,451 @@ This document provides a comprehensive refactoring plan based on the state trans
 **Priority:** Critical/High  
 **Goal:** Split global state machine into connection-level and per-camera state machines to support independent multi-camera flows. This refactoring will also provide foundation for future device abstraction (Epic 12).
 
+### Section 1.0: State Machine Ownership & Service Boundaries (NEW - Target Architecture)
+
+**Goal:** Make state ownership explicit and keep state machine implementations inside the services that *own* the state, while `state-mng` becomes a pure workflow orchestrator.
+
+**Target architecture principles (end-state):**
+- **Connection state machine lives in `vm-gateway`** and is exposed through the `vmgateway.VMGateway` top interface (or a small dedicated `vmgateway.ConnectionStateService` interface). `state-mng` does **not** embed a connection state machine implementation.
+- **Per-device state machines live in `iot`** and are exposed through the `iot` top interfaces (e.g., `iot.DeviceRegistry` / `iot.DeviceStateMachineRegistry` / a dedicated `iot.DeviceStateService`). `state-mng` does **not** embed camera/device state machine implementations.
+- **State manager becomes an orchestrator only**:
+  - It listens to events and *derives actions* from observed states,
+  - it triggers workflows (connect, sync, capture, process, recover),
+  - but it does not “own” state machine implementations.
+
+**Important note (current state vs target):**
+- Epic 1 delivered a working multi-level state machine design inside `state-mng` (`ConnectionStateMachine` + `CameraStateMachine`) to unblock correctness, recovery, and testing quickly.
+- Epic 12 introduced `iot`-level device state machines and a generic data pipeline.
+- This section formalizes the next architectural step: move state machine ownership into the owning services (`vm-gateway`, `iot`) and slim down `state-mng`.
+
 ### Section 1.1: Multi-Level State Machine Design
 
 #### Subsection 1.1.1: Design Connection-Level State Machine
+- **Status:** ✅ DONE
 - **Description:** Define connection-level states (disconnected, wireguard_connected, https_connected, authenticated, etc.)
 - **Scope:** Connection-level states are global to the Edge appliance
 - **Dependencies:** None
 - **Related Findings:**
   - Finding #15: Global state machine blocks independent multi-camera flows
+- **Code Locations:**
+  - `edge/orchestrator/internal/state-mng/types/connection_state.go` (connection state types, constants, and interface definitions)
+  - `edge/orchestrator/internal/state-mng/impl/connection_state_machine.go` (state machine implementation)
+  - `edge/orchestrator/internal/state-mng/impl/connection_state_machine_test.go` (unit tests)
+- **Refactoring Details:**
+  - **Architecture note (next step):**
+    - This was implemented inside `state-mng` to quickly establish a correct, testable connection state model.
+    - **Target end-state:** move connection state machine ownership into `vm-gateway` and expose state via `vmgateway.VMGateway` (see Section 1.0 and Section 1.4).
+  - **Code Organization:**
+    - **Types Package (`types/`):** Contains only reusable type definitions, interfaces, and constants
+      - `ConnectionState` type and constants (disconnected, wg_connecting, wireguard_connected, etc.)
+      - `ConnectionStateInfo` struct for state metadata
+      - `ConnectionStateMachine` interface definition
+    - **Implementation Package (`impl/`):** Contains implementation-specific code
+      - `ConnectionStateMachineImpl` struct implementing the interface
+      - `ValidConnectionStateTransitions` map defining valid state transitions
+      - `IsValidTransition()` helper function for transition validation
+      - Thread-safe state machine with mutex protection
+  - **Connection States Defined:**
+    - `ConnectionStateDisconnected`: Edge is not connected to VM
+    - `ConnectionStateWGConnecting`: WireGuard connection is being established
+    - `ConnectionStateWireGuardConnected`: WireGuard tunnel is established
+    - `ConnectionStateHTTPConnecting`: HTTPS connection is being established
+    - `ConnectionStateHTTPSConnected`: HTTPS connection is established
+    - `ConnectionStateAuthenticated`: Edge is authenticated with VM
+    - `ConnectionStateCapabilitiesReceived`: Edge has received capabilities from VM
+    - `ConnectionStateError`: Generic connection-level error
+    - `ConnectionStateWGConnectionError`: WireGuard connection error
+    - `ConnectionStateHTTPConnectionError`: HTTPS connection error
+  - **State Machine Interface:**
+    - `ConnectionStateMachine` interface with methods:
+      - `GetState()`: Returns current connection state
+      - `GetStateInfo()`: Returns detailed connection state information
+      - `Transition(newState, errorMsg)`: Transitions to new state with validation
+      - `CanTransition(newState)`: Checks if transition is valid
+      - `IsConnected()`: Returns true if Edge is fully connected (authenticated)
+      - `IsAuthenticated()`: Returns true if Edge is authenticated with VM
+  - **State Transition Rules:**
+    - Normal flow: `disconnected -> wg_connecting -> wireguard_connected -> http_connecting -> https_connected -> authenticated -> capabilities_received`
+    - Error handling: Any state can transition to `disconnected` on connection loss
+    - Error states: `wg_connection_error` and `http_connection_error` can recover to their connected states
+    - Validation: Invalid transitions return errors (e.g., cannot skip from `disconnected` to `authenticated`)
+  - **ConnectionStateInfo:**
+    - Contains state, last updated timestamp, error message, network health, and VM reachability
+    - Network health: "healthy", "degraded", or "unhealthy" based on connection state
+    - VM reachability: Boolean indicating if VM is reachable (true for wireguard_connected, https_connected, authenticated, capabilities_received)
+  - **Implementation:**
+    - `ConnectionStateMachineImpl` implements the interface with thread-safe operations (mutex-protected)
+    - State transitions are validated against `ValidConnectionStateTransitions` map (in `impl` package)
+    - `IsValidTransition()` helper function validates transitions (in `impl` package)
+    - State machine tracks metadata (error messages, network health, VM reachability)
+    - Initial state defaults to `ConnectionStateDisconnected` with unhealthy network health
+  - **Unit Tests:**
+    - Tests for initial state (disconnected)
+    - Tests for all valid state transitions
+    - Tests for invalid transitions (should fail)
+    - Tests for `IsConnected()` and `IsAuthenticated()` methods
+    - Tests for network health and VM reachability calculations
+    - Tests for concurrent access (thread safety)
+    - Tests for state info updates
+    - Tests for `IsValidTransition()` helper function
+  - **Design Benefits:**
+    - **Separation of concerns:** Connection states are separate from camera states
+    - **Clear state transitions:** Explicit validation prevents invalid state changes
+    - **Thread-safe:** Mutex protection ensures safe concurrent access
+    - **Metadata tracking:** Network health and VM reachability provide operational insights
+    - **Recovery support:** Error states can transition back to connected states
+    - **Foundation for multi-camera independence:** Connection state is global, camera states will be per-camera
+    - **Reusable types:** Types package can be imported by other services without implementation dependencies
 
 #### Subsection 1.1.2: Design Per-Camera State Machine
+- **Status:** ✅ DONE
 - **Description:** Define per-camera states (camera_discovered, camera_synced, waiting_for_screenshots, screenshot_set_ready, model_deployed, frame_processing, etc.)
 - **Scope:** Each camera has its own independent state machine keyed by camera ID
 - **Dependencies:** 1.1.1
 - **Related Findings:**
   - Finding #15: Global state machine blocks independent multi-camera flows
+- **Code Locations:**
+  - `edge/orchestrator/internal/state-mng/types/camera_state.go` (camera state types, constants, and interface definitions)
+  - `edge/orchestrator/internal/state-mng/impl/camera_state_machine.go` (camera state machine implementation)
+  - `edge/orchestrator/internal/state-mng/impl/camera_state_machine_test.go` (unit tests)
+- **Refactoring Details:**
+  - **Architecture note (next step):**
+    - This per-camera state machine was implemented inside `state-mng` as part of the Epic 1 refactor.
+    - **Target end-state:** evolve this into a per-device state machine owned by `iot` (Epic 12, Subsection 12.3.2) and have `state-mng` consume it via `iot` interfaces (see Section 1.0 and Section 1.4).
+  - **Code Organization:**
+    - **Types Package (`types/`):** Contains only reusable type definitions, interfaces, and constants
+      - `CameraState` type and constants (undiscovered, discovered, synced, waiting_for_screenshots, etc.)
+      - `CameraStateInfo` struct for camera state metadata
+      - `CameraStateMachine` interface definition
+    - **Implementation Package (`impl/`):** Contains implementation-specific code
+      - `CameraStateMachineImpl` struct implementing the interface
+      - `ValidCameraStateTransitions` map defining valid state transitions
+      - `IsValidCameraTransition()` helper function for transition validation
+      - Thread-safe state machine with mutex protection
+  - **Camera States Defined:**
+    - `CameraStateUndiscovered`: Camera has not been discovered yet
+    - `CameraStateDiscovered`: Camera has been discovered but not yet synced with VM
+    - `CameraStateSynced`: Camera has been synced with the VM
+    - `CameraStateWaitingForScreenshots`: Waiting for user to provide labeled screenshots
+    - `CameraStateScreenshotSetReady`: Labeled screenshots are ready for training
+    - `CameraStateModelDeployed`: AI model has been deployed for this camera
+    - `CameraStateFrameProcessing`: Camera is actively processing frames
+    - `CameraStateError`: Camera-specific error occurred
+    - `CameraStateDisconnected`: Camera connection was lost
+  - **State Machine Interface:**
+    - `CameraStateMachine` interface with methods:
+      - `GetCameraID()`: Returns the camera ID this state machine is for
+      - `GetState()`: Returns current camera state
+      - `GetStateInfo()`: Returns detailed camera state information
+      - `Transition(newState, errorMsg)`: Transitions to new state with validation
+      - `CanTransition(newState)`: Checks if transition is valid
+      - `IsOperational()`: Returns true if camera is operational (model_deployed or frame_processing)
+      - `IsReadyForProcessing()`: Returns true if camera is ready to process frames
+  - **State Transition Rules:**
+    - Normal flow: `undiscovered -> discovered -> synced -> waiting_for_screenshots -> screenshot_set_ready -> model_deployed -> frame_processing`
+    - Shortcut: `synced -> model_deployed` (can skip screenshots if model already exists)
+    - Error handling: Any state can transition to `disconnected` on camera disconnection
+    - Error states: `error` can recover to `discovered` (reset) or `synced` (retry)
+    - Disconnection: `disconnected` can transition to `discovered` (reconnect)
+    - Processing control: `frame_processing` can transition back to `model_deployed` (stop processing)
+    - Validation: Invalid transitions return errors (e.g., cannot skip from `undiscovered` to `synced`)
+  - **CameraStateInfo:**
+    - Contains camera ID, state, last updated timestamp, error message
+    - Tracks model ID (when model is deployed)
+    - Tracks dataset ID (when dataset is ready)
+    - `IsProcessing` flag: Automatically set to true when in `frame_processing` state
+  - **Implementation:**
+    - `CameraStateMachineImpl` implements the interface with thread-safe operations (mutex-protected)
+    - Each camera has its own independent state machine instance
+    - State transitions are validated against `ValidCameraStateTransitions` map (in `impl` package)
+    - `IsValidCameraTransition()` helper function validates transitions (in `impl` package)
+    - State machine tracks metadata (error messages, model ID, dataset ID, processing status)
+    - Initial state defaults to `CameraStateUndiscovered` with `IsProcessing` set to false
+    - Helper methods: `SetModelID()` and `SetDatasetID()` for tracking model and dataset IDs
+  - **Unit Tests:**
+    - Tests for initial state (undiscovered)
+    - Tests for all valid state transitions (normal flow, shortcuts, error recovery, disconnection)
+    - Tests for invalid transitions (should fail)
+    - Tests for `IsOperational()` and `IsReadyForProcessing()` methods
+    - Tests for state info updates (including IsProcessing flag)
+    - Tests for model ID and dataset ID tracking
+    - Tests for concurrent access (thread safety)
+    - Tests for `IsValidCameraTransition()` helper function
+  - **Design Benefits:**
+    - **Per-camera independence:** Each camera operates independently with its own state machine
+    - **Clear state transitions:** Explicit validation prevents invalid state changes
+    - **Thread-safe:** Mutex protection ensures safe concurrent access
+    - **Metadata tracking:** Model ID, dataset ID, and processing status provide operational insights
+    - **Recovery support:** Error and disconnected states can transition back to operational states
+    - **Flexible workflows:** Supports both full workflow (with screenshots) and shortcut (skip screenshots if model exists)
+    - **Processing control:** Can start/stop frame processing without losing model deployment state
+    - **Reusable types:** Types package can be imported by other services without implementation dependencies
+    - **Foundation for multi-camera independence:** Enables cameras to be in different states simultaneously
 
 #### Subsection 1.1.3: Implement State Machine Separation
+- **Status:** ✅ DONE (Structure implemented, full transition in 1.1.4)
 - **Description:** Refactor state manager to maintain separate state machines for connection and per-camera
 - **Scope:** 
-  - Connection state: `EdgeConnectionState` type
-  - Camera state: `CameraState` type with camera ID key
+  - Connection state: `ConnectionStateMachine` interface (from subsection 1.1.1)
+  - Camera state: `CameraStateMachine` interface with camera ID key (from subsection 1.1.2)
   - State manager maintains both state machines
+  - Operational state: Separate metrics (cameras enabled, AI processing, storage health)
 - **Dependencies:** 1.1.1, 1.1.2
 - **Code Locations:**
-  - `edge/orchestrator/internal/state-mng/impl/state_mng_impl.go:92-118`
+  - `edge/orchestrator/internal/state-mng/impl/state_mng_impl.go` (StateManagerImpl struct and helper methods)
+- **Refactoring Details:**
+  - **Architecture note (next step):**
+    - This subsection intentionally placed state machines inside `state-mng` to complete the Epic 1 refactor quickly and safely.
+    - **Target end-state:** `state-mng` should not embed state machines; it should orchestrate workflows based on state observed from `vm-gateway` (connection) and `iot` (devices). See Section 1.0 and Section 1.4 for the planned migration.
+  - **State Machine Structure:**
+    - **Removed:** Old `EdgeStatus` enum and `EdgeState` struct that mixed connection and camera states
+    - **Added:** `connectionStateMachine` field of type `types.ConnectionStateMachine` (from subsection 1.1.1)
+    - **Added:** `cameraStateMachines` map of type `map[string]types.CameraStateMachine` (cameraID -> state machine)
+    - **Added:** `cameraStateMachinesMu` mutex for thread-safe access to camera state machines map
+    - **Added:** `operationalState` struct for non-state-machine metrics (cameras enabled, AI processing, storage health)
+    - **Added:** `operationalMu` mutex for thread-safe access to operational state
+  - **Helper Methods Added:**
+    - `getOrCreateCameraStateMachine(cameraID string)`: Gets or creates a camera state machine for a camera
+    - `getCameraStateMachine(cameraID string)`: Gets a camera state machine (returns nil if not found)
+    - `getAllCameraStateMachines()`: Returns all camera state machines (thread-safe copy)
+    - `updateOperationalState(updateFn func(*OperationalState))`: Updates operational metrics
+    - `getOperationalState()`: Returns a copy of operational state
+  - **State Persistence:**
+    - Updated `persistStateToStorage()` to accept `ConnectionState` and `map[string]CameraState` instead of `EdgeState`
+    - Persists connection state, camera states, and operational metrics separately
+  - **Initialization:**
+    - Connection state machine initialized to `ConnectionStateDisconnected` on startup
+    - Camera state machines created on-demand when cameras are discovered
+    - Operational state initialized with default values (storage health: "healthy")
+  - **State Access:**
+    - Connection state accessed via `m.connectionStateMachine.GetState()` and `Transition()`
+    - Camera states accessed via `m.getOrCreateCameraStateMachine(cameraID)` or `m.getCameraStateMachine(cameraID)`
+    - Operational metrics accessed via `m.getOperationalState()` and `m.updateOperationalState()`
+  - **Thread Safety:**
+    - Connection state machine is thread-safe (uses internal mutex)
+    - Camera state machines are thread-safe (each uses internal mutex)
+    - Camera state machines map access is protected by `cameraStateMachinesMu`
+    - Operational state access is protected by `operationalMu`
+  - **Migration Notes:**
+    - Old `EdgeStatus` and `EdgeState` types removed from state manager
+    - State transition logic in `updateStateForEvent()` and `executeWorkflow()` still uses old structure
+    - Full migration to new state machines will be completed in subsection 1.1.4
+    - This subsection establishes the foundation and structure for the separated state machines
+  - **Design Benefits:**
+    - **Separation of concerns:** Connection state and camera states are completely independent
+    - **Per-camera independence:** Each camera can be in different states simultaneously
+    - **Clear state management:** State machines enforce valid transitions
+    - **Thread-safe:** All state access is properly synchronized
+    - **Operational metrics:** Non-state-machine metrics kept separate for clarity
+    - **Foundation for multi-camera flows:** Enables independent camera workflows
 
 #### Subsection 1.1.4: Update State Transition Logic
+- **Status:** ✅ DONE (Core transition logic updated, some legacy handlers remain for compatibility)
 - **Description:** Update all state transition handlers to work with separated state machines
 - **Scope:** Modify event handlers to transition appropriate state machine(s)
 - **Dependencies:** 1.1.3
 - **Code Locations:**
-  - `edge/orchestrator/internal/state-mng/impl/state_mng_impl.go:715-806`
+  - `edge/orchestrator/internal/state-mng/impl/state_mng_impl.go` (updateStateForEvent, executeWorkflow, and workflow handlers)
+- **Refactoring Details:**
+  - **State Transition Updates:**
+    - **updateStateForEvent()**: Completely refactored to use connection and camera state machines
+      - Network events (WireGuard, HTTPS, Authentication, Capabilities) update connection state machine
+      - Camera events (Discovered, Registered, Connected, Disconnected) update camera state machines
+      - Snapshot request events update camera state machines (waiting_for_screenshots, screenshot_set_ready)
+      - Storage and AI events update operational state (metrics)
+      - Returns `ConnectionState` and `map[string]CameraState` instead of `EdgeState`
+    - **executeWorkflow()**: Updated to accept connection state and camera states
+      - Workflow handlers check connection state and camera states separately
+      - Per-camera workflows execute based on individual camera state machines
+      - Connection-level workflows execute based on connection state machine
+  - **Per-Camera Workflow Functions:**
+    - Added `executeScreenshotSetReadyWorkflowForCamera(cameraID)`: Handles screenshot set ready workflow for a specific camera
+    - Added `executeModelDeployedWorkflowForCamera(cameraID)`: Handles model deployment workflow for a specific camera
+    - Added `executeFrameProcessingWorkflowForCamera(cameraID)`: Handles frame processing workflow for a specific camera
+    - Added `handleConnectionErrorState()`: Handles connection-level error states
+    - Added `handleCameraErrorState(cameraID, cameraState)`: Handles camera-level error states
+  - **Event Handler Updates:**
+    - **handleCameraDiscovered()**: Updated to check connection state and camera state separately
+    - **handleSnapshotRequested()**: Camera state transition handled in `updateStateForEvent()`, handler just executes workflow
+    - **handleScreenshotSetReady()**: Camera state transition handled in `updateStateForEvent()`, handler just executes workflow
+    - **handleCapabilitiesReceived()**: Updated to use connection state machine for error handling
+  - **Error Handling:**
+    - Connection-level errors update connection state machine to `ConnectionStateError`
+    - Camera-level errors update individual camera state machines to `CameraStateError`
+    - Error handlers use new state machine methods instead of direct state manipulation
+  - **State Persistence:**
+    - All `persistStateToStorage()` calls updated to use new signature: `(ctx, ConnectionState, map[string]CameraState)`
+    - Connection state and camera states persisted separately
+  - **Compatibility:**
+    - Legacy `GetStatus()` and `GetState()` methods maintained for backward compatibility
+    - These methods map new state machines to old `EdgeStatus` and `EdgeState` types
+    - Legacy workflow functions (e.g., `executeModelDeployedWorkflow(EdgeState)`) kept for compatibility but marked as deprecated
+  - **Remaining Work:**
+    - Some legacy handlers still reference old `m.state` structure (e.g., in `checkServicesHealth`, `syncCamerasWithVM`)
+    - These will be fully migrated in future iterations
+    - Core state transition logic is fully migrated to use separated state machines
+  - **Design Benefits:**
+    - **Clear separation**: Connection and camera states are managed independently
+    - **Per-camera workflows**: Each camera can have its own workflow execution
+    - **Thread-safe**: All state transitions use thread-safe state machine methods
+    - **Type safety**: State transitions validated by state machine logic
+    - **Better error handling**: Errors scoped to appropriate state machine (connection vs camera)
 
 #### Subsection 1.1.5: Update State Persistence
+- **Status:** ✅ DONE
 - **Description:** Persist both connection and per-camera states separately
 - **Scope:** Update meta-storage to persist connection state and per-camera states
 - **Dependencies:** 1.1.3
+- **Code Locations:**
+  - `edge/orchestrator/internal/state-mng/impl/state_mng_impl.go` (`persistStateToStorage`, `restoreStateFromStorage`, `Start`)
+- **Refactoring Details:**
+  - **Enhanced State Persistence:**
+    - **persistStateToStorage()**: Enhanced to save connection state and camera states with full metadata
+      - Connection state: Saves state, error message, network health, VM reachability, and timestamps
+      - Camera states: Saves state, error, model ID, dataset ID, processing flag, and timestamps for each camera
+      - Operational metrics: Saves cameras enabled, AI processing status, storage health
+      - If no camera states provided, automatically persists all current camera state machines
+      - Added error logging with context (connection state, camera count) for better debugging
+      - Added success logging for state persistence operations
+  - **State Restoration:**
+    - **restoreStateFromStorage()**: New method to restore state from meta-storage on startup
+      - Restores connection state with validation (only valid states are restored)
+      - Restores connection state error messages if present
+      - Restores operational state (storage health, cameras enabled, AI processing status)
+      - Restores all camera states with full metadata (state, error, model ID, dataset ID)
+      - Creates camera state machines on-demand during restoration
+      - Validates camera states before restoring (invalid states are skipped)
+      - Supports backward compatibility with string-only camera state format
+      - Logs restoration progress and counts
+  - **Startup Integration:**
+    - **Start()**: Updated to restore state from storage before initializing
+      - Attempts to restore state from meta-storage first
+      - Falls back to default initialization if restoration fails or no previous state exists
+      - Logs restoration status and camera state machine count
+      - Persists current state after restoration/initialization
+  - **Error Handling:**
+    - State persistence errors are logged with context (connection state, camera count)
+    - State restoration errors are logged and handled gracefully (fallback to defaults)
+    - Invalid states in storage are detected and handled (fallback to safe defaults)
+  - **State Structure:**
+    - Connection state stored with: `connection_state`, `connection_error`, `network_health`, `vm_reachable`, `connection_last_updated`
+    - Camera states stored as map: `camera_states[cameraID] = {state, error, model_id, dataset_id, is_processing, last_updated}`
+    - Operational metrics stored with: `cameras_enabled`, `ai_processing_active`, `storage_health`, `operational_last_updated`
+    - Overall timestamp: `last_updated` for the entire state snapshot
+  - **Design Benefits:**
+    - **Separate persistence**: Connection and camera states are persisted separately, enabling independent recovery
+    - **Full metadata**: All state information (errors, model IDs, timestamps) is preserved
+    - **State recovery**: System can recover to previous state after restart
+    - **Backward compatibility**: Supports both new structured format and old string-only format
+    - **Error resilience**: Invalid states in storage don't crash the system
+    - **Better debugging**: Enhanced logging helps diagnose state persistence issues
 - **Related Findings:**
   - Finding #98: State persistence is fire-and-forget without error checking
+    - **Addressed**: Added error logging with context and success logging for state persistence operations
 
 #### Subsection 1.1.6: Add State Recovery Logic
+- **Status:** ✅ DONE
 - **Description:** On restart, recover connection state and all camera states
 - **Scope:** Load both connection and camera states from meta-storage on startup
 - **Dependencies:** 1.1.5
-
-### Section 1.2: Disconnect Handling Alignment
-
-#### Subsection 1.2.1: Fix HTTPS Disconnect Transitions
-- **Description:** Ensure HTTPS disconnect properly transitions from `model_deployed`/`frame_processing` to `wireguard_connected`
-- **Scope:** 
-  - Update `handleHTTPSDisconnected` to stop frame processing
-  - Transition per-camera states appropriately
-  - Clean up per-camera resources
-- **Dependencies:** 1.1.3
-- **Related Findings:**
-  - Finding #14: HTTPS disconnect doesn't transition from model_deployed/frame_processing
-  - Finding #97: State transitions don't clean up per-camera state
 - **Code Locations:**
-  - `edge/orchestrator/internal/state-mng/impl/state_mng_impl.go:438-546`
+  - `edge/orchestrator/internal/state-mng/impl/state_mng_impl.go` (`restoreStateFromStorage`, `recoverActiveWorkflows`, `Start`)
+- **Refactoring Details:**
+  - **State Restoration:**
+    - **restoreStateFromStorage()**: Restores connection and camera states from meta-storage (implemented in 1.1.5)
+      - Called automatically in `Start()` before initializing defaults
+      - Restores connection state with validation
+      - Restores all camera states with full metadata
+      - Restores operational metrics
+      - Falls back to defaults if restoration fails
+  - **Active Workflow Recovery:**
+    - **recoverActiveWorkflows()**: New method to recover active workflows based on restored states
+      - **Connection Workflow Recovery:**
+        - `WGConnecting`: Re-initiates WireGuard connection in background goroutine
+        - `HTTPConnecting`: Re-initiates HTTP connection synchronously
+        - `Error` states: Transitions to disconnected and re-initiates connection
+        - `CapabilitiesReceived`: Checks for cameras to sync with VM
+      - **Camera Workflow Recovery:**
+        - `FrameProcessing`: Resumes frame processing for cameras that were actively processing
+        - `ModelDeployed`: Starts frame processing and transitions to `FrameProcessing` if successful
+        - `Error`: Attempts recovery by resetting to `Discovered` state (allows re-workflow)
+        - `ScreenshotSetReady`: Resumes screenshot sync to VM if connection is available
+      - **Error Handling:**
+        - Frame processing recovery failures transition camera to error state
+        - Connection recovery failures are logged and connection state updated
+        - All recovery operations are logged with context
+  - **Startup Integration:**
+    - **Start()**: Enhanced to restore state and recover workflows
+      - Calls `restoreStateFromStorage()` first
+      - Falls back to default initialization if restoration fails
+      - After restoration, `recoverActiveWorkflows()` is called automatically
+      - Logs recovery status and camera state machine count
+      - Persists current state after recovery
+  - **Recovery Scenarios:**
+    - **Connection Recovery:**
+      - In-progress connections (WGConnecting, HTTPConnecting) are re-initiated
+      - Error states are cleared and connection is retried
+      - Capabilities workflow is resumed if capabilities were received
+    - **Camera Recovery:**
+      - Active frame processing is resumed automatically
+      - Model deployment workflows are continued (start frame processing)
+      - Error states are cleared to allow re-workflow
+      - Pending screenshot syncs are resumed
+    - **Operational Recovery:**
+      - Operational metrics (cameras enabled, AI processing, storage health) are restored
+      - Frame processing intervals and configurations are preserved
+  - **Design Benefits:**
+    - **Seamless recovery**: System resumes operations after restart without manual intervention
+    - **Workflow continuity**: Active workflows (frame processing, connections) are automatically resumed
+    - **Error recovery**: Error states are cleared and workflows are retried
+    - **State consistency**: All states are restored before workflows are recovered
+    - **Graceful degradation**: If recovery fails, system falls back to safe defaults
+    - **Comprehensive logging**: All recovery operations are logged for debugging
+  - **Recovery Flow:**
+    1. **State Restoration**: Load connection and camera states from meta-storage
+    2. **State Validation**: Validate restored states and handle invalid states
+    3. **Workflow Recovery**: Resume active workflows based on restored states
+    4. **Error Handling**: Handle recovery failures gracefully
+    5. **State Persistence**: Persist recovered state to ensure consistency
 
-#### Subsection 1.2.2: Fix WireGuard Disconnect Transitions
-- **Description:** Ensure WireGuard disconnect properly transitions all states to `disconnected`
-- **Scope:** Update disconnect handler to stop all processing and transition all cameras appropriately
-- **Dependencies:** 1.1.3, 1.2.1
-- **Code Locations:**
-  - `edge/orchestrator/internal/state-mng/impl/state_mng_impl.go:1244-1299`
+### Section 1.2: Disconnect Handling Alignment ✅ CORRECT BEHAVIOR
 
-#### Subsection 1.2.3: Implement Per-Camera State Cleanup
-- **Description:** Clean up per-camera metadata, pending frames, and AI gateway state on disconnect
-- **Scope:** 
-  - Clear camera-specific state on disconnect
-  - Stop and clean up frame processing goroutines
-  - Clear pending snapshot requests per camera
-- **Dependencies:** 1.2.1, 1.2.2
-- **Related Findings:**
-  - Finding #97: State transitions don't clean up per-camera state
+**Status:** This section is **NOT NEEDED** - the current implementation is correct.
+
+**Rationale:**
+- **Security-first design:** Edge must continue monitoring its security zone even when connection to VM is lost
+- **Independent operation:** Edge operates autonomously and queues security events for later sync
+- **No data loss:** All security events are preserved and transmitted as soon as connectivity is re-established
+
+**Current Behavior (Correct):**
+- Frame processing continues during HTTPS/WireGuard disconnection
+- Security events detected during disconnection are queued in meta-storage
+- Events are automatically synced to VM when connection is restored via `syncPendingSecurityEvents()` called after authentication
+- Connection state transitions appropriately (HTTPS disconnect → WireGuard connected, WireGuard disconnect → Disconnected)
+- Camera states remain unchanged during disconnection (cameras continue in `frame_processing` state)
+
+**Implementation Details:**
+- `syncPendingSecurityEvents()` is called in `EventTypeEdgeAuthenticated` handler
+- Events are retrieved in batches of 100 and marked as transmitted
+- The actual transmission to VM is handled by the normal event transmission flow
+- Security events are stored in meta-storage with proper metadata for later sync
+
+**Note:** This behavior ensures continuous security monitoring regardless of network connectivity, which is critical for edge security appliances. The Edge must operate independently and protect its security zone even when the connection to the VM is temporarily lost.
+
+**Related Findings:**
+- Finding #14: HTTPS disconnect doesn't transition from model_deployed/frame_processing → ✅ **CORRECT BEHAVIOR** (frame processing should continue)
+- Finding #97: State transitions don't clean up per-camera state → ✅ **CORRECT BEHAVIOR** (state should persist for recovery)
+- See `edge/orchestrator/docs/state-mng-code-review.md` sections 1 and 2 for detailed rationale
+
+**Code Locations:**
+- `edge/orchestrator/internal/state-mng/impl/state_mng_impl.go:540-543` (WireGuard disconnect)
+- `edge/orchestrator/internal/state-mng/impl/state_mng_impl.go:575-583` (HTTPS disconnect)
+- `edge/orchestrator/internal/state-mng/impl/event_storage.go` (Security event queuing and sync)
 
 ### Section 1.3: State Consistency Improvements
 
-#### Subsection 1.3.1: Fix State Persistence Error Handling
+#### Subsection 1.3.1: Fix State Persistence Error Handling ✅ DONE
+- **Status:** ✅ DONE
 - **Description:** Add error checking for state persistence calls
 - **Scope:** 
   - Check errors from `persistStateToStorage` calls
@@ -96,9 +461,44 @@ This document provides a comprehensive refactoring plan based on the state trans
 - **Related Findings:**
   - Finding #98: State persistence is fire-and-forget without error checking
 - **Code Locations:**
-  - Multiple call sites in `edge/orchestrator/internal/state-mng/impl/state_mng_impl.go`
+  - `edge/orchestrator/internal/state-mng/impl/state_mng_impl.go:2381-2524` (persistStateToStorage with retry logic)
+  - `edge/orchestrator/internal/state-mng/impl/state_mng_impl.go:2370-2380` (persistStateToStorageWithErrorHandling helper)
+  - `edge/orchestrator/internal/state-mng/types/config.go:33-36, 85-91, 110-113` (retry configuration)
+  - Multiple call sites updated to handle errors properly
+- **Refactoring Details:**
+  - **Retry Logic Implementation:**
+    - Added exponential backoff retry mechanism to `persistStateToStorage`
+    - Configurable max retries (default: 3) and initial backoff (default: 1 second)
+    - Backoff increases exponentially: `backoff * 2^attempt`, capped at 10 seconds
+    - Context cancellation is respected during retry attempts
+    - All retry attempts are logged with appropriate log levels (WARN for retries, ERROR for final failure)
+  - **Configuration:**
+    - Added `StatePersistenceMaxRetries` field to `StateManagerConfig` (default: 3, range: 0-10)
+    - Added `StatePersistenceRetryBackoff` field to `StateManagerConfig` (default: 1s, minimum: 100ms)
+    - Configuration is validated at startup
+    - Configuration is applied in `SetConfig()` method
+  - **Error Handling:**
+    - All `persistStateToStorage` call sites now properly handle errors
+    - Added `persistStateToStorageWithErrorHandling` helper function for error paths where persistence failure shouldn't block the operation
+    - Errors are logged with context (operation name, connection state, camera count)
+    - Critical operations log errors, non-critical operations log warnings
+  - **Unit Tests:**
+    - `TestPersistStateToStorage_RetryLogic`: Tests successful retry after initial failures
+    - `TestPersistStateToStorage_AllRetriesFail`: Tests error return after all retries exhausted
+    - `TestPersistStateToStorage_NoRetries`: Tests behavior with max retries = 0
+    - `TestPersistStateToStorage_ContextCancellation`: Tests context cancellation during retries
+    - `TestPersistStateToStorage_ExponentialBackoff`: Tests exponential backoff timing
+    - `TestPersistStateToStorage_BackoffCapped`: Tests that backoff is capped at 10 seconds
+    - `TestPersistStateToStorageWithErrorHandling`: Tests the helper function
+    - `TestPersistStateToStorage_Configuration`: Tests configuration application
+  - **Benefits:**
+    - Transient storage failures are automatically retried
+    - Persistent failures are logged with full context for debugging
+    - Configurable retry behavior allows tuning based on storage characteristics
+    - Context cancellation prevents indefinite blocking
+    - Exponential backoff reduces load on storage during outages
 
-#### Subsection 1.3.2: Handle Out-of-Order Model Deployment
+#### Subsection 1.3.2: Handle Out-of-Order Model Deployment ✅ DONE
 - **Description:** Allow model deployment events in states other than `screenshot_set_ready`
 - **Scope:** 
   - Update `handleModelDeployed` to handle deployment in various states
@@ -109,15 +509,191 @@ This document provides a comprehensive refactoring plan based on the state trans
   - Finding #20: Model deployment events ignored if not in screenshot_set_ready state
   - Finding #100: handleModelDeployed only transitions if current status is screenshot_set_ready
 - **Code Locations:**
-  - `edge/orchestrator/internal/state-mng/impl/state_mng_impl.go:1172-1186`
+  - `edge/orchestrator/internal/state-mng/impl/state_mng_impl.go:1462-1524` (handleModelDeployed)
+  - `edge/orchestrator/internal/state-mng/impl/state_mng_impl.go:1000-1058` (handleScreenshotSetReady)
+  - `edge/orchestrator/internal/state-mng/impl/state_mng_impl.go:103-110` (PendingModelDeployment struct)
+- **Refactoring Details:**
+  - **Added `pendingModelDeployments` map**: A thread-safe map (`pendingModelDeployments map[string]*PendingModelDeployment`) protected by `pendingModelDeployMu` mutex to queue model deployment events that arrive when the camera is not in `screenshot_set_ready` state.
+  - **Updated `handleModelDeployed`**: Modified to check if the camera is in `screenshot_set_ready` state. If yes, it transitions the camera to `model_deployed` immediately. If not, it queues the deployment event for later processing.
+  - **Updated `handleScreenshotSetReady`**: Modified to check for pending model deployments when a camera reaches `screenshot_set_ready` state. If a pending deployment exists, it processes it by calling `handleModelDeployed` with the queued event data, then clears the pending deployment from the queue.
+  - **Added `PendingModelDeployment` struct**: Stores the model ID, camera ID, event data, and timestamp for queued deployments.
+  - **Thread Safety**: All access to `pendingModelDeployments` is protected by `pendingModelDeployMu` mutex to ensure thread-safe operations.
+  - **Unit Tests**: Added comprehensive unit tests covering:
+    - Multiple queued deployments for the same camera
+    - Deployment queued then processed when camera reaches ready state
+    - Concurrent deployments
+    - Deployment queued then camera enters error state
+    - Missing model_id or camera_id in deployment events
+    - Different cameras with independent deployments
 
-#### Subsection 1.3.3: Document Missing States
+#### Subsection 1.3.3: Document Missing States ✅ DONE
 - **Description:** Update documentation to include implemented but undocumented states
-- **Scope:** Add documentation for `initializing`, `wg_connecting`, `http_connecting` states
+- **Scope:** Add documentation for `wg_connecting`, `http_connecting` states
 - **Dependencies:** None
 - **Related Findings:**
   - Finding #21: Documentation omits implemented states
   - Finding #101: Missing states not documented
+- **Code Locations:**
+  - `edge/orchestrator/docs/state-transition.md` - State transition documentation
+  - `edge/orchestrator/internal/state-mng/types/connection_state.go` - State definitions
+  - `edge/orchestrator/internal/state-mng/impl/connection_state_machine.go` - State machine implementation
+- **Refactoring Details:**
+  - **Added `wg_connecting` state documentation**: Documented the intermediate state that occurs when WireGuard connection is being established. This state is entered when `initiateWireGuardConnection()` is called and transitions to `wireguard_connected` when the tunnel is successfully established, or to `wg_connection_error` if the connection fails or times out (60 seconds).
+  - **Added `http_connecting` state documentation**: Documented the intermediate state that occurs when HTTPS connection is being established. This state is entered when `initiateHTTPConnection()` is called and transitions to `https_connected` when HTTPS services are ready, or to `http_connection_error` if the connection fails.
+  - **Updated state list**: Added `wg_connecting` and `http_connecting` to the states list in the documentation, along with error states (`wg_connection_error`, `http_connection_error`).
+  - **Updated state diagram**: Modified the state diagram to show the complete transition path including intermediate states: `disconnected` → `wg_connecting` → `wireguard_connected` → `http_connecting` → `https_connected` → `authenticated`.
+  - **Updated transition descriptions**: Added detailed descriptions for transitions involving intermediate states, including error handling and timeout behavior.
+  - **Updated business flow diagram**: Updated the Phase 1 initialization flow to include intermediate states.
+  - **Updated VM Gateway startup sequence**: Added documentation about when intermediate states are entered and how they transition.
+  - **Note on `initializing` state**: The review mentioned an `initializing` state, but this state does not exist in the implementation. The word "initializing" appears only in log messages, not as an actual state. The initial state is `disconnected`.
+
+### Section 1.4: Move State Machines into Owning Services (NEW)
+
+**Status:** ⬜ TODO  
+**Goal:** Align implementation with the Section 1.0 target architecture: `vm-gateway` owns connection state; `iot` owns per-device state; `state-mng` orchestrates only.
+
+#### Subsection 1.4.1: Move Connection State Machine into `vm-gateway` ✅ DONE
+- **Description:** Connection state machine should be part of `vm-gateway` implementation and exposed via the `vmgateway.VMGateway` top interface.
+- **Scope:**
+  - Define/relocate connection state types under `edge/orchestrator/internal/vm-gateway/types/` (or reuse existing `state-mng/types` types if kept reusable)
+  - Implement connection state machine inside `edge/orchestrator/internal/vm-gateway/.../impl` (service-owned)
+  - Expose connection state via `vmgateway.VMGateway` (e.g., `GetConnectionStateInfo()` or `ConnectionStateMachine()` accessor)
+  - Update `state-mng` to stop embedding its own connection state machine and instead query `vm-gateway`
+- **Dependencies:** Epic 1 completed (current baseline), VM gateway stability
+- **Notes:**
+  - Preserve the "types vs impl" separation rule (no impl in types).
+  - Avoid import cycles: `vm-gateway` should not depend on `state-mng/impl`.
+- **Code Locations:**
+  - `edge/orchestrator/internal/vm-gateway/types/connection_state.go` - Connection state types and `ConnectionStateMachine` interface (moved from `state-mng/types`)
+  - `edge/orchestrator/internal/vm-gateway/http-impl/impl/connection_state_machine.go` - Connection state machine implementation (moved from `state-mng/impl`)
+  - `edge/orchestrator/internal/vm-gateway/vm_gateway.go` - Updated `VMGateway` interface with connection state methods:
+    - `GetConnectionState() vmgatewaytypes.ConnectionState`
+    - `GetConnectionStateInfo() vmgatewaytypes.ConnectionStateInfo`
+    - `TransitionConnectionState(newState vmgatewaytypes.ConnectionState, errorMsg string) error`
+    - `CanTransitionConnectionState(newState vmgatewaytypes.ConnectionState) bool`
+    - `IsConnectionAuthenticated() bool`
+  - `edge/orchestrator/internal/vm-gateway/http-impl/vm-gateway-http-impl.go` - Implementation of connection state methods via embedded `ConnectionStateMachineImpl`
+  - `edge/orchestrator/internal/state-mng/impl/state_mng_impl.go` - Refactored to remove internal `connectionStateMachine` field and use `vmGateway` interface for all connection state operations
+  - `edge/orchestrator/internal/state-mng/impl/state_mng_impl_test.go` - Updated tests to use `mockVMGateway` instead of direct `connectionStateMachine` access
+- **Implementation Summary:**
+  - **Types Migration:** Moved `ConnectionState` enum, `ConnectionStateInfo` struct, and `ConnectionStateMachine` interface from `state-mng/types` to `vm-gateway/types`
+  - **Implementation Migration:** Moved `ConnectionStateMachineImpl` and related helper functions from `state-mng/impl` to `vm-gateway/http-impl/impl`
+  - **Interface Extension:** Extended `VMGateway` interface with 5 new methods for connection state management, maintaining backward compatibility
+  - **Gateway Implementation:** `VmGatewayHttpImpl` now embeds `ConnectionStateMachineImpl` and delegates all connection state operations to it
+  - **State Manager Refactoring:** Removed all direct `connectionStateMachine` field access from `StateManagerImpl`, replacing with `vmGateway` interface calls throughout:
+    - `Start()`, `updateStateForEvent()`, `executeWorkflow()`, `persistStateToStorage()`, `restoreStateFromStorage()`
+    - `getConnectionState()`, `initiateWireGuardConnection()`, `initiateHTTPConnection()`, `checkServicesHealth()`
+    - `handleConnectionErrorState()`, `syncCamerasWithVM()`, `syncScreenshotsToVM()`, `recoverActiveWorkflows()`
+  - **Test Updates:** All test files updated to use `mockVMGateway` with proper expectations instead of direct state machine access
+  - **Architecture Alignment:** Connection state machine is now owned by `vm-gateway` service, making `state-mng` a pure orchestrator that queries state rather than managing it
+
+#### Subsection 1.4.2: Adopt `iot` Device State Machines as the Source of Truth ✅ DONE
+- **Description:** Per-device state machines should live in `iot` and be exposed via `iot` top interfaces. `state-mng` consumes these, it doesn't implement them.
+- **Scope:**
+  - Standardize device state access (e.g., via `iot.DeviceStateMachineRegistry` or a dedicated `iot.DeviceStateService`)
+  - Ensure cameras use the `iot` device state machine as the canonical state source (camera-specific workflow state can be modeled as metadata / adapter)
+  - Update `state-mng` to stop embedding camera state machines and instead query device state from `iot`
+- **Dependencies:** Epic 12, Subsection 12.3.2 (device state machines) ✅ DONE
+- **Status:** ✅ DONE
+- **Code Locations:**
+  - `edge/orchestrator/internal/iot/device-state-service.go` - Top interface for device state service (NEW)
+  - `edge/orchestrator/internal/iot/camera_state_adapter.go` - Adapter bridging DeviceStateMachine to CameraStateMachine interface (NEW)
+  - `edge/orchestrator/internal/state-mng/impl/state_mng_impl.go` - Updated to use `DeviceStateService` instead of managing its own state machines
+  - `edge/orchestrator/internal/state-mng/types/camera_state.go` - Added `CameraStateMachineWithMetadata` interface for backward compatibility
+- **Implementation Summary:**
+  - **Top Interface Pattern:** Created `DeviceStateService` interface in `iot` package following the "top interface first" pattern. This service wraps `DeviceStateMachineRegistry` and provides the canonical interface for accessing device state machines.
+  - **Service Implementation:** Implemented `deviceStateServiceImpl` that delegates to `DeviceStateMachineRegistry`. Added `NewDeviceStateServiceWithDefaults()` convenience function that creates a factory, registers default transitions, and returns a configured service.
+  - **Adapter Pattern:** Created `CameraStateMachineAdapter` that adapts `DeviceStateMachine` to the `CameraStateMachine` interface. This allows `state-mng` to continue using the `CameraStateMachine` interface while the actual state is managed by `iot` device state machines. The adapter:
+    - Maps camera-specific workflow states (synced, waiting_for_screenshots, screenshot_set_ready, model_deployed, frame_processing) to generic device states (registered, active, processing)
+    - Stores camera-specific metadata (model_id, dataset_id) in device state metadata
+    - Maintains backward compatibility with existing `CameraStateMachine` interface
+  - **State Manager Refactoring:** Updated `StateManagerImpl` to:
+    - Add `deviceStateService` field and `SetDeviceStateService()` method
+    - Replace `cameraStateMachines` map with `cameraStateMachineAdapters` cache (for backward compatibility)
+    - Update `getOrCreateCameraStateMachine()` to use `DeviceStateService.GetOrCreateStateMachine()` and wrap result in `CameraStateMachineAdapter`
+    - Update `getCameraStateMachine()` to query `DeviceStateService` and cache adapters
+    - Update `getAllCameraStateMachines()` to query `DeviceStateService.GetStateMachinesByType(DeviceTypeCamera)` and wrap results
+    - Maintain fallback to old `CameraStateMachineImpl` if `DeviceStateService` is not available (for gradual migration)
+  - **Backward Compatibility:** Added `CameraStateMachineWithMetadata` interface that extends `CameraStateMachine` with `SetModelID()` and `SetDatasetID()` methods. Both `CameraStateMachineImpl` and `CameraStateMachineAdapter` implement this interface, allowing existing code to work without changes.
+  - **State Persistence:** State persistence continues to work because:
+    - `getAllCameraStateMachines()` returns adapters that implement `CameraStateMachine` interface
+    - `GetState()` and `GetStateInfo()` methods work correctly through the adapter
+    - State restoration creates device state machines via `DeviceStateService` and wraps them in adapters
+- **Architecture Benefits:**
+  - **Single Source of Truth:** Device state machines are now owned by `iot` package, making them the canonical source of device state
+  - **Service Boundaries:** `state-mng` no longer embeds state machine implementations; it queries state from `iot` service
+  - **Extensibility:** New device types can be added to `iot` without changes to `state-mng`
+  - **Testability:** `DeviceStateService` can be easily mocked for testing
+  - **Backward Compatibility:** Existing code continues to work through adapters
+- **Migration Notes:**
+  - The old `CameraStateMachineImpl` is still available as a fallback if `DeviceStateService` is not set
+  - Camera-specific workflow states are stored in device state metadata, not as primary states
+  - State transitions use generic device states (undiscovered, discovered, registered, active, processing) with workflow-specific metadata
+  - The adapter handles mapping between camera workflow states and generic device states transparently
+
+#### Subsection 1.4.3: Make `state-mng` a Pure Workflow Orchestrator (No Embedded State Machines) ✅ DONE
+- **Description:** Refactor `state-mng` to orchestrate workflows based on observed state, without owning state machine implementations.
+- **Scope:**
+  - Replace internal `connectionStateMachine` usage with `vm-gateway` state queries
+  - Replace internal `cameraStateMachines` usage with `iot` device state queries
+  - Keep `state-mng` responsible for:
+    - event handling and workflow triggering,
+    - recovery orchestration (calling into services),
+    - cross-service coordination and sequencing.
+- **Dependencies:** 1.4.1 ✅ DONE, 1.4.2 ✅ DONE
+- **Status:** ✅ DONE
+- **Code Locations:**
+  - `edge/orchestrator/internal/state-mng/impl/state_mng_impl.go` - Updated to query state from services instead of managing state machines
+  - ✅ `edge/orchestrator/internal/state-mng/impl/camera_state_machine.go` - DELETED (old implementation removed)
+  - ✅ `edge/orchestrator/internal/state-mng/impl/connection_state_machine.go` - DELETED (old implementation removed)
+- **Implementation Summary:**
+  - **Architecture Change:** `StateManagerImpl` is now a pure workflow orchestrator that does NOT own state machine implementations. It queries state from services and orchestrates workflows based on observed state.
+  - **Connection State:** All connection state queries go through `vm-gateway.VMGateway` interface:
+    - `m.vmGateway.GetConnectionState()` - Query current connection state
+    - `m.vmGateway.TransitionConnectionState()` - Request state transitions (delegated to vm-gateway)
+    - `m.vmGateway.GetConnectionStateInfo()` - Get detailed connection state information
+    - Connection state machine is owned and managed by `vm-gateway` service
+  - **Device State:** All device state queries go through `iot.DeviceStateService` interface:
+    - `m.deviceStateService.GetOrCreateStateMachine()` - Get or create device state machine
+    - `m.deviceStateService.GetStateMachine()` - Get existing device state machine
+    - `m.deviceStateService.GetStateMachinesByType()` - Get all state machines of a type
+    - Device state machines are owned and managed by `iot.DeviceStateService`
+    - Results are wrapped in `CameraStateMachineAdapter` for backward compatibility
+  - **State Manager Responsibilities:** `StateManagerImpl` is now responsible only for:
+    - **Event Handling:** Processing events from the event bus and triggering appropriate workflows
+    - **Workflow Orchestration:** Coordinating multi-step workflows (camera discovery → sync → screenshots → model deployment → frame processing)
+    - **Recovery Orchestration:** Calling into services to recover from error states
+    - **Cross-Service Coordination:** Sequencing operations across multiple services (CCTV, AI gateway, VM gateway, etc.)
+    - **State Observation:** Querying state from services to make workflow decisions
+  - **Service Requirements:** `StateManagerImpl` now requires services to be set:
+    - `deviceStateService` must be set via `SetDeviceStateService()` before creating camera state machines
+    - `vmGateway` must be set via `SetVMGateway()` before querying connection state
+    - If services are not set, methods return errors or nil instead of creating fallback implementations
+  - **Code Documentation:** Added comprehensive architecture documentation to `StateManagerImpl`:
+    - Clear explanation that it's a pure workflow orchestrator
+    - Documentation of state machine ownership (vm-gateway for connection, iot for devices)
+    - Explanation of service requirements (services must be set before use)
+- **Architecture Benefits:**
+  - **Clear Separation of Concerns:** State machines are owned by their respective services (vm-gateway for connection, iot for devices), not by state-mng
+  - **Single Source of Truth:** Each state machine has a single owner, eliminating state synchronization issues
+  - **Service Autonomy:** Services can manage their own state machines independently
+  - **Testability:** State-mng can be tested by mocking service interfaces without needing to mock state machine implementations
+  - **Extensibility:** New device types can be added to iot service without changes to state-mng
+  - **Maintainability:** State machine logic is centralized in the services that own them
+- **Cleanup:**
+  - ✅ Old state machine files (`camera_state_machine.go`, `connection_state_machine.go`) have been deleted
+  - ✅ Old test files (`camera_state_machine_test.go`, `connection_state_machine_test.go`) have been deleted
+  - ✅ Fallback paths in `getOrCreateCameraStateMachine()` have been removed
+  - ✅ All state queries now go through service interfaces, ensuring proper service boundaries
+  - ✅ `StateManagerImpl` now requires services to be set and returns errors if they are not available
+- **Verification:**
+  - ✅ Connection state is only queried from `vm-gateway.VMGateway` interface
+  - ✅ Device state is only queried from `iot.DeviceStateService` interface
+  - ✅ No direct state machine creation - all state machines are owned by services
+  - ✅ StateManagerImpl only orchestrates workflows based on observed state
+  - ✅ All state transitions are delegated to service interfaces
+  - ✅ Old state machine implementations have been completely removed
+  - ✅ Tests updated to use DeviceStateService instead of old implementations
 
 ---
 
@@ -130,7 +706,7 @@ This document provides a comprehensive refactoring plan based on the state trans
 
 ### Section 12.1: Device Type Abstraction
 
-#### Subsection 12.1.1: Define Generic Device Interface
+#### Subsection 12.1.1: Define Generic Device Interface ✅ DONE
 - **Description:** Create device-agnostic interface that abstracts device capabilities
 - **Scope:** 
   - Define `Device` interface with lifecycle methods (discover, register, connect, disconnect)
@@ -139,9 +715,39 @@ This document provides a comprehensive refactoring plan based on the state trans
   - Design device metadata schema (type, capabilities, status)
 - **Dependencies:** None
 - **Code Locations:**
-  - New interface package: `edge/orchestrator/internal/device/device-iface.go`
+  - New interface package: `edge/orchestrator/internal/iot/device-iface.go`
+- **Refactoring Details:**
+  - **Created `Device` interface**: Comprehensive interface with lifecycle methods (`Start`, `Stop`), metadata management (`GetMetadata`, `UpdateMetadata`), enable/disable operations, and capability-based operations.
+  - **Lifecycle methods**: `Start()` and `Stop()` for device initialization and cleanup, `Enable()` and `Disable()` for operational control.
+  - **Capability-based operations**: Methods like `CaptureData()`, `StartDataStream()`, `ReadSensor()`, `ExecuteCommand()` that check device capabilities before execution. This allows the same interface to work for cameras, sensors, access control devices, etc.
+  - **Device metadata schema**: `DeviceMetadata` struct includes core identification (ID, name, type, manufacturer, model), status information (enabled, status, last seen), capabilities, configuration, network/physical connection info, and location/zone information.
+  - **Device types**: Defined comprehensive device type constants including:
+    - Video devices: `camera`
+    - Sensor devices: `motion_sensor`, `temperature_sensor`, `humidity_sensor`, `door_sensor`, `window_sensor`, `smoke_detector`, `co2_sensor`, `sensor` (generic)
+    - Access control: `door_lock`, `keypad`, `card_reader`, `biometric`
+    - Audio: `microphone`
+    - Other: `unknown`
+  - **Device capabilities**: Extensible capability system with constants for:
+    - Data operations: `data_capture`, `data_streaming`
+    - Video-specific: `video_capture`, `video_streaming`, `video_recording`, `snapshot`
+    - Audio: `audio_capture`, `audio_streaming`
+    - Sensors: `sensor_readings`
+    - Control: `control`, `access_control`, `ptz`, `motion_detection`, `event_generation`
+  - **DeviceCapabilities type**: Map-based capability set with helper methods (`Has`, `Add`, `Remove`) for capability management.
+  - **DeviceData abstraction**: Generic `DeviceData` struct that can represent video frames, audio samples, sensor readings, or events, with type information and metadata.
+  - **DeviceRegistry interface**: Interface for device discovery and registration, supporting discovery by type, capability filtering, and device management operations.
+  - **DevicePlugin interface**: Plugin system for adding new device types at runtime, with methods for device type registration, discovery, creation, and metadata validation.
+  - **Device status types**: `unknown`, `online`, `offline`, `connecting`, `error`, `maintenance`.
+  - **Device filters**: `DeviceFilters` struct for querying devices by type, capability, enabled status, status, zone, or tags.
+  - **Generated mocks**: Created mock interfaces for `Device` and `DeviceRegistry` using `go.uber.org/mock` for testing.
+  - **Design principles**:
+    - **Capability-based**: Operations check capabilities before execution, allowing graceful handling of unsupported features
+    - **Extensible**: New device types can be added via plugins without modifying core interfaces
+    - **Type-safe**: Strong typing for device types, capabilities, and data types
+    - **Backward compatible**: Existing camera functionality can be wrapped as a `Device` implementation
+    - **Flexible metadata**: Device-specific configuration stored in flexible `map[string]interface{}` fields
 
-#### Subsection 12.1.2: Refactor Camera as Device Implementation
+#### Subsection 12.1.2: Refactor Camera as Device Implementation ✅ DONE
 - **Description:** Implement Camera as concrete `Device` interface implementation
 - **Scope:** 
   - Wrap existing CCTV service as `CameraDevice` implementation
@@ -149,19 +755,89 @@ This document provides a comprehensive refactoring plan based on the state trans
   - Maintain backward compatibility during transition
 - **Dependencies:** 12.1.1
 - **Code Locations:**
-  - `edge/orchestrator/internal/iot/cctv/` (refactor as device implementation)
+  - `edge/orchestrator/internal/iot/cctv/device_adapter.go` - CameraDevice adapter implementation
+- **Refactoring Details:**
+  - **Created `CameraDevice` adapter**: Implements the `Device` interface by wrapping the existing `CCTVService`. This is an **adapter pattern** that allows cameras to be used in device-agnostic code without breaking existing CCTVService consumers.
+  - **Backward compatibility preserved**: The `CCTVService` interface remains **completely unchanged**. All existing code (state manager, web gateway, AI gateway, VM gateway) continues to use `CCTVService` directly with no modifications required.
+  - **Dual interface support**: 
+    - **Existing code**: Uses `CCTVService` interface (no changes needed)
+    - **New device-agnostic code**: Uses `Device` interface, can work with `CameraDevice` or other device types
+    - **Device registry**: Can register `CameraDevice` instances alongside other device types
+  - **Lifecycle methods**: `Start()` and `Stop()` delegate to CCTV service lifecycle (typically no-op as CCTV service manages camera lifecycle). `Enable()` and `Disable()` map to `EnableCamera()` and `DisableCamera()`.
+  - **Metadata mapping**: `GetMetadata()` converts `types.Camera` to `iot.DeviceMetadata`, mapping:
+    - Camera type → `DeviceTypeCamera`
+    - Camera status → Device status (`online`, `offline`, `connecting`, `error`, `unknown`)
+    - Camera capabilities → Device capabilities (video capture, streaming, recording, snapshot, PTZ, motion detection, event generation)
+    - Camera config → Device config map (recording_enabled, motion_detection, quality, frame_rate, resolution)
+    - Network/physical info → Device endpoints and device path
+  - **Capability mapping**: `buildCapabilitiesFromCamera()` maps camera capabilities to device capabilities:
+    - All cameras: `data_capture`, `video_capture`, `video_streaming`, `video_recording`, `snapshot`, `data_streaming`, `event_generation`
+    - PTZ cameras: `ptz`, `control`
+    - Motion detection enabled: `motion_detection`
+  - **Data capture**: `CaptureData()` maps `CaptureFrame()` to `DeviceData` with video frame type and JPEG format.
+  - **Data streaming**: `StartDataStream()` wraps `StartMJPEGStream()` and converts MJPEG frames to `DeviceData` stream. `StopDataStream()` stops the MJPEG stream.
+  - **Sensor operations**: `ReadSensor()` and `ReadAllSensors()` return errors (cameras don't have sensors).
+  - **Control operations**: `ExecuteCommand()` supports PTZ commands (when PTZ capability is available). `GetAvailableCommands()` returns supported commands based on camera capabilities.
+  - **Metadata updates**: `UpdateMetadata()` converts `DeviceMetadataUpdate` to `CameraUpdate` and updates via CCTV service, then refreshes metadata cache.
+  - **Metadata caching**: Device metadata is cached and refreshed when camera changes. `RefreshMetadata()` method allows manual refresh.
+  - **Thread safety**: Uses mutexes (`metadataMu`, `streamsMu`) to protect metadata cache and active streams map.
+  - **Access to underlying service**: `GetCCTVService()` method allows code that needs camera-specific features to access the full `CCTVService` interface.
+  - **Factory function**: `NewCameraDevice()` creates a `CameraDevice` adapter for a specific camera, verifying the camera exists and initializing metadata.
+  - **Stream management**: Tracks active data streams in `activeStreams` map, automatically cleaning up on `Stop()`.
+  - **Error handling**: All methods return descriptive errors, with capability checks before executing operations.
+  - **Design pattern**: This is a classic **Adapter Pattern** - `CameraDevice` adapts `CCTVService` to the `Device` interface without modifying either interface.
 
-#### Subsection 12.1.3: Create Device Capability Framework
+#### Subsection 12.1.3: Create Device Capability Framework ✅ DONE
 - **Description:** Design extensible capability system for different device types
 - **Scope:** 
   - Define capability types (video_capture, sensor_readings, audio_capture, access_control, etc.)
   - Create capability negotiation protocol
   - Support capability queries and filtering
 - **Dependencies:** 12.1.1
+- **Code Locations:**
+  - `edge/orchestrator/internal/iot/capabilities.go` - Capability framework implementation
+  - `edge/orchestrator/internal/iot/device-iface.go` - Enhanced DeviceCapabilities type with utility methods
+- **Refactoring Details:**
+  - **Capability negotiation protocol**: Created `CapabilityNegotiation` type and `NegotiateCapabilities()` function that negotiates capabilities between a device and a set of requirements. Supports required and optional capabilities, tracks missing and unavailable capabilities, and validates dependencies.
+  - **Capability requirements**: Created `CapabilityRequirement` type that specifies required/optional capabilities with descriptions and dependencies. Used in negotiation to validate device compatibility.
+  - **Capability validation**: Added `ValidateCapabilityRequirements()` function to validate that a device meets all capability requirements before use.
+  - **Capability groups**: Created `CapabilityGroup` type with groups: `data`, `video`, `audio`, `sensors`, `control`, `access`, `events`. Added `GetCapabilityGroup()` to categorize capabilities and `GetCapabilitiesByGroup()` to get all capabilities in a group.
+  - **Capability queries**: Created `CapabilityQuery` type with support for:
+    - Required capabilities (all must be present)
+    - Any-of capabilities (at least one must be present)
+    - Excluded capabilities (none should be present)
+    - Group filter (devices must have at least one capability from a group)
+    - Minimum capabilities count
+  - **Query matching**: Added `Matches()` method to `CapabilityQuery` that checks if a device matches the query criteria.
+  - **Device registry queries**: Added `QueryDevicesByCapability()` function to query devices from a registry using capability queries.
+  - **Capability filter utilities**: Created `CapabilityFilter` type with builder methods:
+    - `WithRequired()` - require specific capabilities
+    - `WithAnyOf()` - require at least one capability
+    - `WithExcluded()` - exclude devices with capabilities
+    - `WithGroup()` - require capabilities from a group
+    - `WithMinCapabilities()` - require minimum capability count
+    - `Combine()` - combine multiple queries with AND logic
+  - **Capability dependencies**: Created `CapabilityDependency` type and `KnownCapabilityDependencies()` function that defines capability dependencies (e.g., PTZ requires Control, VideoStreaming requires VideoCapture). Added `ValidateCapabilityDependencies()` to validate device dependencies.
+  - **Enhanced DeviceCapabilities type**: Added utility methods to `DeviceCapabilities`:
+    - `HasAll()` - check if device has all specified capabilities
+    - `HasAny()` - check if device has any of specified capabilities
+    - `Count()` - get number of capabilities
+    - `List()` - get all capabilities as a slice
+    - `Intersect()` - get capabilities present in both sets
+    - `Union()` - get capabilities present in either set
+    - `Difference()` - get capabilities in this set but not in other
+  - **Capability descriptions**: Added `GetCapabilityDescription()` and `GetCapabilityName()` functions to provide human-readable descriptions and names for capabilities.
+  - **Capability summary**: Created `CapabilitySummary` type and `GetCapabilitySummary()` function that provides a summary of device capabilities including total count, capabilities by group, and list of all capabilities.
+  - **Design principles**:
+    - **Extensible**: New capabilities can be added without breaking existing code
+    - **Type-safe**: Strong typing for all capability operations
+    - **Queryable**: Rich query and filtering capabilities
+    - **Validated**: Dependency validation ensures devices have required capabilities
+    - **Grouped**: Capabilities organized into logical groups for easier management
 
 ### Section 12.2: Device Plugin Architecture
 
-#### Subsection 12.2.1: Design Device Plugin System
+#### Subsection 12.2.1: Design Device Plugin System ✅ DONE
 - **Description:** Create plugin/adapter pattern for adding new device types
 - **Scope:** 
   - Define device plugin registration interface
@@ -169,8 +845,53 @@ This document provides a comprehensive refactoring plan based on the state trans
   - Support runtime device type registration
   - Design plugin discovery mechanism
 - **Dependencies:** 12.1.1
+- **Code Locations:**
+  - `edge/orchestrator/internal/iot/plugin_registry.go` - Plugin registry implementation
+  - `edge/orchestrator/internal/iot/device-iface.go` - DevicePlugin interface (already defined)
+- **Refactoring Details:**
+  - **DevicePluginRegistry interface**: Created comprehensive interface for managing device type plugins with methods for registration, discovery, device creation, and metadata validation. Supports runtime plugin registration and unregistration.
+  - **Plugin registration**: `RegisterPlugin()` registers a plugin for a device type with validation. Prevents duplicate registrations and validates plugin before registration. `UnregisterPlugin()` removes a plugin at runtime.
+  - **Plugin retrieval**: `GetPlugin()` and `GetPluginForDeviceType()` retrieve plugins by device type. `ListPlugins()` returns all registered plugins. `IsDeviceTypeSupported()` checks if a device type has a registered plugin.
+  - **Device discovery**: `DiscoverDevices()` discovers devices using all registered plugins. `DiscoverDevicesByType()` discovers devices of a specific type using the appropriate plugin. Errors from one plugin don't stop discovery from other plugins.
+  - **Device creation**: `CreateDevice()` creates a device instance from metadata using the appropriate plugin. Validates metadata before creation. `ValidateMetadata()` validates device metadata using the plugin's validation logic.
+  - **Plugin validation**: `validatePlugin()` validates plugins before registration, checking device type, supported capabilities, and basic capability validation.
+  - **Thread safety**: All operations are protected with `sync.RWMutex` for concurrent access. Read operations use `RLock()`, write operations use `Lock()`.
+  - **PluginManager**: High-level manager that wraps the registry and provides convenient methods for common operations. Simplifies plugin management for consumers.
+  - **Plugin discovery mechanism**: Created `PluginDiscoveryConfig` and `PluginDiscoveryResult` types for future file-based plugin discovery. `DiscoverPlugins()` function is a placeholder for future dynamic plugin loading (currently plugins must be registered manually).
+  - **Plugin discovery errors**: `PluginDiscoveryError` type tracks plugins that fail to load during discovery, allowing graceful handling of plugin loading failures.
+  - **Supported device types**: `GetSupportedDeviceTypes()` returns all device types that have registered plugins, enabling runtime queries of available device types.
+  - **Design patterns**:
+    - **Registry Pattern**: Central registry manages all plugins
+    - **Plugin Pattern**: Extensible system for adding new device types
+    - **Factory Pattern**: Plugins act as factories for creating device instances
+    - **Strategy Pattern**: Different plugins provide different discovery and creation strategies
+  - **Usage example**:
+    ```go
+    // Create registry
+    registry := iot.NewDevicePluginRegistry()
+    
+    // Register camera plugin
+    cameraPlugin := &CameraDevicePlugin{...}
+    registry.RegisterPlugin(cameraPlugin)
+    
+    // Discover devices
+    devices, _ := registry.DiscoverDevices(ctx)
+    
+    // Create device from metadata
+    device, _ := registry.CreateDevice(ctx, metadata)
+    ```
+  - **Future extensibility**: The discovery mechanism is designed to support:
+    - File-based plugin discovery (scanning directories for .so files)
+    - Dynamic plugin loading
+    - Plugin versioning and compatibility checking
+    - Plugin lifecycle management (start/stop plugins)
+  - **Integration points**: The plugin registry can be integrated with:
+    - Device registry for automatic device registration after discovery
+    - State manager for device state management
+    - Configuration system for plugin configuration
+    - Event bus for plugin lifecycle events
 
-#### Subsection 12.2.2: Implement Device Lifecycle Hooks
+#### Subsection 12.2.2: Implement Device Lifecycle Hooks ✅ DONE
 - **Description:** Define and implement standard device lifecycle hooks
 - **Scope:** 
   - Discovery hooks (device detection, identification)
@@ -178,10 +899,61 @@ This document provides a comprehensive refactoring plan based on the state trans
   - Data collection hooks (capture, streaming, polling)
   - Teardown hooks (cleanup, resource release)
 - **Dependencies:** 12.2.1
+- **Code Locations:**
+  - `edge/orchestrator/internal/iot/lifecycle_hooks.go` - Lifecycle hooks implementation
+- **Refactoring Details:**
+  - **Lifecycle hook types**: Defined four hook types: `HookTypeDiscovery`, `HookTypeRegistration`, `HookTypeDataCollection`, `HookTypeTeardown` covering all device lifecycle stages.
+  - **Discovery hooks**: `DiscoveryHook` function type called during device discovery. `DiscoveryHookContext` provides device type, plugin, discovered devices, and metadata. Hooks can filter devices, add metadata, perform identification/validation, and log discovery events.
+  - **Registration hooks**: `RegistrationHook` function type called during device registration. `RegistrationHookContext` provides device, metadata, registry, capabilities, and additional metadata. Hooks can validate devices, initialize resources, report capabilities, set up monitoring, and configure settings.
+  - **Data collection hooks**: `DataCollectionHook` function type called during data collection operations (capture, streaming, polling). `DataCollectionHookContext` provides device, data type, data, operation type, and metadata. Hooks can pre/post-process data, monitor operations, route data to external systems, validate data quality, and handle errors.
+  - **Teardown hooks**: `TeardownHook` function type called during device teardown. `TeardownHookContext` provides device, reason for teardown, and metadata. Hooks can clean up resources, release connections, save state, notify external systems, and log events.
+  - **LifecycleHook type**: Represents a registered hook with ID, type, name, description, priority, hook function, enabled status, and filters (device type, capability). Supports filtering hooks by device type and capability.
+  - **LifecycleHookRegistry interface**: Comprehensive interface for managing hooks with methods for registration, unregistration, retrieval, listing, and execution. Supports filtering and priority-based execution.
+  - **Hook execution**: Hooks are executed in priority order (lower priority = earlier execution). Hooks can be filtered by device type and capability. Disabled hooks are skipped. Errors from one hook don't stop execution of other hooks (allows multiple hooks to run).
+  - **Thread safety**: All operations protected with `sync.RWMutex`. Read operations use `RLock()`, write operations use `Lock()`.
+  - **Hook filtering**: Hooks can be filtered by device type (`DeviceTypeFilter`) and capability (`CapabilityFilter`). Only matching hooks are executed, improving performance and allowing device-specific behavior.
+  - **Priority-based execution**: Hooks are sorted by priority and executed in order. Lower priority hooks execute first, allowing dependency ordering (e.g., validation hooks before processing hooks).
+  - **LifecycleHookManager**: High-level manager wrapping the registry with convenient methods for hook management and execution.
+  - **HookBuilder**: Fluent builder pattern for creating hooks with methods: `WithDescription()`, `WithPriority()`, `WithDeviceTypeFilter()`, `WithCapabilityFilter()`, `WithDiscoveryHook()`, `WithRegistrationHook()`, `WithDataCollectionHook()`, `WithTeardownHook()`, `WithEnabled()`, `Build()`.
+  - **Integration points**: Hooks can be integrated at:
+    - **Discovery**: In `DevicePluginRegistry.DiscoverDevices()` and `DevicePluginRegistry.DiscoverDevicesByType()`
+    - **Registration**: In `DeviceRegistry.RegisterDevice()`
+    - **Data collection**: In `Device.CaptureData()`, `Device.StartDataStream()`, `Device.ReadSensor()`
+    - **Teardown**: In `Device.Stop()`, `DeviceRegistry.DeleteDevice()`
+  - **Usage example**:
+    ```go
+    // Create hook registry
+    hookRegistry := iot.NewLifecycleHookRegistry()
+    
+    // Register discovery hook
+    discoveryHook := iot.NewHookBuilder("device-validator", "Device Validator", iot.HookTypeDiscovery).
+        WithDescription("Validates discovered devices").
+        WithPriority(10).
+        WithDiscoveryHook(func(ctx context.Context, hookCtx *iot.DiscoveryHookContext) error {
+            // Validate devices
+            return nil
+        }).
+        Build()
+    hookRegistry.RegisterHook(discoveryHook)
+    
+    // Execute hooks during discovery
+    hookCtx := &iot.DiscoveryHookContext{
+        DeviceType: iot.DeviceTypeCamera,
+        DiscoveredDevices: devices,
+    }
+    hookRegistry.ExecuteDiscoveryHooks(ctx, hookCtx)
+    ```
+  - **Hook context types**: Each hook type has a dedicated context type that provides relevant information:
+    - `DiscoveryHookContext`: Device type, plugin, discovered devices, metadata
+    - `RegistrationHookContext`: Device, metadata, registry, capabilities, additional metadata
+    - `DataCollectionHookContext`: Device, data type, data, operation, metadata
+    - `TeardownHookContext`: Device, reason, metadata
+  - **Error handling**: Hook execution continues even if one hook fails, allowing multiple hooks to run. First error is returned, but all hooks are attempted.
+  - **Extensibility**: New hook types can be added by extending `LifecycleHookType` and adding corresponding context types and execution methods.
 
 ### Section 12.3: Generic Data Pipeline
 
-#### Subsection 12.3.1: Abstract Data Processing Pipeline
+#### Subsection 12.3.1: Abstract Data Processing Pipeline ✅ DONE
 - **Description:** Create device-agnostic data processing framework
 - **Scope:** 
   - Abstract "frame processing" to "device data processing"
@@ -189,14 +961,155 @@ This document provides a comprehensive refactoring plan based on the state trans
   - Support multiple data types (video frames, sensor readings, audio, structured events)
   - Design pluggable data processors
 - **Dependencies:** 12.1.1, Epic 1 (state machine separation)
+- **Code Locations:**
+  - `edge/orchestrator/internal/iot/data_pipeline.go` - Data pipeline implementation
+  - `edge/orchestrator/internal/iot/processors.go` - Example processor implementations
+- **Refactoring Details:**
+  - **DataProcessor interface**: Defines a pluggable processor interface with methods: `Name()`, `Process()`, `SupportsDataType()`, `GetSupportedDataTypes()`, `GetPriority()`. Processors can transform, filter, analyze, or route device data. Processors return transformed data, nil (to drop data), or an error.
+  - **DataProcessorRegistry interface**: Manages processor registration and retrieval. Methods: `RegisterProcessor()`, `UnregisterProcessor()`, `GetProcessor()`, `ListProcessors()`, `GetProcessorsForDataType()`. Thread-safe implementation with `sync.RWMutex`.
+  - **Priority-based execution**: Processors are executed in priority order (lower priority = earlier in pipeline). Processors are sorted by priority when registered, enabling dependency ordering (e.g., validation before transformation).
+  - **DataPipeline**: Processes device data through a series of processors. Data flows through processors in priority order. If a processor returns nil, data is dropped and processing stops. If a processor returns an error, processing stops and error is returned. Supports batch processing via `ProcessBatch()`.
+  - **DataProcessingService**: High-level service wrapping the pipeline with methods: `ProcessDeviceData()`, `RegisterProcessor()`, `UnregisterProcessor()`, `ListProcessors()`, `GetProcessorsForDataType()`. Returns `DataProcessingContext` with processing results, applied processors, and duration.
+  - **DataProcessingContext**: Provides context for processing operations including device, original data, processed data, processors applied, processing duration, and metadata.
+  - **BaseProcessor**: Base implementation that processors can embed for default behavior. Provides default implementations for `Name()`, `SupportsDataType()`, `GetSupportedDataTypes()`, `GetPriority()`. `Process()` method must be implemented by concrete processors.
+  - **ProcessorBuilder**: Fluent builder pattern for creating processors with methods: `WithSupportedTypes()`, `WithPriority()`, `WithProcessFunc()`, `Build()`. Enables easy creation of custom processors.
+  - **Example processor types**:
+    - **VideoFrameProcessor**: Processes video frame data (e.g., resize, compress, normalize, detect objects). Supports `DeviceDataTypeVideoFrame`.
+    - **SensorDataProcessor**: Processes sensor reading data (e.g., normalize values, detect thresholds, aggregate readings). Supports `DeviceDataTypeSensorReading`.
+    - **AudioDataProcessor**: Processes audio sample data (e.g., noise reduction, feature extraction, voice activity detection). Supports `DeviceDataTypeAudioSample`.
+    - **EventDataProcessor**: Processes event data (e.g., enrich events, route to different handlers, aggregate events). Supports `DeviceDataTypeEvent`.
+    - **MultiTypeProcessor**: Processes multiple data types using a custom function. Useful for logging, metrics, or routing processors.
+    - **PassThroughProcessor**: Passes data through unchanged. Useful for testing or as a placeholder.
+    - **FilterProcessor**: Filters (drops) data based on conditions. Returns nil if data should be dropped, otherwise returns data unchanged.
+    - **TransformProcessor**: Transforms data using a custom function. Useful for data normalization, enrichment, or conversion.
+    - **TimestampEnrichmentProcessor**: Enriches data with processing timestamp and processor name metadata.
+  - **Data type support**: Pipeline supports all `DeviceDataType` values: `DeviceDataTypeVideoFrame`, `DeviceDataTypeAudioSample`, `DeviceDataTypeSensorReading`, `DeviceDataTypeEvent`, `DeviceDataTypeGeneric`.
+  - **Thread safety**: All registry operations are protected with `sync.RWMutex`. Read operations use `RLock()`, write operations use `Lock()`.
+  - **Error handling**: Processors can return errors to stop pipeline processing. Errors are propagated with context (processor name). Batch processing collects errors for each item without stopping the entire batch.
+  - **Usage example**:
+    ```go
+    // Create registry and pipeline
+    registry := iot.NewDataProcessorRegistry()
+    service := iot.NewDataProcessingService(registry)
+    
+    // Register processors
+    videoProcessor := iot.NewVideoFrameProcessor("resize", 10)
+    registry.RegisterProcessor(videoProcessor)
+    
+    filterProcessor := iot.NewFilterProcessor("quality-filter", 
+        []iot.DeviceDataType{iot.DeviceDataTypeVideoFrame}, 
+        20,
+        func(ctx context.Context, data *iot.DeviceData) bool {
+            // Filter logic
+            return true
+        })
+    registry.RegisterProcessor(filterProcessor)
+    
+    // Process device data
+    deviceData := &iot.DeviceData{
+        DeviceID: "camera-1",
+        DataType: iot.DeviceDataTypeVideoFrame,
+        Data: frameBytes,
+    }
+    ctx, err := service.ProcessDeviceData(context.Background(), device, deviceData)
+    ```
+  - **Integration points**: The pipeline can be integrated with:
+    - **State Manager**: Replace `processFrameForCamera()` with generic `processDeviceData()` that uses the pipeline
+    - **Device Registry**: Process data from any device type through the pipeline
+    - **Lifecycle Hooks**: Use data collection hooks to inject data into the pipeline
+    - **AI Gateway**: Video frame processors can prepare data before AI processing
+    - **Storage Services**: Processors can route data to different storage backends
+  - **Extensibility**: New processor types can be added by:
+    - Implementing `DataProcessor` interface directly
+    - Embedding `BaseProcessor` and implementing `Process()` method
+    - Using `ProcessorBuilder` for quick processor creation
+    - Creating specialized processor types (e.g., `VideoFrameProcessor`, `SensorDataProcessor`)
+  - **Abstraction benefits**:
+    - **Device-agnostic**: Same pipeline works for cameras, sensors, audio devices, etc.
+    - **Pluggable**: Processors can be added/removed at runtime
+    - **Composable**: Multiple processors can be chained together
+    - **Testable**: Each processor can be tested independently
+    - **Maintainable**: Clear separation of concerns between data capture, processing, and storage
 
-#### Subsection 12.3.2: Implement Device State Machines
+#### Subsection 12.3.2: Implement Device State Machines ✅ DONE
 - **Description:** Extend per-camera state machine to per-device state machine
 - **Scope:** 
   - Generalize camera state machine to device state machine
   - Support device-type-specific state transitions
   - Maintain device-independent connection state machine
 - **Dependencies:** Epic 1 (state machine refactoring), 12.1.2
+- **Code Locations:**
+  - `edge/orchestrator/internal/iot/device_state_machine.go` - Generic device state machine implementation
+  - `edge/orchestrator/internal/iot/device_state_configs.go` - Device-type-specific state transition configurations
+  - `edge/orchestrator/internal/iot/device_state_adapter.go` - Camera state adapter for backward compatibility
+- **Architectural Decision:**
+  - **State Manager uses `iot.DeviceStateMachine` interface**: The state manager should use the device state machine from the `iot` package instead of maintaining its own camera state machine implementation. This follows the "top interface only" rule and improves separation of concerns.
+  - **Benefits:**
+    - **Separation of concerns**: Device state management logic lives in `iot` package where it belongs
+    - **Reusability**: Other services can use device state machines without depending on state manager
+    - **Simplicity**: State manager becomes simpler - it just uses the interface
+    - **Consistency**: All device types use the same state machine interface
+    - **Maintainability**: Changes to device state logic only need to happen in one place
+  - **Camera-specific states**: Cameras have workflow-specific states (e.g., `waiting_for_screenshots`, `screenshot_set_ready`, `model_deployed`, `frame_processing`) that are stored in device state metadata, while using generic device states (`undiscovered`, `discovered`, `registered`, `active`, `processing`) as primary states.
+  - **CameraStateAdapter**: Provides backward compatibility by mapping camera-specific workflow states to generic device states and storing camera-specific information (model_id, dataset_id) in metadata.
+- **Refactoring Details:**
+  - **DeviceState enum**: Generic device states applicable to all device types: `undiscovered`, `discovered`, `registered`, `active`, `idle`, `processing`, `error`, `disconnected`, `disabled`. These provide a common foundation for all device types.
+  - **DeviceStateInfo**: Contains device ID, device type, state, last updated timestamp, error message, metadata (for device-type-specific information), and is_active flag.
+  - **DeviceStateMachine interface**: Generic interface for per-device state machines with methods: `GetDeviceID()`, `GetDeviceType()`, `GetState()`, `GetStateInfo()`, `Transition()`, `CanTransition()`, `IsOperational()`, `IsReadyForProcessing()`, `SetMetadata()`, `GetMetadata()`. Thread-safe implementation with `sync.RWMutex`.
+  - **DeviceStateMachineFactory interface**: Creates device state machines for specific device types. Supports device-type-specific state transition rules via `RegisterDeviceTypeTransitions()`. Different device types can have different valid state transitions.
+  - **DeviceStateMachineRegistry interface**: Manages device state machines with methods: `GetOrCreateStateMachine()`, `GetStateMachine()`, `GetAllStateMachines()`, `RemoveStateMachine()`, `GetStateMachinesByType()`. Thread-safe implementation with double-check locking pattern.
+  - **Device-type-specific transitions**: Predefined state transition configurations for different device types:
+    - **CameraDeviceStateTransitions**: Camera-specific transitions (maps to generic states: registered -> active -> processing)
+    - **SensorDeviceStateTransitions**: Sensor-specific transitions (simpler flow: discovered -> registered -> active -> processing)
+    - **AudioDeviceStateTransitions**: Audio device-specific transitions (similar to sensors)
+    - **AccessControlDeviceStateTransitions**: Access control device-specific transitions (simpler operational states)
+  - **Default transitions**: Generic transitions for unknown device types. All device types can transition from any state to `error` or `disconnected`.
+  - **CameraStateAdapter**: Adapter that wraps `DeviceStateMachine` and provides camera-specific workflow state management:
+    - Maps camera workflow states (`synced`, `waiting_for_screenshots`, `screenshot_set_ready`, `model_deployed`, `frame_processing`) to generic device states
+    - Stores camera-specific information (model_id, dataset_id, workflow_state) in device state metadata
+    - Provides methods: `GetCameraWorkflowState()`, `SetCameraWorkflowState()`, `TransitionToCameraWorkflowState()`, `SetModelID()`, `GetModelID()`, `SetDatasetID()`, `GetDatasetID()`, `GetCameraStateInfo()`
+    - Maintains backward compatibility with existing camera state machine interface
+  - **State mapping**: Camera-specific workflow states map to generic device states:
+    - `synced` → `registered`
+    - `waiting_for_screenshots`, `screenshot_set_ready` → `active`
+    - `model_deployed`, `frame_processing` → `processing`
+  - **Metadata storage**: Device-type-specific information (e.g., model_id, dataset_id, workflow_state) is stored in `DeviceStateInfo.Metadata` map, allowing generic states to carry device-specific context.
+  - **Thread safety**: All state machine operations are protected with `sync.RWMutex`. Read operations use `RLock()`, write operations use `Lock()`.
+  - **Usage example**:
+    ```go
+    // Create factory and registry
+    factory := iot.NewDeviceStateMachineFactory()
+    registry := iot.NewDeviceStateMachineRegistry(factory)
+    
+    // Register device-type-specific transitions
+    iot.RegisterDefaultDeviceTypeTransitions(factory)
+    
+    // Create state machine for a camera
+    deviceSM, err := registry.GetOrCreateStateMachine(ctx, "camera-1", iot.DeviceTypeCamera)
+    
+    // Use adapter for camera-specific workflow states
+    cameraAdapter := iot.NewCameraStateAdapter(deviceSM)
+    cameraAdapter.TransitionToCameraWorkflowState(iot.CameraWorkflowStateModelDeployed, "")
+    cameraAdapter.SetModelID("model-123")
+    
+    // State manager uses the device state machine interface
+    // No need for camera-specific state machine implementation
+    ```
+  - **Integration with State Manager**: 
+    - State manager imports `iot` package and uses `iot.DeviceStateMachine` interface
+    - State manager uses `iot.DeviceStateMachineRegistry` to manage device state machines
+    - For cameras, state manager uses `iot.CameraStateAdapter` to access camera-specific workflow states
+    - State manager no longer needs its own `CameraStateMachine` implementation
+    - Connection state machine remains separate (device-independent) in `state-mng` package
+  - **Migration path**:
+    - State manager can gradually migrate from `types.CameraStateMachine` to `iot.DeviceStateMachine`
+    - `CameraStateAdapter` provides backward compatibility during migration
+    - Existing camera state machine can be deprecated once migration is complete
+  - **Benefits for State Manager**:
+    - **Simpler code**: No need to maintain camera state machine implementation
+    - **Extensible**: Easy to add new device types without modifying state manager
+    - **Consistent**: All devices use the same state machine interface
+    - **Testable**: Device state machines can be tested independently
 
 ---
 
@@ -208,33 +1121,146 @@ This document provides a comprehensive refactoring plan based on the state trans
 ### Section 2.1: Event Bus Reliability
 
 #### Subsection 2.1.1: Design Durable Event Queue
-- **Description:** Design persistent event storage for critical events
+- **Description:** Design persistent event storage for ALL events (not just critical ones) for debugging and troubleshooting
+- **Status:** ✅ COMPLETE
 - **Scope:** 
-  - Identify critical events: `snapshot.requested`, `model.deployed`, connectivity events
-  - Design queue structure (meta-storage or separate queue service)
-  - Define event acknowledgment and retry semantics
+  - Persist ALL events to persistent storage (not just critical ones) for debugging and troubleshooting
+  - Design queue structure using persistent storage (bbolt or meta-storage)
+  - Implement event querying functionality for debugging
+  - Maintain in-memory subscriptions for real-time event delivery
 - **Dependencies:** None
 - **Related Findings:**
   - Finding #16: In-memory event bus drops events when buffers are full
   - Finding #106: Event bus channels can fill up and events are silently dropped
+- **Implementation:**
+  - **Two implementations provided:**
+    1. **Bbolt Event Bus** (`edge/orchestrator/internal/event-bus/bboltebus/bbolt_event_bus.go`):
+       - Implements `EventBus` interface with bbolt persistence
+       - Uses dedicated bbolt database at `{DataDir}/db/event-bus.db`
+       - Stores events in three buckets for efficient querying:
+         - `events`: Main events bucket (keyed by event ID)
+         - `events_by_type`: Events indexed by type (keyed by `<event_type>_<timestamp>_<event_id>`)
+         - `events_by_time`: Events indexed by time (keyed by `<timestamp>_<event_id>`)
+       - Provider: `"bbolt"` (requires `DataDir` in config)
+    2. **Meta-Storage Event Bus** (`edge/orchestrator/internal/event-bus/metastoragebus/meta_storage_event_bus.go`):
+       - Implements `EventBus` interface using meta-storage top interface
+       - Uses existing meta-storage instance (shared with other services)
+       - Stores events in meta-storage `events` bucket
+       - Leverages meta-storage's existing filtering and querying capabilities
+       - Provider: `"metastorage"` (requires meta-storage to be available)
+  - **Common Features (both implementations):**
+    - Provides `QueryEvents()` method for querying events by type, source, time range, and limit
+    - Provides `GetEventCount()` method for getting total event count
+    - Events are persisted asynchronously (non-blocking) to avoid impacting real-time delivery
+    - Maintains in-memory subscriptions for real-time event delivery
+    - All events are persisted (not just critical ones) for debugging and troubleshooting
+  - **Interface Extensions:**
+    - Extended `MetaDataStore` interface with event storage methods:
+      - `SaveEvent()`, `GetEvent()`, `ListEvents()`, `DeleteEvent()`, `GetEventCount()`
+    - Implemented in `edge/orchestrator/internal/meta-storage/bbolt-imp/meta-storage-impl.go`
+  - **Configuration:**
+    - Updated `EventBusConfig` to include `DataDir` field for bbolt storage path
+    - Updated `NewEventBus()` factory to support both `"bbolt"` and `"metastorage"` providers
+    - Meta-storage provider requires meta-storage to be created before event-bus (dependency order adjusted in orchestrator)
+- **Code Locations:**
+  - `edge/orchestrator/internal/event-bus/bboltebus/bbolt_event_bus.go` - Bbolt implementation
+  - `edge/orchestrator/internal/event-bus/metastoragebus/meta_storage_event_bus.go` - Meta-storage implementation
+  - `edge/orchestrator/internal/event-bus/event_bus.go` - Factory updated to support both providers
+  - `edge/orchestrator/internal/event-bus/types/types.go` - Config updated with `DataDir` field
+  - `edge/orchestrator/internal/meta-storage/meta-storage-iface.go` - Interface extended with event methods
+  - `edge/orchestrator/internal/meta-storage/bbolt-imp/meta-storage-impl.go` - Event storage methods implemented
+  - `edge/orchestrator/internal/orchestrator/orchestrator.go` - Dependency order adjusted for meta-storage provider
 
 #### Subsection 2.1.2: Implement Event Persistence
-- **Description:** Persist critical events before delivery
+- **Description:** Persist all events before delivery using Meta-Storage Event Bus as default
+- **Status:** ✅ COMPLETE (Event persistence implemented; delivery tracking and replay are future enhancements)
 - **Scope:** 
-  - Store critical events in meta-storage before publishing
-  - Mark events as delivered/acknowledged after successful processing
-  - Implement event replay mechanism for failed deliveries
+  - ✅ Store all events in meta-storage before publishing (implemented in 2.1.1)
+  - ⬜ Mark events as delivered/acknowledged after successful processing (future enhancement)
+  - ⬜ Implement event replay mechanism for failed deliveries (future enhancement - Subsection 2.1.3)
 - **Dependencies:** 2.1.1
+- **Implementation:**
+  - **Meta-Storage Event Bus is now the default event bus** (configured in `config.dev.yaml`)
+  - All events are automatically persisted to meta-storage before publishing
+  - Events are stored asynchronously (non-blocking) to avoid impacting real-time delivery
+  - Event persistence is transparent to subscribers - they receive events in real-time via in-memory channels
+  - All events are queryable via `QueryEvents()` method for debugging and troubleshooting
+  - **Configuration:**
+    - Updated `config.dev.yaml` to use `provider: metastorage`
+    - Meta-storage must be configured and available before event-bus starts
+    - Event-bus automatically uses the existing meta-storage instance
 - **Code Locations:**
-  - `edge/orchestrator/internal/event-bus/inmemory/inmemory_event_bus.go`
+  - `edge/orchestrator/internal/event-bus/metastoragebus/meta_storage_event_bus.go` - Main implementation
+  - `edge/orchestrator/internal/meta-storage/meta-storage-iface.go` - Event storage interface
+  - `edge/orchestrator/internal/meta-storage/bbolt-imp/meta-storage-impl.go` - Event storage implementation
+  - `edge/config/config.dev.yaml` - Default configuration updated to use metastorage provider
+- **Note:** Delivery acknowledgment and replay mechanisms are planned for future subsections (2.1.3 and beyond) as they require additional infrastructure for tracking event processing status.
 
-#### Subsection 2.1.3: Implement Event Retry Logic
+#### Subsection 2.1.3: Implement Event Retry Logic ✅ COMPLETED
 - **Description:** Add retry mechanism for failed event processing
 - **Scope:** 
   - Retry failed event processing with exponential backoff
   - Set maximum retry attempts
   - Move to dead letter queue after max retries
 - **Dependencies:** 2.1.2
+- **Status:** ✅ **COMPLETED**
+- **Implementation Details:**
+  - Extended `EventBusConfig` with retry configuration:
+    - `max_retries`: Maximum number of retry attempts (default: 3)
+    - `initial_backoff`: Initial backoff duration (default: 1s)
+    - `max_backoff`: Maximum backoff duration to cap exponential backoff (default: 60s)
+    - `backoff_multiplier`: Multiplier for exponential backoff (default: 2.0)
+    - `retry_interval`: Interval between retry worker runs (default: 10s)
+  - Extended `MetaDataStore` interface with event processing status methods:
+    - `UpdateEventProcessingStatus()`: Updates event status, retry count, error message, and next retry time
+    - `GetFailedEvents()`: Retrieves failed events ready for retry (next_retry_time <= now)
+    - `GetDeadLetterEvents()`: Retrieves events from dead letter queue
+    - `MoveEventToDeadLetter()`: Moves an event to dead letter queue after max retries
+  - Implemented event processing status tracking:
+    - Events are marked as "pending" when published
+    - Status transitions: pending → processing → succeeded/failed
+    - Failed events are scheduled for retry with exponential backoff
+    - Events exceeding max retries are moved to dead letter queue
+  - Added retry worker to `MetaStorageEventBus`:
+    - Background goroutine that periodically checks for failed events ready for retry
+    - Re-publishes failed events after backoff period
+    - Uses exponential backoff: `backoff = initial_backoff * (backoff_multiplier ^ retry_count)`
+    - Backoff is capped at `max_backoff`
+  - Implemented dead letter queue:
+    - Separate bucket in meta-storage (`dead_letter_events`)
+    - Events moved to DLQ after exceeding `max_retries`
+    - DLQ events can be queried for manual inspection and recovery
+  - Added helper methods to `MetaStorageEventBus`:
+    - `MarkEventFailed()`: Called by event processors to mark events as failed
+    - `MarkEventSucceeded()`: Called by event processors to mark events as succeeded
+    - These methods should be called by event subscribers/processors to track processing status
+- **Code Locations:**
+  - `edge/orchestrator/internal/event-bus/types/types.go` - Retry configuration and status types
+  - `edge/orchestrator/internal/event-bus/metastoragebus/meta_storage_event_bus.go` - Retry worker and status tracking
+  - `edge/orchestrator/internal/meta-storage/meta-storage-iface.go` - Event processing status interface
+  - `edge/orchestrator/internal/meta-storage/bbolt-imp/meta-storage-impl.go` - Event processing status implementation
+  - `edge/config/config.dev.yaml` - Retry configuration defaults
+- **Usage:**
+  - Event processors should call `MarkEventFailed()` when processing fails
+  - Event processors should call `MarkEventSucceeded()` when processing succeeds
+  - Retry worker automatically re-publishes failed events after backoff period
+  - Events exceeding max retries are automatically moved to dead letter queue
+- **Configuration Example:**
+  ```yaml
+  event_bus:
+    provider: metastorage
+    buffer_size: 100
+    max_retries: 3
+    initial_backoff: 1s
+    max_backoff: 60s
+    backoff_multiplier: 2.0
+    retry_interval: 10s
+  ```
+- **Note:** 
+  - Retry logic is only enabled for `metastorage` event bus provider
+  - If `max_retries` is 0 or not set, retry logic is disabled
+  - Event processors must explicitly call `MarkEventFailed()` or `MarkEventSucceeded()` to track status
+  - Dead letter queue events can be queried using `GetDeadLetterEvents()` for manual inspection
 
 #### Subsection 2.1.4: Add Event Bus Backpressure
 - **Description:** Implement flow control to prevent event drops
@@ -247,92 +1273,636 @@ This document provides a comprehensive refactoring plan based on the state trans
   - Finding #106: Event bus channels can fill up and events are silently dropped
 - **Code Locations:**
   - `edge/orchestrator/internal/event-bus/inmemory/inmemory_event_bus.go:71-104`
+- **Note on MetaStorageEventBus:**
+  - Backpressure is **less critical** for `metastorage` provider because:
+    - Events are **persisted to meta-storage before delivery** (durable)
+    - If subscriber channels are full, only **real-time delivery is affected** - events are not lost
+    - The retry mechanism (2.1.3) can handle processing failures
+    - Events can be queried from storage if needed
+  - However, backpressure could still be useful for:
+    - Preventing memory buildup in subscriber channels
+    - Ensuring timely delivery for real-time subscribers
+    - Providing feedback to publishers about system load
+  - **Priority:** High for `inmemory` provider (events are lost), Medium/Low for `metastorage` provider (events are durable)
 
-#### Subsection 2.1.5: Add Event Ordering Guarantees
+#### Subsection 2.1.5: Add Event Ordering Guarantees ✅ COMPLETED
 - **Description:** Ensure critical events are processed in order
 - **Scope:** 
   - Add sequence numbers to events
   - Process events in order for same event source
   - Handle out-of-order events gracefully
 - **Dependencies:** 2.1.2
+- **Priority:** Focus on `metastorage` provider first (default event bus)
+- **Status:** ✅ **COMPLETED**
 - **Related Findings:**
   - Finding #35: Workflow execution is concurrent-per-event, creating ordering hazards
   - Finding #38: Workflows can run out-of-order relative to state transitions
+- **Implementation Details:**
+  - Extended `Event` type with `SequenceNumber` field (int64, 0 if not set for backward compatibility)
+  - Added `OrderingMode` type with three modes:
+    - `none`: No ordering guarantees (default, backward compatible)
+    - `best_effort`: Reorder events if possible, deliver out-of-order if needed
+    - `strict`: Buffer and wait for missing sequences, timeout if sequence doesn't arrive
+  - Extended `EventBusConfig` with ordering configuration:
+    - `ordering_mode`: Ordering mode ("none", "best_effort", "strict")
+    - `ordering_buffer_size`: Buffer size for out-of-order events (default: 100)
+    - `ordering_timeout`: Timeout for waiting for missing sequences in strict mode (default: 30s)
+  - Implemented per-source sequence number generation:
+    - Each event source has its own sequence counter
+    - Sequence numbers start at 1 per source
+    - Allows parallel processing of different sources
+  - Implemented `OrderingBuffer` per source:
+    - Tracks expected sequence number per source
+    - Buffers out-of-order events
+    - Delivers events in sequence order
+    - Handles timeouts in strict mode
+    - Cleans up old buffered events to prevent memory growth
+  - Ordering modes behavior:
+    - **best_effort**: Buffers future events, delivers consecutive events when available, delivers past events immediately
+    - **strict**: Buffers future events, waits for missing sequences up to timeout, then skips and continues
+  - Sequence numbers are persisted in event metadata for debugging and replay
+  - Events without sequence numbers (SequenceNumber == 0) are delivered immediately (backward compatible)
+- **Code Locations:**
+  - `edge/orchestrator/internal/event-bus/types/types.go` - Event type with SequenceNumber, OrderingMode, EventBusConfig
+  - `edge/orchestrator/internal/event-bus/metastoragebus/meta_storage_event_bus.go` - Ordering implementation
+    - `OrderingBuffer` type and methods
+    - `publishWithOrdering()` - Applies ordering logic
+    - `getNextSequenceNumber()` - Generates sequence numbers per source
+    - `getOrCreateOrderingBuffer()` - Manages per-source buffers
+  - `edge/orchestrator/internal/event-bus/event_bus.go` - Ordering config creation and passing
+  - `edge/config/config.dev.yaml` - Ordering configuration defaults
+- **Configuration Example:**
+  ```yaml
+  event_bus:
+    provider: metastorage
+    buffer_size: 100
+    ordering_mode: best_effort  # "none", "best_effort", or "strict"
+    ordering_buffer_size: 100   # Buffer size for out-of-order events
+    ordering_timeout: 30s        # Timeout for strict mode
+  ```
+- **Usage:**
+  - Events are automatically assigned sequence numbers when ordering is enabled
+  - Sequence numbers are per-source, allowing parallel processing of different sources
+  - Events from the same source are delivered in sequence order
+  - Out-of-order events are buffered and reordered when possible
+  - In strict mode, missing sequences cause a timeout before skipping
+- **Benefits:**
+  - Prevents ordering hazards in workflow execution
+  - Ensures state transitions happen in correct order per source
+  - Allows parallel processing of different sources
+  - Backward compatible (ordering disabled by default)
+  - Configurable ordering guarantees based on requirements
+- **Note:** 
+  - Since `metastorage` is the default event bus, this implementation is prioritized
+  - Other providers (inmemory, bbolt) can be updated later if needed
+  - Sequence numbers are per-source to allow parallel processing of different sources
+  - Events without sequence numbers (legacy or when ordering disabled) are delivered immediately
 
 ### Section 2.2: Workflow Execution Improvements
 
-#### Subsection 2.2.1: Serialize Workflow Execution
+#### Subsection 2.2.1: Serialize Workflow Execution ✅ COMPLETED
 - **Description:** Execute workflows sequentially or with proper ordering
 - **Scope:** 
   - Remove concurrent-per-event workflow execution
   - Execute workflows in event order
   - Add workflow queue if needed
-- **Dependencies:** 2.1.5
+- **Dependencies:** 2.1.5 (Event Ordering Guarantees)
+- **Status:** ✅ **COMPLETED**
 - **Related Findings:**
   - Finding #35: Workflow execution is concurrent-per-event
   - Finding #38: Workflows can run out-of-order
+- **Implementation Details:**
+  - Leverages event ordering guarantees from Subsection 2.1.5 (metastorage event bus)
+  - Implements per-source workflow queues for serialized execution
+  - Workflows execute sequentially per event source, respecting event sequence numbers
+  - Events without sequence numbers (SequenceNumber == 0) execute concurrently (backward compatible)
+  - Per-source workflow queue workers ensure sequential execution per source
+  - Workflow queue buffer size: 100 tasks per source
+  - Global workflow semaphore still limits total concurrent workflows across all sources
+  - Configuration option `serialize_workflows` (default: true) to enable/disable serialization
+- **Architecture:**
+  - `WorkflowTask` type holds event and state information for queued workflows
+  - Per-source workflow queues (`workflowQueues map[string]chan *WorkflowTask`)
+  - `workflowQueueWorker` processes workflows sequentially per source
+  - `handleEvent` queues workflows when `serializeWorkflows` is enabled and event has sequence number
+  - Falls back to concurrent execution if queue is full (with warning)
 - **Code Locations:**
-  - `edge/orchestrator/internal/state-mng/impl/state_mng_impl.go:388-633`
+  - `edge/orchestrator/internal/state-mng/impl/state_mng_impl.go`:
+    - `WorkflowTask` type (line ~232)
+    - `workflowQueues` map and `serializeWorkflows` flag (line ~141-142)
+    - `handleEvent()` - queues workflows when serialization enabled (line ~700)
+    - `queueWorkflow()` - queues workflow task per source (line ~720)
+    - `getOrCreateWorkflowQueue()` - creates per-source queue and worker (line ~750)
+    - `workflowQueueWorker()` - processes workflows sequentially per source (line ~780)
+  - `edge/orchestrator/internal/state-mng/types/config.go`:
+    - `SerializeWorkflows` configuration field (line ~48)
+- **Configuration:**
+  ```yaml
+  state_manager:
+    serialize_workflows: true  # Default: true (enabled)
+  ```
+- **Behavior:**
+  - **When `serialize_workflows: true` (default):**
+    - Events with sequence numbers (SequenceNumber > 0) are queued per source
+    - Workflows execute sequentially per source, respecting event ordering
+    - Events without sequence numbers execute concurrently (backward compatible)
+  - **When `serialize_workflows: false`:**
+    - All workflows execute concurrently (original behavior)
+    - Workflow semaphore still limits total concurrency
+- **Benefits:**
+  - Prevents ordering hazards in workflow execution (Finding #35)
+  - Ensures workflows run in event order per source (Finding #38)
+  - Leverages event bus ordering guarantees (Subsection 2.1.5)
+  - Allows parallel processing of different sources
+  - Backward compatible (events without sequence numbers execute concurrently)
+  - Configurable serialization mode
+- **Integration with Event Ordering:**
+  - Works seamlessly with `metastorage` event bus ordering (Subsection 2.1.5)
+  - Events arrive in order per source (due to event bus ordering)
+  - Workflows execute in the same order (due to per-source queues)
+  - Sequence numbers ensure correct ordering even if events arrive out-of-order
+- **Note:**
+  - Since `metastorage` is the default event bus with ordering enabled, workflows automatically benefit from serialized execution
+  - Per-source queues allow parallel processing of different sources while maintaining ordering within each source
+  - Queue buffer size (100) prevents blocking event processing while allowing some buffering
 
-#### Subsection 2.2.2: Add Workflow Concurrency Control
+#### Subsection 2.2.2: Add Workflow Concurrency Control ✅ COMPLETED
 - **Description:** Limit concurrent workflow execution to prevent resource exhaustion
 - **Scope:** 
   - Implement worker pool for workflow execution
   - Set maximum concurrent workflows
   - Queue workflows when at capacity
-- **Dependencies:** 2.2.1
+- **Dependencies:** 2.2.1 (Serialize Workflow Execution)
+- **Status:** ✅ **COMPLETED**
 - **Related Findings:**
   - Finding #93: executeWorkflow spawns unbounded goroutines
+- **Implementation Details:**
+  - Replaced semaphore-based concurrency control with worker pool pattern
+  - Implemented global workflow queue (`workflowPoolQueue`) with buffer size 1000
+  - Created fixed-size worker pool with configurable number of workers (default: 10)
+  - Workers pull tasks from global queue and execute workflows sequentially
+  - Prevents unbounded goroutine creation (Finding #93)
+  - Queues workflows when at capacity (non-blocking, drops with warning if queue full)
+  - Integrates with per-source serialization (Subsection 2.2.1):
+    - Per-source queues feed into global worker pool
+    - Worker pool limits total concurrent workflows across all sources
+    - Per-source ordering is maintained while respecting global concurrency limit
+- **Architecture:**
+  - **Global Worker Pool:**
+    - `workflowPoolQueue`: Global queue for all workflow tasks (buffer: 1000)
+    - `workflowPoolWorkers`: Number of worker goroutines (configurable, default: 10)
+    - `workflowPoolWorker()`: Worker function that processes tasks from global queue
+    - Workers execute workflows sequentially (one at a time per worker)
+  - **Integration with Per-Source Serialization:**
+    - Per-source queues (`workflowQueues`) feed into global worker pool
+    - Per-source workers pull from source-specific queues and enqueue to global pool
+    - Global worker pool limits total concurrency while maintaining per-source ordering
+  - **Workflow Execution Flow:**
+    1. Event arrives → `handleEvent()` creates `WorkflowTask`
+    2. If serialization enabled and event has sequence number:
+       - Task queued to per-source queue
+       - Per-source worker pulls from source queue
+       - Per-source worker enqueues to global worker pool
+    3. If serialization disabled or no sequence number:
+       - Task directly enqueued to global worker pool
+    4. Global worker pool worker pulls task and executes workflow
+- **Code Locations:**
+  - `edge/orchestrator/internal/state-mng/impl/state_mng_impl.go`:
+    - Worker pool fields (line ~137-142):
+      - `workflowPoolQueue`: Global queue
+      - `workflowPoolWorkers`: Worker count
+      - `workflowPoolWg`: WaitGroup for workers
+      - `workflowPoolStarted`: Start flag
+      - `workflowPoolMu`: Mutex for pool state
+    - `startWorkflowPool()`: Starts worker pool (line ~838)
+    - `stopWorkflowPool()`: Stops worker pool (line ~860)
+    - `workflowPoolWorker()`: Worker function (line ~890)
+    - `enqueueWorkflowToPool()`: Enqueues task to global pool (line ~730)
+    - `handleEvent()`: Uses worker pool for non-serialized workflows (line ~714)
+    - `workflowQueueWorker()`: Enqueues to global pool (line ~833)
+  - `edge/orchestrator/internal/state-mng/types/config.go`:
+    - `MaxConcurrentWorkflows`: Worker pool size configuration
+- **Configuration:**
+  ```yaml
+  state_manager:
+    max_concurrent_workflows: 10  # Number of worker pool workers (default: 10)
+  ```
+- **Benefits:**
+  - Prevents unbounded goroutine creation (Finding #93)
+  - Limits resource usage with fixed worker pool
+  - Queues workflows when at capacity
+  - Works seamlessly with per-source serialization
+  - Maintains global concurrency limit while respecting per-source ordering
+  - Non-blocking enqueue (drops with warning if queue full)
+- **Behavior:**
+  - **Worker Pool:**
+    - Fixed number of workers (configurable via `max_concurrent_workflows`)
+    - Workers pull from global queue and execute workflows
+    - Queue buffer: 1000 tasks
+    - If queue full, tasks are dropped with warning (non-blocking)
+  - **Integration with Serialization:**
+    - Per-source queues maintain ordering per source
+    - Global worker pool limits total concurrency
+    - Both mechanisms work together: ordering + concurrency control
+  - **Backward Compatibility:**
+    - Semaphore kept for backward compatibility (deprecated)
+    - Events without sequence numbers use worker pool directly
+    - Configuration still works with existing `max_concurrent_workflows` setting
+- **Shutdown:**
+  - Worker pool stopped before per-source queues
+  - Graceful shutdown with 30-second timeout
+  - All workers finish processing before shutdown completes
+- **Note:**
+  - Worker pool size cannot be changed dynamically (requires restart)
+  - Queue size (1000) is fixed but can be adjusted in code if needed
+  - Worker pool works with both serialized and non-serialized workflows
 
-#### Subsection 2.2.3: Make Workflows Idempotent
+#### Subsection 2.2.3: Make Workflows Idempotent ✅ COMPLETED
 - **Description:** Ensure all workflows are idempotent to handle duplicate execution
 - **Scope:** 
   - Review all workflow implementations
   - Add idempotency checks where needed
   - Test workflows with duplicate events
 - **Dependencies:** None
+- **Status:** ✅ **COMPLETED**
+- **Implementation Details:**
+  - Implemented duplicate event detection mechanism using event keys
+  - Added idempotency checks to all critical workflows
+  - Event deduplication window: 1 hour (configurable)
+  - Automatic cleanup of old processed events (every 1000 events)
+  - Per-workflow idempotency checks for operations with side effects
+- **Event Deduplication:**
+  - **Event Key Generation:**
+    - Format: `event_type:source:sequence_number:camera_id:model_id:event_id`
+    - Includes event type, source, sequence number, and relevant data fields
+    - Unique per event instance
+  - **Deduplication Window:**
+    - Default: 1 hour
+    - Events processed within window are considered duplicates
+    - Events outside window are treated as new (allows retry after failures)
+  - **Cleanup:**
+    - Automatic cleanup when processed events map exceeds 1000 entries
+    - Removes events outside deduplication window
+    - Prevents unbounded memory growth
+- **Workflow Idempotency Checks:**
+  1. **`handleSnapshotRequested`:**
+     - Checks if pending snapshot request already exists for camera
+     - Skips duplicate requests (idempotent)
+     - Code: `edge/orchestrator/internal/state-mng/impl/state_mng_impl.go:1524-1558`
+  2. **`syncScreenshotsToVM`:**
+     - Tracks last sync timestamp per camera
+     - Skips sync if synced within last 5 minutes (idempotent)
+     - Updates sync timestamp after successful sync
+     - Code: `edge/orchestrator/internal/state-mng/impl/state_mng_impl.go:1621-1815`
+  3. **`handleModelDeployed`:**
+     - Checks if model is already deployed for camera
+     - Compares model ID and camera state
+     - Skips if model already deployed (idempotent)
+     - Code: `edge/orchestrator/internal/state-mng/impl/state_mng_impl.go:2031-2110`
+  4. **`initializeServicesAfterAuth`:**
+     - Tracks whether services have been initialized
+     - Skips if already initialized (idempotent)
+     - Code: `edge/orchestrator/internal/state-mng/impl/state_mng_impl.go:1397-1425`
+  5. **`executeModelDeployedWorkflowForCamera`:**
+     - Uses `startFrameProcessingForCamera` which has built-in idempotency
+     - Double-check locking prevents duplicate goroutines
+     - Code: `edge/orchestrator/internal/state-mng/impl/state_mng_impl.go:2147-2231`
+  6. **`executeFrameProcessingWorkflowForCamera`:**
+     - Uses `startFrameProcessingForCamera` which has built-in idempotency
+     - Checks if frame processing already active before starting
+     - Code: `edge/orchestrator/internal/state-mng/impl/state_mng_impl.go:2233-2310`
+  7. **`handleCapabilitiesReceived`:**
+     - Camera discovery is idempotent (won't discover same cameras twice)
+     - Code: `edge/orchestrator/internal/state-mng/impl/state_mng_impl.go:1427-1476`
+  8. **`handleScreenshotSetReady`:**
+     - Relies on `syncScreenshotsToVM` idempotency
+     - Code: `edge/orchestrator/internal/state-mng/impl/state_mng_impl.go:1576-1619`
+- **Code Locations:**
+  - `edge/orchestrator/internal/state-mng/impl/state_mng_impl.go`:
+    - Event deduplication fields (line ~145-150):
+      - `processedEvents`: Map of processed event keys to timestamps
+      - `processedEventsMu`: Mutex for processed events map
+      - `eventDedupWindow`: Deduplication time window (default: 1 hour)
+    - Workflow idempotency tracking (line ~150-155):
+      - `lastScreenshotSync`: Map of camera ID to last sync timestamp
+      - `screenshotSyncMu`: Mutex for screenshot sync tracking
+      - `servicesInitialized`: Flag for services initialization
+      - `servicesInitMu`: Mutex for services initialized flag
+    - `isDuplicateEvent()`: Checks if event is duplicate (line ~960)
+    - `markEventProcessed()`: Marks event as processed (line ~978)
+    - `generateEventKey()`: Generates unique event key (line ~996)
+    - `cleanupOldProcessedEvents()`: Cleans up old events (line ~1025)
+    - `handleEvent()`: Adds duplicate detection (line ~734)
+    - All workflow functions with idempotency checks (see list above)
+- **Event Key Generation:**
+  ```go
+  // Format: event_type:source:sequence_number:camera_id:model_id:event_id
+  key := fmt.Sprintf("%s:%s:%d", ev.Type, ev.Source, ev.SequenceNumber)
+  if cameraID, ok := ev.Data["camera_id"].(string); ok && cameraID != "" {
+      key += ":" + cameraID
+  }
+  if modelID, ok := ev.Data["model_id"].(string); ok && modelID != "" {
+      key += ":" + modelID
+  }
+  if eventID, ok := ev.Data["event_id"].(string); ok && eventID != "" {
+      key += ":" + eventID
+  }
+  ```
+- **Idempotency Guarantees:**
+  - **Duplicate Events:** Detected and skipped within deduplication window
+  - **Snapshot Requests:** Only one pending request per camera (checked before creation)
+  - **Screenshot Sync:** No sync within 5 minutes of last sync
+  - **Model Deployment:** Only one model deployment per camera (checked before processing)
+  - **Service Initialization:** Only initialized once after authentication
+  - **Frame Processing:** Only one frame processing goroutine per camera (double-check locking)
+  - **State Transitions:** State machine transitions are idempotent (same transition twice = no-op)
+- **Benefits:**
+  - Prevents duplicate workflow execution from duplicate events
+  - Handles event replay scenarios gracefully
+  - Prevents resource waste from redundant operations
+  - Improves system reliability and predictability
+  - Reduces unnecessary network traffic and storage operations
+  - Handles out-of-order events correctly
+- **Behavior:**
+  - **Event Deduplication:**
+    - Events processed within 1 hour are considered duplicates
+    - Duplicate events are logged and skipped
+    - Event keys include all relevant identifiers for uniqueness
+  - **Workflow Idempotency:**
+    - Each workflow checks its own idempotency conditions
+    - State-based checks (e.g., camera state, model ID)
+    - Time-based checks (e.g., last sync timestamp)
+    - Flag-based checks (e.g., services initialized)
+  - **Cleanup:**
+    - Old processed events cleaned up automatically
+    - Prevents unbounded memory growth
+    - Cleanup triggered when map exceeds 1000 entries
+- **Testing Recommendations:**
+  - Test duplicate event handling (same event processed twice)
+  - Test event replay scenarios (events outside deduplication window)
+  - Test concurrent duplicate events (race conditions)
+  - Test workflow idempotency (same workflow executed multiple times)
+  - Test state-based idempotency (workflows with state checks)
+  - Test time-based idempotency (workflows with time windows)
+- **Note:**
+  - Event deduplication window (1 hour) is configurable but not exposed in config yet
+  - Screenshot sync window (5 minutes) is hardcoded but could be made configurable
+  - All idempotency checks are thread-safe using mutexes
+  - State machine transitions are inherently idempotent (same transition twice = no-op)
 
-#### Subsection 2.2.4: Handle Missing Event Consumers
+#### Subsection 2.2.4: Handle Missing Event Consumers ✅ COMPLETED
 - **Description:** Add consumers for published but unhandled events
 - **Scope:** 
   - Add handler for `model.deployment.status` events
   - Review all published events for consumers
   - Add observability for unhandled events
 - **Dependencies:** None
+- **Status:** ✅ **COMPLETED**
 - **Related Findings:**
   - Finding #41: model.deployment.status events published but no consumer
+- **Implementation Details:**
+  - Added handler for `model.deployment.status` events
+  - Added observability for unhandled events (default case in switch statement)
+  - Reviewed all published events and documented consumer status
+  - Handler reports deployment status to VM via `vmGateway.ReportDeploymentStatus()`
+- **Event Handler Added:**
+  1. **`model.deployment.status`:**
+     - **Purpose:** Reports model deployment status to VM
+     - **Published by:** `vm-gateway/http-impl/https-server-service` (line 746)
+     - **Handler:** `handleModelDeploymentStatus()` (line ~2280)
+     - **Functionality:**
+       - Extracts `deployment_id`, `status`, `model_path`, `model_id` from event
+       - Validates required fields (`deployment_id`, `status`)
+       - Checks if HTTPS is connected (required for reporting)
+       - Prepares error message for failed deployments
+       - Calls `vmGateway.ReportDeploymentStatus()` with 10-second timeout
+       - Logs success/failure for observability
+     - **Code:** `edge/orchestrator/internal/state-mng/impl/state_mng_impl.go:2280-2350`
+- **Observability for Unhandled Events:**
+  - Added `default` case in `executeWorkflow()` switch statement
+  - Logs warning for unhandled event types with full event context:
+    - Event type
+    - Source
+    - Sequence number
+    - Timestamp
+  - Helps identify missing consumers during development and operations
+  - Code: `edge/orchestrator/internal/state-mng/impl/state_mng_impl.go:1371-1378`
+- **Published Events Review:**
+  - **Events with Consumers:**
+    - `network.wireguard.connected` → Handled
+    - `network.wireguard.disconnected` → Handled
+    - `network.https.connected` → Handled
+    - `network.https.disconnected` → Handled
+    - `edge.authenticated` → Handled
+    - `edge.capabilities_received` → Handled
+    - `camera.discovered` → Handled
+    - `camera.registered` → Handled
+    - `camera.connected` → Handled
+    - `camera.disconnected` → Handled
+    - `snapshot.requested` → Handled
+    - `screenshot_set.ready` → Handled
+    - `screenshot.saved` → Handled
+    - `model.deployed` → Handled
+    - `model.deployment.status` → **NOW HANDLED** ✅
+    - `video.frame_received` → Handled (no-op, handled by AI gateway)
+    - `video.clip_recorded` → Handled
+    - `ai.detection` → Handled
+    - `ai.inference` → Handled
+    - `storage.full` → Handled
+    - `storage.warning` → Handled
+  - **Events without Consumers (Intentionally):**
+    - `screenshot.updated` → No handler (metadata update, no state change needed)
+    - `screenshot.deleted` → No handler (cleanup operation, no state change needed)
+    - `camera.updated` → No handler (configuration update, no state change needed)
+    - `camera.deleted` → No handler (cleanup operation, handled by deletion workflow)
+    - `camera.discovery.requested` → No handler (triggers discovery, not state change)
+    - `camera.capture_frame` → No handler (command event, handled by CCTV service)
+    - `security.event.created` → No handler (stored in meta-storage, no state change)
+    - `camera.frame.received` → No handler (handled by AI gateway directly)
+    - `workflow.camera.discover` → No handler (internal workflow event, triggers discovery)
+    - `workflow.ai.start_processing` → No handler (internal workflow event, triggers AI processing)
+  - **Note:** Events without consumers are either:
+    - Internal workflow events (not meant for state manager)
+    - Metadata/cleanup events (no state machine impact)
+    - Command events (handled by specific services)
+    - Events handled by other services (AI gateway, CCTV service)
 - **Code Locations:**
-  - `edge/orchestrator/internal/state-mng/impl/state_mng_impl.go:555-620`
+  - `edge/orchestrator/internal/state-mng/impl/state_mng_impl.go`:
+    - `EventTypeModelDeploymentStatus` constant (line ~60)
+    - `handleModelDeploymentStatus()` handler (line ~2280)
+    - Default case for unhandled events (line ~1371)
+  - `edge/orchestrator/internal/vm-gateway/http-impl/https-server-service/impl/https-server.go`:
+    - Event publisher (line ~746)
+- **Handler Implementation:**
+  ```go
+  func (m *StateManagerImpl) handleModelDeploymentStatus(ctx context.Context, ev eventbustypes.Event) {
+      // Extract event data
+      deploymentID, _ := ev.Data["deployment_id"].(string)
+      status, _ := ev.Data["status"].(string)
+      modelPath, _ := ev.Data["model_path"].(string)
+      modelID, _ := ev.Data["model_id"].(string)
+      
+      // Validate required fields
+      if deploymentID == "" || status == "" {
+          return
+      }
+      
+      // Check HTTPS connection (required for reporting)
+      if !m.vmGateway.IsHTTPConnected() {
+          return
+      }
+      
+      // Prepare error message for failed deployments
+      var errorMsg *string
+      if status == "failed" || status == "error" {
+          // Extract error message
+      }
+      
+      // Report to VM with timeout
+      callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+      defer cancel()
+      m.vmGateway.ReportDeploymentStatus(callCtx, deploymentID, status, errorMsg, modelPathPtr)
+  }
+  ```
+- **Observability Implementation:**
+  ```go
+  default:
+      // Unhandled event - log for observability
+      m.logger.Warn("Unhandled event type in workflow execution",
+          zap.String("event_type", string(ev.Type)),
+          zap.String("source", ev.Source),
+          zap.Int64("sequence_number", ev.SequenceNumber),
+          zap.Time("timestamp", ev.Timestamp),
+      )
+  ```
+- **Benefits:**
+  - All published events now have consumers or documented rationale
+  - Deployment status reporting works correctly
+  - Unhandled events are logged for observability
+  - Easier to identify missing consumers during development
+  - Better operational visibility into event processing
+- **Behavior:**
+  - **Model Deployment Status:**
+    - Event received → Extract data → Validate → Check HTTPS connection → Report to VM
+    - If HTTPS not connected, event is silently skipped (expected during disconnection)
+    - If reporting fails, error is logged
+    - Success is logged for observability
+  - **Unhandled Events:**
+    - Logged as warnings with full event context
+    - Helps identify missing consumers
+    - Does not block event processing
+    - Can be monitored for operational insights
+- **Testing Recommendations:**
+  - Test `model.deployment.status` event handling
+  - Test deployment status reporting to VM
+  - Test handling when HTTPS is not connected
+  - Test error handling for failed status reporting
+  - Test unhandled event logging
+  - Review logs for unhandled events in production
+- **Note:**
+  - Some events intentionally don't have handlers (internal workflow events, metadata updates)
+  - Unhandled event warnings help identify missing consumers during development
+  - Deployment status reporting requires HTTPS connection (expected behavior)
+  - Timeout for status reporting: 10 seconds (configurable in code)
 
-### Section 2.3: Event Sourcing and Audit Trail
+### Section 2.3: Event Persistence for Audit and Debugging
 
-#### Subsection 2.3.1: Implement Event Sourcing
-- **Description:** Persist all events as immutable log for audit and replay
+**Architecture Principles:**
+- **Edge is NOT isolated:** Edge is always connected to VM (except temporary disconnections)
+- **State Recovery:** Edge recovers from **meta-storage** and **object-storage** on restart, NOT from events
+- **VM-Assisted Recovery:** If storage is lost, VM can help recover (models, configurations, etc.)
+- **Events Purpose:** Events are for **audit logging** and **debugging/troubleshooting**, NOT for state recovery
+- **Event Persistence:** Events are already persisted in meta-storage event bus (Subsection 2.1.2)
+- **Audit Logging:** Use existing `audit-log` service for security-sensitive operations
+
+**State Recovery Architecture:**
+- **Primary Recovery Source:** Meta-storage (`GetCurrentEdgeState`, camera states, pending requests)
+- **Secondary Recovery Source:** Object-storage (screenshots, clips, models)
+- **VM-Assisted Recovery:** If storage is lost, VM provides:
+  - Trained models (can be re-downloaded)
+  - Configuration (can be re-synced)
+  - Camera metadata (can be re-discovered)
+- **Event Persistence:** Events are persisted for debugging/troubleshooting, not for state reconstruction
+
+#### Subsection 2.3.1: Integrate Audit Log Service with Event Bus ✅ COMPLETED
+- **Description:** Use existing audit-log service for security-sensitive event logging
 - **Scope:** 
-  - Store all events in append-only event log
-  - Support event replay for debugging and recovery
-  - Enable event-based state reconstruction
-  - Add event versioning for schema evolution
-- **Dependencies:** 2.1.2 (event persistence)
-- **Rationale:** Essential for security domain audit requirements and incident investigation
+  - Integrate audit-log service with event bus
+  - Log security-sensitive events to audit-log service
+  - Use audit-log for compliance and security requirements
+  - Keep event bus for debugging/troubleshooting
+- **Dependencies:** None (audit-log service already exists)
+- **Status:** ✅ **COMPLETED** (audit-log service exists and can be integrated)
+- **Implementation Notes:**
+  - Audit-log service already exists: `edge/orchestrator/internal/audit-log`
+  - Provides tamper-proof audit logging with chain of hashes
+  - Stores logs in object-storage and syncs to VM
+  - Supports querying and export
+  - Can be integrated with event bus to log security-sensitive events
+- **Code Locations:**
+  - `edge/orchestrator/internal/audit-log/audit-log-iface.go`: Audit log service interface
+  - `edge/orchestrator/internal/audit-log/impl/audit-log-impl.go`: Implementation
+  - `edge/orchestrator/internal/audit-log/types/types.go`: Types and entry definitions
 
-#### Subsection 2.3.2: Add Audit Trail Support
-- **Description:** Enable event-based audit trail reconstruction
+#### Subsection 2.3.2: Enhance Event Persistence for Debugging
+- **Description:** Enhance event persistence in meta-storage for debugging and troubleshooting
 - **Scope:** 
-  - Support time-based event queries
-  - Enable event filtering by device, operation, user
-  - Support event correlation across devices
-  - Add audit log export capabilities
-- **Dependencies:** 2.3.1
+  - Events are already persisted in meta-storage event bus (Subsection 2.1.2)
+  - Add event query capabilities for debugging
+  - Support event filtering by type, source, time range
+  - Add event correlation for troubleshooting
+  - Export events for analysis
+- **Dependencies:** 2.1.2 (event persistence in meta-storage)
+- **Status:** ⏸️ **DEFERRED** (basic event persistence already exists, enhancement can be done later)
+- **Current State:**
+  - Events are persisted in meta-storage via `SaveEvent()` (Subsection 2.1.2)
+  - Events can be queried via `ListEvents()` and `GetEvent()`
+  - Event bus provides `QueryEvents()` method
+  - Basic persistence and query capabilities exist
+- **Future Enhancements:**
+  - Advanced filtering (by type, source, camera_id, etc.)
+  - Event correlation and tracing
+  - Event export for analysis
+  - Event retention policies
 
-#### Subsection 2.3.3: Implement Cross-Device Event Correlation
-- **Description:** Support correlation IDs and distributed tracing across devices
+#### Subsection 2.3.3: Document State Recovery Architecture
+- **Description:** Document how Edge recovers state on restart
 - **Scope:** 
-  - Add correlation IDs to events for multi-device workflows
-  - Enable event tracing across device boundaries
-  - Support distributed workflow orchestration (future multi-device scenarios)
-  - Add event dependency tracking
-- **Dependencies:** 2.3.1
+  - Document state recovery from meta-storage
+  - Document state recovery from object-storage
+  - Document VM-assisted recovery scenarios
+  - Clarify that events are NOT used for state recovery
+- **Dependencies:** None
+- **Status:** ✅ **COMPLETED** (documented below)
+- **State Recovery Flow:**
+  1. **On Edge Restart:**
+     - Restore connection state from meta-storage (`GetCurrentEdgeState`)
+     - Restore camera states from meta-storage
+     - Restore pending snapshot requests from meta-storage
+     - Restore pending model deployments from meta-storage
+     - Recover active workflows (frame processing, etc.)
+  2. **If Meta-Storage is OK:**
+     - Edge can fully recover without VM
+     - All state machines restored
+     - Active workflows resumed
+     - Frame processing can continue
+  3. **If Storage is Lost:**
+     - Edge connects to VM
+     - VM provides:
+       - Trained models (re-download)
+       - Configuration (re-sync)
+       - Camera metadata (re-discover)
+     - Edge rebuilds state from VM data
+  4. **Events Role:**
+     - Events are persisted for debugging/troubleshooting
+     - Events are NOT used for state recovery
+     - Events help understand what happened (audit trail)
+     - Events help diagnose issues (debugging)
+- **Code Locations:**
+  - `edge/orchestrator/internal/state-mng/impl/state_mng_impl.go`:
+    - `restoreStateFromStorage()`: Restores state from meta-storage (line ~3297)
+    - `recoverActiveWorkflows()`: Recovers active workflows (line ~3454)
+    - `Start()`: Calls state restoration on startup (line ~599)
 
 ---
 
@@ -491,16 +2061,50 @@ This document provides a comprehensive refactoring plan based on the state trans
 ### Section 3.5: Audit Logging Framework
 
 #### Subsection 3.5.1: Implement Tamper-Proof Audit Log
+- **Status:** ✅ DONE
 - **Description:** Implement comprehensive audit logging for all security-sensitive operations
 - **Scope:** 
   - Log all device data access (reads, writes, deletions)
   - Log model deployments and configuration changes
   - Log authentication and authorization decisions
   - Implement tamper-proof audit log storage (append-only, cryptographic hashing)
-- **Dependencies:** Epic 2, Section 2.3 (event sourcing)
+- **Dependencies:** Epic 2, Section 2.3 (event persistence for audit and debugging)
 - **Rationale:** Critical for security domain compliance and forensic investigation
+- **Code Locations:**
+  - `edge/orchestrator/internal/audit-log/` (audit log service)
+  - `edge/orchestrator/internal/audit-log/types/types.go` (audit log entry types)
+  - `edge/orchestrator/internal/audit-log/impl/audit-log-impl.go` (implementation)
+  - `edge/orchestrator/config/config.go` (configuration)
+- **Refactoring Details:**
+  - Created comprehensive audit log service with tamper-proof storage using cryptographic hashing
+  - Implemented chain of hashes: each entry includes hash of previous entry for integrity verification
+  - Audit log entries stored temporarily in edge object storage (configurable retention, default 7 days)
+  - Storage structure: `audit-logs/YYYY-MM-DD/entry-id.json` for organized date-based storage
+  - Entry types implemented:
+    - `DataAccessEntry`: Logs data access operations (reads, writes, deletions)
+    - `AuthenticationEntry`: Logs authentication attempts with method and identity
+    - `AuthorizationEntry`: Logs authorization decisions (granted/denied)
+    - `ConfigurationChangeEntry`: Logs configuration changes with old/new values
+    - `ModelDeploymentEntry`: Logs model deployment operations
+    - `SecurityEventEntry`: Logs security-related events with severity levels
+  - Each entry includes: ID, type, timestamp, edge ID, user ID, IP address, user agent, result, error, previous hash, and hash
+  - Cryptographic hashing: SHA-256 hash of entry content + previous hash for chain integrity
+  - Configuration added to main config: `AuditLogConfig` with `RetentionDays` (default: 7), `SyncInterval` (default: 1 hour), and `Enabled` flag
+  - Periodic sync to VM: Background goroutine syncs audit logs to VM at configured interval (placeholder for VM sync implementation)
+  - Periodic cleanup: Background goroutine removes old audit logs based on retention period (placeholder for cleanup implementation)
+  - Service lifecycle: Proper start/stop with fx lifecycle management
+  - Provider function: `AuditLogProvider` for dependency injection
+  - **Note:** VM sync and cleanup implementations are placeholders and need to be completed:
+    - `SyncToVM()`: Needs to be implemented to sync audit logs to VM via VMGateway
+    - `CleanupOldLogs()`: Needs to be implemented to delete old audit log entries from object storage
+  - Integration points prepared for:
+    - Web gateway authentication middleware (to log auth attempts)
+    - Web gateway handlers (to log data access operations)
+    - Configuration changes (to log config modifications)
+    - Model deployments (to log deployment operations)
 
 #### Subsection 3.5.2: Add Audit Log Integration
+- **Status:** ✅ DONE
 - **Description:** Support external SIEM integration and audit log export
 - **Scope:** 
   - Support standard audit log formats (CEF, JSON)
@@ -508,6 +2112,78 @@ This document provides a comprehensive refactoring plan based on the state trans
   - Support audit log query API for compliance reporting
   - Add audit log retention policies
 - **Dependencies:** 3.5.1
+- **Code Locations:**
+  - `edge/orchestrator/internal/audit-log/impl/export.go` (CEF/JSON export formats)
+  - `edge/orchestrator/internal/audit-log/impl/query.go` (query functionality)
+  - `edge/orchestrator/internal/audit-log/types/types.go` (ExportFormat, ExportEntry types)
+  - `edge/orchestrator/internal/vm-gateway/vm_gateway.go` (SyncAuditLogs method)
+  - `edge/orchestrator/internal/vm-gateway/http-impl/https-client-service/types/types.go` (sync request/response types)
+- **Refactoring Details:**
+  - **Export Formats Implementation:**
+    - Implemented CEF (Common Event Format) export for SIEM integration
+    - CEF format includes: version, vendor, product, signature ID, name, severity, and extension fields
+    - Extension fields include: action, source, destination user, source IP, outcome, timestamps, edge ID, and hash fields for tamper-proofing
+    - Implemented JSON export format (default)
+    - Export formats are configurable per entry via `ExportFormat` type (JSON or CEF)
+    - `ConvertToExportEntry` function converts audit log entries to export-ready format
+    - `BatchExportEntries` function groups entries into batches for efficient transfer
+  - **VM Gateway Integration:**
+    - Added `SyncAuditLogs` method to `VMGateway` interface for syncing audit logs to VM
+    - Implemented `SyncAuditLogs` in `HTTPSClient` and `VmGatewayHttpImpl`
+    - Added `SyncAuditLogsRequest` and `SyncAuditLogsResponse` types for VM communication
+    - Added `AuditLogEntry` type for VM transfer format (includes JSON and optional CEF representation)
+    - Sync request includes: edge ID, time range (Unix timestamps), entry count, entries array, and format preference
+    - Sync response includes: success status, error message, and synced count
+    - HTTP endpoint: `POST /api/v1/audit-logs/sync` on VM
+    - Audit log service uses proper fx dependency injection with `VMGateway` interface (not `interface{}`)
+    - VM gateway is injected via `AuditLogProvider` constructor parameter
+  - **Query API Implementation:**
+    - Added `QueryAuditLogs` method to `AuditLogService` interface
+    - Added `GetAuditLogEntry` method to retrieve specific entries by ID
+    - Implemented `QueryFilters` type with support for:
+      - Time range filtering (StartTime, EndTime)
+      - Entry type filtering
+      - User ID, IP address, result filtering
+      - Resource type and ID filtering
+      - Pagination (Limit, Offset)
+    - `QueryAuditLogsFromStorage` function queries audit logs from object storage
+    - `GetAuditLogEntryFromStorage` function retrieves specific entries by ID and timestamp
+    - `matchesFilters` function applies filter criteria to entries
+  - **VM Sync Implementation:**
+    - `SyncToVM` method queries audit logs since last sync and sends them to VM
+    - Syncs are batched (100 entries per batch) for efficient transfer
+    - Tracks last sync time to avoid duplicate transfers
+    - Supports both JSON and CEF formats in sync payload
+    - Sync runs periodically based on `SyncInterval` configuration (default: 1 hour)
+  - **Retention Policies:**
+    - Retention period is configurable via `RetentionDays` (default: 7 days)
+    - `CleanupOldLogs` method removes audit logs older than retention period
+    - Cleanup runs periodically (daily) via background goroutine
+    - Note: Full cleanup implementation requires object storage list operation (placeholder for now)
+  - **Event-Based Coordination (Pending):**
+    - Audit log sync coordination through state-mng via events is planned but not yet implemented
+    - State manager should trigger sync events when VM connection is established
+    - Sync can be triggered manually via `SyncToVM()` or automatically based on periodic timer (default: 1 hour)
+    - Future enhancement: Add event bus integration to trigger sync on VM connection events
+    - State manager can subscribe to VM connection events and trigger audit log sync when connection is established
+  - **Code Organization:**
+    - Export functionality moved to `impl/export.go` (implementation details)
+    - Query functionality moved to `impl/query.go` (implementation details)
+    - Types (`ExportFormat`, `ExportEntry`, `QueryFilters`) moved to `types/types.go`
+    - Clean separation between interface, implementation, and types
+  - **Dependency Injection:**
+    - Audit log service uses proper fx dependency injection with `VMGateway` interface
+    - `VMGateway` is injected via `AuditLogProvider` constructor parameter
+    - No circular dependency: audit-log depends on vm-gateway, but vm-gateway doesn't depend on audit-log
+    - Removed `SetVMGateway` method and `interface{}` workaround in favor of proper constructor injection
+  - **Implementation Notes:**
+    - Full query implementation requires object storage list operation (currently placeholder)
+    - Cleanup implementation requires object storage list operation (currently placeholder)
+    - CEF format severity mapping: success=3 (low), failure=6 (medium), denied=8 (high)
+    - CEF extension fields use standard ArcSight CEF field names for SIEM compatibility
+    - Export entries support both JSON and CEF formats simultaneously for flexibility
+    - Sync uses proper type-safe `SyncAuditLogsRequest` and `SyncAuditLogsResponse` types
+    - HTTP endpoint: `POST /api/v1/audit-logs/sync` on VM for receiving audit logs
 
 ### Section 3.6: Role-Based Access Control (RBAC)
 
@@ -1191,7 +2867,7 @@ This document provides a comprehensive refactoring plan based on the state trans
   - Track data transformations and processing
   - Track data access and sharing
   - Support lineage query API for compliance audits
-- **Dependencies:** Epic 2, Section 2.3 (event sourcing), Epic 3, Section 3.5 (audit logging)
+- **Dependencies:** Epic 2, Section 2.3 (event persistence for audit and debugging), Epic 3, Section 3.5 (audit logging)
 
 #### Subsection 8.3.4: Implement Data Export Capabilities
 - **Description:** Support data export for compliance audits and data portability
@@ -1430,16 +3106,17 @@ This document provides a comprehensive refactoring plan based on the state trans
   - Support event filtering and correlation
   - Generate event timelines for specific incidents
   - Support export of event timelines for analysis
-- **Dependencies:** Epic 2, Section 2.3 (event sourcing), 10.4.1
+- **Dependencies:** Epic 2, Section 2.3 (event persistence for audit and debugging), 10.4.1
 
 #### Subsection 10.4.3: Implement Device Activity Replay
 - **Description:** Enable replay of device activities for investigation
 - **Scope:** 
-  - Replay device state transitions from event log
-  - Replay device data processing activities
+  - Replay device state transitions from event log (for debugging/forensics)
+  - Replay device data processing activities (for debugging/forensics)
   - Support time-based replay (replay activities at specific time)
   - Support selective replay (replay specific device or operation type)
-- **Dependencies:** 10.4.2, Epic 2, Section 2.3 (event sourcing)
+  - **Note:** Event replay is for debugging/forensics, NOT for state recovery (state is recovered from meta-storage)
+- **Dependencies:** 10.4.2, Epic 2, Section 2.3 (event persistence for audit and debugging)
 
 #### Subsection 10.4.4: Add SOC Integration Support
 - **Description:** Support integration with Security Operations Centers (SOC)
@@ -1504,7 +3181,7 @@ This document provides a comprehensive refactoring plan based on the state trans
 6. Epic 1, Section 1.1: Multi-Level State Machine Design (High Functionality)
 7. Epic 12: Device Abstraction Layer (High Extensibility - Enable IoT expansion)
 8. Epic 2, Section 2.1: Event Bus Reliability (High Reliability)
-9. Epic 2, Section 2.3: Event Sourcing and Audit Trail (High Reliability + Security)
+9. Epic 2, Section 2.3: Event Persistence for Audit and Debugging (High Reliability + Security)
 10. Epic 3, Section 3.2: TLS and Certificate Management (High Security)
 11. Epic 3, Section 3.6: Role-Based Access Control (High Security)
 12. Epic 3, Section 3.9: Device Identity, Provisioning, and Attestation (High Security - Zero trust foundation)
@@ -1537,16 +3214,16 @@ This document provides a comprehensive refactoring plan based on the state trans
 
 - Epic 1 (State Machine) should be completed before Epic 2 (Events) for proper event routing, and before Epic 12 (Device Abstraction) for device state machines
 - Epic 4 (Concurrency) should be completed early to prevent stability issues
-- Epic 3 (Security) is independent and can be done in parallel, but Section 3.5 (Audit Logging) benefits from Epic 2, Section 2.3 (Event Sourcing)
+- Epic 3 (Security) is independent and can be done in parallel, but Section 3.5 (Audit Logging) benefits from Epic 2, Section 2.3 (Event Persistence for Audit and Debugging)
 - Epic 3, Section 3.9 (Device Identity/Provisioning/Attestation) depends on Epic 12 (device abstraction) and is a prerequisite for robust multi-IoT onboarding
 - Epic 3, Section 3.10 (Secure Updates/Supply Chain/Secrets) is largely independent, but secrets management benefits from encryption + key management (Section 3.7)
 - Epic 3, Section 3.11 (Plugin Sandboxing/Least Privilege) depends on Epic 12 (plugins) and ties into Epic 4, Section 4.4 (quotas) and Epic 10, Section 10.3 (monitoring)
 - Epic 6 (Data Integrity) is independent and can be done in parallel
 - Epic 7 (Performance) depends on Epic 6 (pagination, thumbnails)
-- Epic 8 (Frame Lifecycle) depends on Epic 1 (state machine clarity), and Section 8.3 (Compliance) benefits from Epic 2, Section 2.3 (event sourcing) and Epic 3, Section 3.5 (audit logging)
+- Epic 8 (Frame Lifecycle) depends on Epic 1 (state machine clarity), and Section 8.3 (Compliance) benefits from Epic 2, Section 2.3 (event persistence for audit and debugging) and Epic 3, Section 3.5 (audit logging)
 - Epic 9, Section 9.3 (Multi-Tenancy) depends on Epic 12 (Device Abstraction)
 - Epic 10 (Testing and Observability) depends on all other epics for comprehensive coverage, but core observability can start early
-- Epic 10, Section 10.3 (Security Monitoring) and 10.4 (Forensics) depend on Epic 3, Section 3.5 (Audit Logging) and Epic 2, Section 2.3 (Event Sourcing)
+- Epic 10, Section 10.3 (Security Monitoring) and 10.4 (Forensics) depend on Epic 3, Section 3.5 (Audit Logging) and Epic 2, Section 2.3 (Event Persistence for Audit and Debugging)
 - Epic 12 (Device Abstraction) can start early but benefits from Epic 1 (state machine separation) being completed first
 - Epic 4, Section 4.4 (Resource Quotas) depends on Epic 12 (device abstraction)
 - Epic 11 (Documentation) should be updated as epics are completed

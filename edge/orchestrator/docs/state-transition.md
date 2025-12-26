@@ -11,17 +11,21 @@ The Edge Orchestrator manages the lifecycle of the Edge Appliance, coordinating 
 The Edge Orchestrator can be in one of the following states:
 
 1. **`disconnected`** - Initial state when Edge starts. No network connection to VM.
-2. **`wireguard_connected`** - WireGuard tunnel is established to VM.
-3. **`https_connected`** - HTTPS connection is established over WireGuard tunnel.
-4. **`authenticated`** - Edge has successfully authenticated with VM (transport + identity).
-5. **`capabilities_received`** - Edge has received its capabilities from VM (e.g. `cctv_camera`).
-6. **`camera_discovered`** - Edge has performed camera discovery (CCTV service) after having camera capability.
-7. **`camera_synced`** - Edge has synced discovered cameras with VM, and VM has decided which cameras this Edge should serve.
-8. **`waiting_for_camera_screenshots`** - Edge is waiting for user to capture and label screenshots for model training.
-9. **`screenshot_set_ready`** - User has captured and labeled screenshots, ready to sync to VM for training.
-10. **`model_deployed`** - Trained model has been deployed to Edge and is ready for use.
-11. **`frame_processing`** - Edge is actively processing frames from cameras using the deployed model (final operational state).
-12. **`error`** - Error state when something goes wrong.
+2. **`wg_connecting`** - WireGuard connection is being established. Intermediate state during tunnel setup.
+3. **`wireguard_connected`** - WireGuard tunnel is established to VM.
+4. **`http_connecting`** - HTTPS connection is being established. Intermediate state during HTTPS setup.
+5. **`https_connected`** - HTTPS connection is established over WireGuard tunnel.
+6. **`authenticated`** - Edge has successfully authenticated with VM (transport + identity).
+7. **`capabilities_received`** - Edge has received its capabilities from VM (e.g. `cctv_camera`).
+8. **`camera_discovered`** - Edge has performed camera discovery (CCTV service) after having camera capability.
+9. **`camera_synced`** - Edge has synced discovered cameras with VM, and VM has decided which cameras this Edge should serve.
+10. **`waiting_for_camera_screenshots`** - Edge is waiting for user to capture and label screenshots for model training.
+11. **`screenshot_set_ready`** - User has captured and labeled screenshots, ready to sync to VM for training.
+12. **`model_deployed`** - Trained model has been deployed to Edge and is ready for use.
+13. **`frame_processing`** - Edge is actively processing frames from cameras using the deployed model (final operational state).
+14. **`error`** - Error state when something goes wrong.
+15. **`wg_connection_error`** - WireGuard connection error state.
+16. **`http_connection_error`** - HTTPS connection error state.
 
 ## State Transition Flow
 
@@ -37,15 +41,36 @@ When the Edge Orchestrator starts, it begins in the `disconnected` state. In thi
 - Edge initializes WireGuard client service
 - Edge attempts to establish WireGuard tunnel to VM endpoint
 
-### Transition: `disconnected` → `wireguard_connected`
+### Transition: `disconnected` → `wg_connecting`
+
+**Trigger:** Edge begins establishing WireGuard connection.
+
+**What happens:**
+1. State Manager initiates WireGuard connection via `initiateWireGuardConnection()`
+2. State transitions to `wg_connecting` before attempting connection
+3. WireGuard client service begins connection process
+4. Edge polls for WireGuard connection status (every 2 seconds)
+5. Connection attempt has a 60-second timeout
+
+**State properties:**
+- `Status`: `wg_connecting`
+- `NetworkConnected`: `false`
+- `VMAuthenticated`: `false`
+
+**Error Handling:**
+- If connection timeout (60 seconds): Transitions to `wg_connection_error`
+- If connection fails: Transitions to `wg_connection_error` or `disconnected`
+- If context cancelled: Returns without state change
+
+### Transition: `wg_connecting` → `wireguard_connected`
 
 **Trigger:** WireGuard tunnel is successfully established.
 
 **Event:** `network.wireguard.connected`
 
 **What happens:**
-1. WireGuard client service starts and configures the WireGuard interface
-2. WireGuard tunnel is established to the VM endpoint (configured via `KVMEndpoint` in config)
+1. WireGuard client service successfully establishes tunnel to VM endpoint
+2. WireGuard interface is configured and active
 3. Edge can now communicate with VM over the encrypted WireGuard tunnel
 4. State transitions to `wireguard_connected`
 5. `NetworkConnected` flag is set to `true`
@@ -55,7 +80,26 @@ When the Edge Orchestrator starts, it begins in the `disconnected` state. In thi
 - `NetworkConnected`: `true`
 - `VMAuthenticated`: `false`
 
-### Transition: `wireguard_connected` → `https_connected`
+### Transition: `wireguard_connected` → `http_connecting`
+
+**Trigger:** Edge begins establishing HTTPS connection.
+
+**What happens:**
+1. State Manager initiates HTTPS connection via `initiateHTTPConnection()`
+2. State transitions to `http_connecting` before attempting connection
+3. HTTPS client service begins authentication process
+4. Edge attempts to authenticate with VM using HTTPS client
+
+**State properties:**
+- `Status`: `http_connecting`
+- `NetworkConnected`: `true`
+- `VMAuthenticated`: `false`
+
+**Error Handling:**
+- If authentication fails: Transitions to `http_connection_error`
+- If connection fails: Transitions to `http_connection_error` or `wireguard_connected`
+
+### Transition: `http_connecting` → `https_connected`
 
 **Trigger:** HTTPS services are started and ready over WireGuard tunnel.
 
@@ -260,11 +304,21 @@ When the Edge Orchestrator starts, it begins in the `disconnected` state. In thi
 ┌──────────────┐
 │ disconnected │ (Initial State)
 └──────┬───────┘
+       │ WireGuard connection initiated
+       ▼
+┌──────────────────┐
+│  wg_connecting   │ (Intermediate State)
+└──────┬───────────┘
        │ WireGuard tunnel established
        ▼
 ┌──────────────────────┐
 │ wireguard_connected   │
 └──────┬────────────────┘
+       │ HTTPS connection initiated
+       ▼
+┌──────────────────┐
+│  http_connecting │ (Intermediate State)
+└──────┬───────────┘
        │ HTTPS services started
        ▼
 ┌──────────────────┐
@@ -311,10 +365,22 @@ When the Edge Orchestrator starts, it begins in the `disconnected` state. In thi
 │ frame_processing │ (Final Operational State)
 └──────────────────┘
 
+Error States:
+┌──────────────────────┐
+│ wg_connection_error   │ (WireGuard connection failed)
+└──────────────────────┘
+┌──────────────────────┐
+│ http_connection_error│ (HTTPS connection failed)
+└──────────────────────┘
+┌──────────────────────┐
+│ error                │ (General error state)
+└──────────────────────┘
+
 Reverse transitions (on errors):
 - HTTPS disconnected → wireguard_connected (stops frame processing)
 - WireGuard disconnected → disconnected (stops frame processing)
 - Any error state → stops frame processing
+- Error states can recover to disconnected or their corresponding connected state
 ```
 
 ## Implementation Details
@@ -324,10 +390,17 @@ Reverse transitions (on errors):
 The VM Gateway (`VMGateway`) coordinates three services in the following order:
 
 1. **WireGuard Client Service** - Establishes tunnel first
+   - State transitions: `disconnected` → `wg_connecting` → `wireguard_connected`
+   - Connection polling: Checks connection status every 2 seconds
+   - Timeout: 60 seconds maximum wait time
 2. **HTTPS Server Service** - Starts after WireGuard (for VM → Edge communication)
 3. **HTTPS Client Service** - Starts after WireGuard (for Edge → VM communication)
+   - State transitions: `wireguard_connected` → `http_connecting` → `https_connected`
+   - Automatically attempts authentication 2 seconds after startup
 
-The HTTPS Client Service automatically attempts authentication 2 seconds after startup.
+**Intermediate States:**
+- **`wg_connecting`**: Active state while WireGuard tunnel is being established. Edge polls for connection status and will timeout after 60 seconds if connection fails.
+- **`http_connecting`**: Active state while HTTPS connection and authentication are being established. Edge attempts authentication and transitions to `https_connected` on success or `http_connection_error` on failure.
 
 ### State Manager
 
@@ -340,11 +413,13 @@ The State Manager (`StateManager`) listens to events from the event bus and upda
 ### Events
 
 Key events that trigger state transitions:
-- `network.wireguard.connected` - WireGuard tunnel established
-- `network.wireguard.disconnected` - WireGuard tunnel lost
-- `network.https.connected` - HTTPS connection established
-- `network.https.disconnected` - HTTPS connection lost
-- `edge.authenticated` - Edge authenticated with VM
+- `network.wireguard.connected` - WireGuard tunnel established (transitions from `wg_connecting` to `wireguard_connected`)
+- `network.wireguard.disconnected` - WireGuard tunnel lost (transitions to `disconnected`)
+- `network.https.connected` - HTTPS connection established (transitions from `http_connecting` to `https_connected`)
+- `network.https.disconnected` - HTTPS connection lost (transitions to `wireguard_connected`)
+- `edge.authenticated` - Edge authenticated with VM (transitions from `https_connected` to `authenticated`)
+
+**Note:** The intermediate states `wg_connecting` and `http_connecting` are entered programmatically when connection initiation begins, not via events. Events are published when connections are successfully established.
 
 ## Error Handling
 
@@ -390,12 +465,16 @@ The Edge Orchestrator follows an **event-driven architecture** with the followin
 
 **Business Logic:**
 1. Edge starts in `disconnected` state
-2. WireGuard client service initializes and establishes encrypted tunnel to VM
-3. HTTPS server and client services start over WireGuard tunnel
-4. HTTPS client automatically attempts authentication (2-second delay)
-5. Authentication uses mTLS with client certificates
-6. VM validates Edge credentials and responds
-7. Edge transitions through: `disconnected` → `wireguard_connected` → `https_connected` → `authenticated`
+2. State Manager initiates WireGuard connection, transitioning to `wg_connecting`
+3. WireGuard client service initializes and establishes encrypted tunnel to VM
+4. On successful connection, state transitions to `wireguard_connected`
+5. State Manager initiates HTTPS connection, transitioning to `http_connecting`
+6. HTTPS server and client services start over WireGuard tunnel
+7. On successful HTTPS setup, state transitions to `https_connected`
+8. HTTPS client automatically attempts authentication (2-second delay)
+9. Authentication uses mTLS with client certificates
+10. VM validates Edge credentials and responds
+11. Edge transitions through: `disconnected` → `wg_connecting` → `wireguard_connected` → `http_connecting` → `https_connected` → `authenticated`
 
 **Data Flow:**
 - **Outbound**: Edge → VM: `POST /api/v1/auth/authenticate` with `{"edge_id": "<edge_id>"}`
@@ -810,9 +889,9 @@ State Manager → CCTV Service → Camera → Frame → Object Storage → AI Ga
 
 PHASE 1: INITIALIZATION
 ────────────────────────
-Edge Start → WireGuard Tunnel → HTTPS Services → Authentication
-  ↓              ↓                    ↓                ↓
-disconnected → wireguard_connected → https_connected → authenticated
+Edge Start → WireGuard Init → WireGuard Tunnel → HTTPS Init → HTTPS Services → Authentication
+  ↓              ↓                  ↓                  ↓              ↓                ↓
+disconnected → wg_connecting → wireguard_connected → http_connecting → https_connected → authenticated
 
 PHASE 2: CAPABILITY & CAMERA SETUP
 ───────────────────────────────────

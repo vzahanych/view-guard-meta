@@ -53,6 +53,12 @@ type WebGatewayImpl struct {
 	objectStorage objectstorage.ObjectStorageService // Optional object-storage for model files and screenshots
 	cctvService   cctv.CCTVService                   // CCTV service for capturing camera screenshots
 	vmGateway     vmgateway.VMGateway                 // VM gateway for WireGuard and HTTP client status
+	auditLog      interface{                         // Audit log service (optional, to avoid circular dependency)
+		LogDataAccess(ctx context.Context, entry interface{}) error
+		LogAuthentication(ctx context.Context, entry interface{}) error
+		LogAuthorization(ctx context.Context, entry interface{}) error
+		LogConfigurationChange(ctx context.Context, entry interface{}) error
+	}
 	version       string                             // Application version
 	startTime     time.Time                          // Server start time for uptime calculation
 }

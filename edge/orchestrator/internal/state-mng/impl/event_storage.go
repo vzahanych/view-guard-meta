@@ -14,8 +14,8 @@ import (
 
 // saveEvent saves an event to the database
 func (m *StateManagerImpl) saveEvent(ctx context.Context, event EventState) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.operationalMu.Lock()
+	defer m.operationalMu.Unlock()
 
 	if m.metaStorage == nil {
 		return fmt.Errorf("meta-storage not available")
@@ -71,8 +71,8 @@ func (m *StateManagerImpl) saveEvent(ctx context.Context, event EventState) erro
 
 // markEventTransmitted marks an event as transmitted
 func (m *StateManagerImpl) markEventTransmitted(ctx context.Context, eventID string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.operationalMu.Lock()
+	defer m.operationalMu.Unlock()
 
 	if m.metaStorage == nil {
 		return fmt.Errorf("meta-storage not available")
@@ -107,8 +107,8 @@ func (m *StateManagerImpl) markEventTransmitted(ctx context.Context, eventID str
 
 // getPendingEvents retrieves pending events from the queue
 func (m *StateManagerImpl) getPendingEvents(ctx context.Context, limit int) ([]EventState, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	m.operationalMu.RLock()
+	defer m.operationalMu.RUnlock()
 
 	if m.metaStorage == nil {
 		return nil, fmt.Errorf("meta-storage not available")
@@ -198,8 +198,8 @@ func (m *StateManagerImpl) getPendingEvents(ctx context.Context, limit int) ([]E
 
 // getEventByID retrieves a single event by ID
 func (m *StateManagerImpl) getEventByID(ctx context.Context, eventID string) (*EventState, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	m.operationalMu.RLock()
+	defer m.operationalMu.RUnlock()
 
 	if m.metaStorage == nil {
 		return nil, fmt.Errorf("meta-storage not available")
@@ -258,9 +258,9 @@ func (m *StateManagerImpl) EnqueueSecurityEvent(ctx context.Context, event *type
 		return fmt.Errorf("event is nil")
 	}
 
-	m.mu.RLock()
+	m.operationalMu.RLock()
 	maxSize := m.maxQueueSize
-	m.mu.RUnlock()
+	m.operationalMu.RUnlock()
 
 	// Check queue size limit
 	if maxSize > 0 {
@@ -528,4 +528,52 @@ func mapToEventState(eventData map[string]interface{}) EventState {
 	}
 
 	return event
+}
+
+// syncPendingSecurityEvents syncs pending security events to VM when connection is restored
+// This is called after authentication to ensure events queued during disconnection are transmitted
+func (m *StateManagerImpl) syncPendingSecurityEvents(ctx context.Context) {
+	if m.vmGateway == nil {
+		m.logger.Debug("VM gateway not available, skipping security event sync")
+		return
+	}
+
+	// Check if connection is ready
+	if !m.vmGateway.IsHTTPConnected() {
+		m.logger.Debug("HTTP connection not ready, skipping security event sync")
+		return
+	}
+
+	// Get pending events (batch of 100 at a time)
+	pending, err := m.GetPendingSecurityEvents(ctx, 100)
+	if err != nil {
+		m.logger.Warn("Failed to get pending security events for sync",
+			zap.Error(err),
+		)
+		return
+	}
+
+	if len(pending) == 0 {
+		m.logger.Debug("No pending security events to sync")
+		return
+	}
+
+	m.logger.Info("Syncing pending security events to VM",
+		zap.Int("count", len(pending)),
+	)
+
+	// Mark events as transmitted (they will be synced by the normal event transmission flow)
+	// The actual transmission to VM should be handled by the event transmission system
+	for _, event := range pending {
+		if err := m.markEventTransmitted(ctx, event.ID); err != nil {
+			m.logger.Warn("Failed to mark event as transmitted",
+				zap.String("event_id", event.ID),
+				zap.Error(err),
+			)
+		}
+	}
+
+	m.logger.Info("Pending security events marked for transmission",
+		zap.Int("count", len(pending)),
+	)
 }

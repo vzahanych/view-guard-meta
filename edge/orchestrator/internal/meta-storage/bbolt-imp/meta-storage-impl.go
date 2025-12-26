@@ -23,6 +23,8 @@ const (
 	clipsBucket                   = "clips"
 	securityEventsBucket          = "security_events"
 	eventQueueBucket              = "event_queue"
+	eventsBucket                  = "events"
+	deadLetterEventsBucket        = "dead_letter_events"
 	pendingSnapshotRequestsBucket = "pending_snapshot_requests"
 	edgeStateBucket               = "edge_state"
 	edgeStateHistoryBucket        = "edge_state_history"
@@ -67,6 +69,8 @@ func NewBboltMetaDataStore(ctx context.Context, cfg *types.MetaStorageConfig, lo
 			clipsBucket,
 			securityEventsBucket,
 			eventQueueBucket,
+			eventsBucket,
+			deadLetterEventsBucket,
 			pendingSnapshotRequestsBucket,
 			edgeStateBucket,
 			edgeStateHistoryBucket,
@@ -1071,4 +1075,318 @@ func (s *BboltMetaStorage) Close() error {
 		return nil
 	}
 	return s.db.Close()
+}
+
+// Event bus metadata methods
+
+// SaveEvent saves event metadata
+func (s *BboltMetaStorage) SaveEvent(ctx context.Context, eventID string, eventData map[string]interface{}) error {
+	data, err := json.Marshal(eventData)
+	if err != nil {
+		return fmt.Errorf("failed to marshal event: %w", err)
+	}
+
+	return s.db.Update(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(eventsBucket))
+		if b == nil {
+			return fmt.Errorf("bucket %s not found", eventsBucket)
+		}
+		return b.Put([]byte(eventID), data)
+	})
+}
+
+// GetEvent retrieves event metadata
+func (s *BboltMetaStorage) GetEvent(ctx context.Context, eventID string) (map[string]interface{}, bool) {
+	var data []byte
+	err := s.db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(eventsBucket))
+		if b == nil {
+			return fmt.Errorf("bucket %s not found", eventsBucket)
+		}
+		data = b.Get([]byte(eventID))
+		return nil
+	})
+	if err != nil || data == nil {
+		return nil, false
+	}
+
+	var eventData map[string]interface{}
+	if err := json.Unmarshal(data, &eventData); err != nil {
+		s.logger.Warn("Failed to unmarshal event", zap.String("event_id", eventID), zap.Error(err))
+		return nil, false
+	}
+
+	return eventData, true
+}
+
+// ListEvents lists events with filters
+func (s *BboltMetaStorage) ListEvents(ctx context.Context, filters map[string]interface{}) ([]map[string]interface{}, error) {
+	var events []map[string]interface{}
+
+	err := s.db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(eventsBucket))
+		if b == nil {
+			return fmt.Errorf("bucket %s not found", eventsBucket)
+		}
+
+		return b.ForEach(func(k, v []byte) error {
+			var eventData map[string]interface{}
+			if err := json.Unmarshal(v, &eventData); err != nil {
+				s.logger.Warn("Failed to unmarshal event", zap.String("event_id", string(k)), zap.Error(err))
+				return nil // Skip invalid entries
+			}
+
+			// Apply filters if provided
+			if filters != nil {
+				// Filter by type
+				if eventType, ok := filters["type"].(string); ok && eventType != "" {
+					if eventEventType, ok := eventData["type"].(string); !ok || eventEventType != eventType {
+						return nil // Skip if event type doesn't match
+					}
+				}
+
+				// Filter by source
+				if source, ok := filters["source"].(string); ok && source != "" {
+					if eventSource, ok := eventData["source"].(string); !ok || eventSource != source {
+						return nil // Skip if source doesn't match
+					}
+				}
+
+				// Filter by time range
+				if startTimeStr, ok := filters["start_time"].(string); ok && startTimeStr != "" {
+					startTime, err := time.Parse(time.RFC3339Nano, startTimeStr)
+					if err == nil {
+						if timestampStr, ok := eventData["timestamp"].(string); ok {
+							if eventTime, err := time.Parse(time.RFC3339Nano, timestampStr); err == nil {
+								if eventTime.Before(startTime) {
+									return nil // Skip if before start time
+								}
+							}
+						}
+					}
+				}
+
+				if endTimeStr, ok := filters["end_time"].(string); ok && endTimeStr != "" {
+					endTime, err := time.Parse(time.RFC3339Nano, endTimeStr)
+					if err == nil {
+						if timestampStr, ok := eventData["timestamp"].(string); ok {
+							if eventTime, err := time.Parse(time.RFC3339Nano, timestampStr); err == nil {
+								if eventTime.After(endTime) {
+									return nil // Skip if after end time
+								}
+							}
+						}
+					}
+				}
+			}
+
+			events = append(events, eventData)
+			return nil
+		})
+	})
+
+	// Sort by timestamp (newest first)
+	sort.Slice(events, func(i, j int) bool {
+		timeI, okI := events[i]["timestamp"].(string)
+		timeJ, okJ := events[j]["timestamp"].(string)
+		if !okI || !okJ {
+			return false
+		}
+		tI, errI := time.Parse(time.RFC3339Nano, timeI)
+		tJ, errJ := time.Parse(time.RFC3339Nano, timeJ)
+		if errI != nil || errJ != nil {
+			return false
+		}
+		return tI.After(tJ)
+	})
+
+	// Apply limit if provided
+	if filters != nil {
+		if limit, ok := filters["limit"].(int); ok && limit > 0 && len(events) > limit {
+			events = events[:limit]
+		}
+	}
+
+	return events, err
+}
+
+// DeleteEvent deletes event metadata
+func (s *BboltMetaStorage) DeleteEvent(ctx context.Context, eventID string) error {
+	return s.db.Update(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(eventsBucket))
+		if b == nil {
+			return fmt.Errorf("bucket %s not found", eventsBucket)
+		}
+		return b.Delete([]byte(eventID))
+	})
+}
+
+// GetEventCount returns the total number of events stored
+func (s *BboltMetaStorage) GetEventCount(ctx context.Context) (int, error) {
+	var count int
+	err := s.db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(eventsBucket))
+		if b == nil {
+			return fmt.Errorf("bucket %s not found", eventsBucket)
+		}
+		count = b.Stats().KeyN
+		return nil
+	})
+	return count, err
+}
+
+// UpdateEventProcessingStatus updates the processing status and retry metadata for an event
+func (s *BboltMetaStorage) UpdateEventProcessingStatus(ctx context.Context, eventID string, status string, retryCount int, lastError string, nextRetryTime *time.Time) error {
+	// Get existing event data
+	eventData, exists := s.GetEvent(ctx, eventID)
+	if !exists {
+		return fmt.Errorf("event %s not found", eventID)
+	}
+
+	// Update processing metadata
+	eventData["processing_status"] = status
+	eventData["retry_count"] = retryCount
+	if lastError != "" {
+		eventData["last_error"] = lastError
+	}
+	if nextRetryTime != nil {
+		eventData["next_retry_time"] = nextRetryTime.Format(time.RFC3339Nano)
+	} else {
+		delete(eventData, "next_retry_time")
+	}
+	eventData["last_updated"] = time.Now().Format(time.RFC3339Nano)
+
+	// Save updated event
+	return s.SaveEvent(ctx, eventID, eventData)
+}
+
+// GetFailedEvents retrieves events that have failed and are ready for retry
+func (s *BboltMetaStorage) GetFailedEvents(ctx context.Context, beforeTime time.Time) ([]map[string]interface{}, error) {
+	var failedEvents []map[string]interface{}
+
+	err := s.db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(eventsBucket))
+		if b == nil {
+			return fmt.Errorf("bucket %s not found", eventsBucket)
+		}
+
+		return b.ForEach(func(k, v []byte) error {
+			var eventData map[string]interface{}
+			if err := json.Unmarshal(v, &eventData); err != nil {
+				s.logger.Warn("Failed to unmarshal event", zap.String("event_id", string(k)), zap.Error(err))
+				return nil // Skip invalid entries
+			}
+
+			// Check if event is in failed status
+			status, ok := eventData["processing_status"].(string)
+			if !ok || status != "failed" {
+				return nil // Skip non-failed events
+			}
+
+			// Check if next retry time is before the specified time
+			nextRetryStr, ok := eventData["next_retry_time"].(string)
+			if !ok {
+				return nil // Skip if no next_retry_time
+			}
+
+			nextRetryTime, err := time.Parse(time.RFC3339Nano, nextRetryStr)
+			if err != nil {
+				s.logger.Warn("Failed to parse next_retry_time", zap.String("event_id", string(k)), zap.Error(err))
+				return nil
+			}
+
+			if nextRetryTime.After(beforeTime) {
+				return nil // Not ready for retry yet
+			}
+
+			failedEvents = append(failedEvents, eventData)
+			return nil
+		})
+	})
+
+	return failedEvents, err
+}
+
+// GetDeadLetterEvents retrieves events from the dead letter queue
+func (s *BboltMetaStorage) GetDeadLetterEvents(ctx context.Context, limit int) ([]map[string]interface{}, error) {
+	var deadLetterEvents []map[string]interface{}
+
+	err := s.db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(deadLetterEventsBucket))
+		if b == nil {
+			return fmt.Errorf("bucket %s not found", deadLetterEventsBucket)
+		}
+
+		return b.ForEach(func(k, v []byte) error {
+			if limit > 0 && len(deadLetterEvents) >= limit {
+				return nil // Stop if limit reached
+			}
+
+			var eventData map[string]interface{}
+			if err := json.Unmarshal(v, &eventData); err != nil {
+				s.logger.Warn("Failed to unmarshal dead letter event", zap.String("event_id", string(k)), zap.Error(err))
+				return nil // Skip invalid entries
+			}
+
+			deadLetterEvents = append(deadLetterEvents, eventData)
+			return nil
+		})
+	})
+
+	// Sort by timestamp (newest first)
+	sort.Slice(deadLetterEvents, func(i, j int) bool {
+		timeI, okI := deadLetterEvents[i]["timestamp"].(string)
+		timeJ, okJ := deadLetterEvents[j]["timestamp"].(string)
+		if !okI || !okJ {
+			return false
+		}
+		tI, errI := time.Parse(time.RFC3339Nano, timeI)
+		tJ, errJ := time.Parse(time.RFC3339Nano, timeJ)
+		if errI != nil || errJ != nil {
+			return false
+		}
+		return tI.After(tJ)
+	})
+
+	return deadLetterEvents, err
+}
+
+// MoveEventToDeadLetter moves an event from the events bucket to the dead letter queue
+func (s *BboltMetaStorage) MoveEventToDeadLetter(ctx context.Context, eventID string) error {
+	// Get event data
+	eventData, exists := s.GetEvent(ctx, eventID)
+	if !exists {
+		return fmt.Errorf("event %s not found", eventID)
+	}
+
+	// Update status to dead_letter
+	eventData["processing_status"] = "dead_letter"
+	eventData["moved_to_dlq_at"] = time.Now().Format(time.RFC3339Nano)
+	eventData["last_updated"] = time.Now().Format(time.RFC3339Nano)
+
+	// Save to dead letter bucket
+	data, err := json.Marshal(eventData)
+	if err != nil {
+		return fmt.Errorf("failed to marshal event: %w", err)
+	}
+
+	err = s.db.Update(func(tx *bbolt.Tx) error {
+		// Save to dead letter bucket
+		dlqBucket := tx.Bucket([]byte(deadLetterEventsBucket))
+		if dlqBucket == nil {
+			return fmt.Errorf("bucket %s not found", deadLetterEventsBucket)
+		}
+		if err := dlqBucket.Put([]byte(eventID), data); err != nil {
+			return fmt.Errorf("failed to save to dead letter queue: %w", err)
+		}
+
+		// Remove from events bucket
+		eventsBucket := tx.Bucket([]byte(eventsBucket))
+		if eventsBucket == nil {
+			return fmt.Errorf("bucket %s not found", eventsBucket)
+		}
+		return eventsBucket.Delete([]byte(eventID))
+	})
+
+	return err
 }
