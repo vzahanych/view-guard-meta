@@ -163,7 +163,7 @@ func (s *USBDiscoveryService) discoverCameras() {
 			// Publish discovery event (CCTV service will handle storage via meta-storage interface)
 			if s.eventBus != nil {
 				s.eventBus.Publish(evtbusstypes.Event{
-					Type:      evtbusstypes.EventType("camera.discovered"),
+					Type:      evtbusstypes.EventTypeDeviceDiscovered,
 					Source:    s.Name(),
 					Timestamp: time.Now(),
 					Data: map[string]interface{}{

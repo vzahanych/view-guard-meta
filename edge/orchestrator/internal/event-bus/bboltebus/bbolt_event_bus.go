@@ -28,8 +28,8 @@ type BboltEventBus struct {
 	mu          sync.RWMutex
 	db          *bbolt.DB
 	logger      *zap.Logger
-	subscribers map[types.EventType][]chan types.Event
-	allSubs     []chan types.Event
+	subscribers map[types.EventType][]chan types.EventAny
+	allSubs     []chan types.EventAny
 	bufferSize  int
 	closed      bool
 }
@@ -56,8 +56,8 @@ func NewBboltEventBus(dbPath string, bufferSize int, logger *zap.Logger) (*Bbolt
 	bus := &BboltEventBus{
 		db:          db,
 		logger:      logger,
-		subscribers: make(map[types.EventType][]chan types.Event),
-		allSubs:     make([]chan types.Event, 0),
+		subscribers: make(map[types.EventType][]chan types.EventAny),
+		allSubs:     make([]chan types.EventAny, 0),
 		bufferSize:  bufferSize,
 	}
 
@@ -90,39 +90,39 @@ func (b *BboltEventBus) Name() string {
 }
 
 // Subscribe subscribes to events of a specific type.
-func (b *BboltEventBus) Subscribe(eventType types.EventType) <-chan types.Event {
+func (b *BboltEventBus) Subscribe(eventType types.EventType) <-chan types.EventAny {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	if b.closed {
-		ch := make(chan types.Event)
+		ch := make(chan types.EventAny)
 		close(ch)
 		return ch
 	}
 
-	ch := make(chan types.Event, b.bufferSize)
+	ch := make(chan types.EventAny, b.bufferSize)
 	b.subscribers[eventType] = append(b.subscribers[eventType], ch)
 	return ch
 }
 
 // SubscribeAll subscribes to all events, regardless of type.
-func (b *BboltEventBus) SubscribeAll() <-chan types.Event {
+func (b *BboltEventBus) SubscribeAll() <-chan types.EventAny {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	if b.closed {
-		ch := make(chan types.Event)
+		ch := make(chan types.EventAny)
 		close(ch)
 		return ch
 	}
 
-	ch := make(chan types.Event, b.bufferSize)
+	ch := make(chan types.EventAny, b.bufferSize)
 	b.allSubs = append(b.allSubs, ch)
 	return ch
 }
 
 // Publish publishes an event to all matching subscribers and persists it to bbolt.
-func (b *BboltEventBus) Publish(event types.Event) {
+func (b *BboltEventBus) Publish(event types.EventAny) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 
@@ -167,7 +167,7 @@ func (b *BboltEventBus) Publish(event types.Event) {
 
 // persistEvent persists an event to bbolt storage.
 // This is called asynchronously to avoid blocking event publishing.
-func (b *BboltEventBus) persistEvent(event types.Event) {
+func (b *BboltEventBus) persistEvent(event types.EventAny) {
 	// Generate a unique event ID based on timestamp and a counter
 	eventID := b.generateEventID(event.Timestamp)
 
@@ -265,7 +265,7 @@ func (b *BboltEventBus) buildTimeKeyPrefix(timestamp time.Time) []byte {
 }
 
 // Unsubscribe removes a subscription for the given event type and channel.
-func (b *BboltEventBus) Unsubscribe(eventType types.EventType, ch <-chan types.Event) {
+func (b *BboltEventBus) Unsubscribe(eventType types.EventType, ch <-chan types.EventAny) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -276,7 +276,7 @@ func (b *BboltEventBus) Unsubscribe(eventType types.EventType, ch <-chan types.E
 
 	// Remove from specific subscribers and close the channel
 	if subs, ok := b.subscribers[eventType]; ok {
-		filtered := make([]chan types.Event, 0, len(subs))
+		filtered := make([]chan types.EventAny, 0, len(subs))
 		for _, sub := range subs {
 			if sub != ch {
 				filtered = append(filtered, sub)
@@ -302,7 +302,7 @@ func (b *BboltEventBus) Unsubscribe(eventType types.EventType, ch <-chan types.E
 
 	// Remove from allSubs if present and close the channel
 	if len(b.allSubs) > 0 {
-		filteredAll := make([]chan types.Event, 0, len(b.allSubs))
+		filteredAll := make([]chan types.EventAny, 0, len(b.allSubs))
 		for _, sub := range b.allSubs {
 			if sub != ch {
 				filteredAll = append(filteredAll, sub)
@@ -335,7 +335,7 @@ func (b *BboltEventBus) Close() error {
 	b.closed = true
 
 	// Close all channels safely (in case Unsubscribe() already closed some)
-	closeChannel := func(ch chan types.Event) {
+	closeChannel := func(ch chan types.EventAny) {
 		defer func() {
 			// Recover from panic if channel is already closed
 			if r := recover(); r != nil {
@@ -355,8 +355,8 @@ func (b *BboltEventBus) Close() error {
 		closeChannel(sub)
 	}
 
-	b.subscribers = make(map[types.EventType][]chan types.Event)
-	b.allSubs = make([]chan types.Event, 0)
+	b.subscribers = make(map[types.EventType][]chan types.EventAny)
+	b.allSubs = make([]chan types.EventAny, 0)
 
 	// Close the database
 	if err := b.db.Close(); err != nil {
@@ -368,12 +368,12 @@ func (b *BboltEventBus) Close() error {
 
 // QueryEvents queries events from bbolt storage.
 // This is useful for debugging and troubleshooting.
-func (b *BboltEventBus) QueryEvents(ctx context.Context, filters *EventQueryFilters) ([]types.Event, error) {
+func (b *BboltEventBus) QueryEvents(ctx context.Context, filters *EventQueryFilters) ([]types.EventAny, error) {
 	if filters == nil {
 		filters = &EventQueryFilters{}
 	}
 
-	var events []types.Event
+	var events []types.EventAny
 	var eventIDs map[string]bool
 
 	// Collect event IDs based on filters
@@ -457,7 +457,7 @@ func (b *BboltEventBus) QueryEvents(ctx context.Context, filters *EventQueryFilt
 				continue
 			}
 
-			var event types.Event
+			var event types.EventAny
 			if err := json.Unmarshal(eventData, &event); err != nil {
 				b.logger.Warn("Failed to unmarshal event",
 					zap.String("event_id", eventID),

@@ -96,12 +96,12 @@ func (g *WebGatewayImpl) handleGetState(c *gin.Context) {
 	}
 	edgeState.WireGuardConnected = wireGuardConnected
 
-	// Check VM HTTP client connection status
-	vmHTTPConnected := false
+	// Check VM transport connection status
+	vmTransportConnected := false
 	if g.vmGateway != nil {
-		vmHTTPConnected = g.vmGateway.IsHTTPConnected()
+		vmTransportConnected = g.vmGateway.IsTransportConnected()
 	}
-	edgeState.VMHTTPConnected = vmHTTPConnected
+	edgeState.VMHTTPConnected = vmTransportConnected // Field name kept for API compatibility
 
 	c.JSON(http.StatusOK, edgeState)
 }

@@ -121,7 +121,7 @@ func (c *RTSPClient) run() {
 				// Publish disconnection event
 				if c.eventBus != nil {
 					c.eventBus.Publish(evtbusstypes.Event{
-						Type:      evtbusstypes.EventType("camera.disconnected"),
+						Type:      evtbusstypes.EventTypeDeviceDisconnected,
 						Source:    c.Name(),
 						Timestamp: time.Now(),
 						Data: map[string]interface{}{
@@ -275,7 +275,7 @@ func (c *RTSPClient) connect() error {
 	// Publish connection event
 	if c.eventBus != nil {
 		c.eventBus.Publish(evtbusstypes.Event{
-			Type:      evtbusstypes.EventType("camera.connected"),
+			Type:      evtbusstypes.EventTypeDeviceConnected,
 			Source:    c.Name(),
 			Timestamp: time.Now(),
 			Data: map[string]interface{}{
@@ -338,7 +338,7 @@ func (c *RTSPClient) monitorHealth() {
 				// Publish health event
 				if c.eventBus != nil {
 					c.eventBus.Publish(evtbusstypes.Event{
-						Type:      evtbusstypes.EventType("camera.disconnected"),
+						Type:      evtbusstypes.EventTypeDeviceDisconnected,
 						Source:    c.Name(),
 						Timestamp: time.Now(),
 						Data: map[string]interface{}{

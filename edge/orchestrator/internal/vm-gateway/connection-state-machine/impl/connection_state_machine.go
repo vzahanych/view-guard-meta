@@ -11,27 +11,27 @@ import (
 // ValidConnectionStateTransitions defines valid state transitions
 var ValidConnectionStateTransitions = map[types.ConnectionState][]types.ConnectionState{
 	types.ConnectionStateDisconnected: {
-		types.ConnectionStateWGConnecting,
+		types.ConnectionStateTunnelConnecting,
 		types.ConnectionStateError,
 	},
-	types.ConnectionStateWGConnecting: {
-		types.ConnectionStateWireGuardConnected,
-		types.ConnectionStateWGConnectionError,
+	types.ConnectionStateTunnelConnecting: {
+		types.ConnectionStateTunnelConnected,
+		types.ConnectionStateTunnelConnectionError,
 		types.ConnectionStateDisconnected,
 		types.ConnectionStateError,
 	},
-	types.ConnectionStateWireGuardConnected: {
-		types.ConnectionStateHTTPConnecting,
+	types.ConnectionStateTunnelConnected: {
+		types.ConnectionStateTransportConnecting,
 		types.ConnectionStateDisconnected,
 		types.ConnectionStateError,
 	},
-	types.ConnectionStateHTTPConnecting: {
-		types.ConnectionStateHTTPSConnected,
-		types.ConnectionStateHTTPConnectionError,
+	types.ConnectionStateTransportConnecting: {
+		types.ConnectionStateTransportConnected,
+		types.ConnectionStateTransportConnectionError,
 		types.ConnectionStateDisconnected,
 		types.ConnectionStateError,
 	},
-	types.ConnectionStateHTTPSConnected: {
+	types.ConnectionStateTransportConnected: {
 		types.ConnectionStateAuthenticated,
 		types.ConnectionStateDisconnected,
 		types.ConnectionStateError,
@@ -45,14 +45,14 @@ var ValidConnectionStateTransitions = map[types.ConnectionState][]types.Connecti
 		types.ConnectionStateDisconnected,
 		types.ConnectionStateError,
 	},
-	types.ConnectionStateWGConnectionError: {
+	types.ConnectionStateTunnelConnectionError: {
 		types.ConnectionStateDisconnected,
-		types.ConnectionStateWireGuardConnected, // Recovery
+		types.ConnectionStateTunnelConnected, // Recovery
 		types.ConnectionStateError,
 	},
-	types.ConnectionStateHTTPConnectionError: {
+	types.ConnectionStateTransportConnectionError: {
 		types.ConnectionStateDisconnected,
-		types.ConnectionStateHTTPSConnected, // Recovery
+		types.ConnectionStateTransportConnected, // Recovery
 		types.ConnectionStateError,
 	},
 	types.ConnectionStateError: {
@@ -148,7 +148,7 @@ func (c *ConnectionStateMachineImpl) CanTransition(newState types.ConnectionStat
 	return IsValidTransition(c.state, newState)
 }
 
-// IsConnected returns true if Edge is connected to VM (wireguard + https + authenticated)
+// IsConnected returns true if Edge is connected to VM (tunnel + transport + authenticated)
 func (c *ConnectionStateMachineImpl) IsConnected() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -166,8 +166,8 @@ func (c *ConnectionStateMachineImpl) IsAuthenticated() bool {
 
 // isVMReachable determines if VM is reachable based on connection state
 func (c *ConnectionStateMachineImpl) isVMReachable(state types.ConnectionState) bool {
-	return state == types.ConnectionStateWireGuardConnected ||
-		state == types.ConnectionStateHTTPSConnected ||
+	return state == types.ConnectionStateTunnelConnected ||
+		state == types.ConnectionStateTransportConnected ||
 		state == types.ConnectionStateAuthenticated ||
 		state == types.ConnectionStateCapabilitiesReceived
 }
@@ -176,15 +176,15 @@ func (c *ConnectionStateMachineImpl) isVMReachable(state types.ConnectionState) 
 func (c *ConnectionStateMachineImpl) getNetworkHealth(state types.ConnectionState) string {
 	switch state {
 	case types.ConnectionStateDisconnected,
-		types.ConnectionStateWGConnectionError,
-		types.ConnectionStateHTTPConnectionError,
+		types.ConnectionStateTunnelConnectionError,
+		types.ConnectionStateTransportConnectionError,
 		types.ConnectionStateError:
 		return "unhealthy"
-	case types.ConnectionStateWGConnecting,
-		types.ConnectionStateHTTPConnecting:
+	case types.ConnectionStateTunnelConnecting,
+		types.ConnectionStateTransportConnecting:
 		return "degraded"
-	case types.ConnectionStateWireGuardConnected,
-		types.ConnectionStateHTTPSConnected,
+	case types.ConnectionStateTunnelConnected,
+		types.ConnectionStateTransportConnected,
 		types.ConnectionStateAuthenticated,
 		types.ConnectionStateCapabilitiesReceived:
 		return "healthy"

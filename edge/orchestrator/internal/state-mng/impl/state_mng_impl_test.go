@@ -23,10 +23,10 @@ import (
 	metastoragetypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/meta-storage/types"
 	objectstoragemocks "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/object-storage/mocks"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/state-mng/types"
-	httpsclienttypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/vm-gateway/http-impl/https-client-service/types"
+	httpsclienttypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/vm-gateway/transport-service/http-impl/https-client-service/types"
 	vmgatewaymocks "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/vm-gateway/mocks"
 	vmgatewaytypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/vm-gateway/types"
-	wgclienttypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/vm-gateway/wg-client-service/types"
+	wireguardtypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/vm-gateway/tunnel-client-service/wireguard"
 	webgatewaymocks "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/web-gateway/mocks"
 	"go.uber.org/mock/gomock"
 	"go.uber.org/zap/zaptest"
@@ -542,8 +542,8 @@ func TestConnectionStateTransitions(t *testing.T) {
 		currentState = newState
 		return nil
 	}).AnyTimes()
-	mockVMGateway.EXPECT().IsHTTPConnected().DoAndReturn(func() bool {
-		return currentState == vmgatewaytypes.ConnectionStateHTTPSConnected || 
+		mockVMGateway.EXPECT().IsTransportConnected().DoAndReturn(func() bool {
+		return currentState == vmgatewaytypes.ConnectionStateTransportConnected || 
 		       currentState == vmgatewaytypes.ConnectionStateAuthenticated ||
 		       currentState == vmgatewaytypes.ConnectionStateCapabilitiesReceived
 	}).AnyTimes()
@@ -557,23 +557,23 @@ func TestConnectionStateTransitions(t *testing.T) {
 
 	// Test WireGuard connected event
 	eventChan <- eventbustypes.Event{
-		Type:      EventTypeWireGuardConnected,
+		Type:      EventTypeTunnelConnected,
 		Source:    "test",
 		Timestamp: time.Now(),
 		Data:      make(map[string]interface{}),
 	}
 	time.Sleep(200 * time.Millisecond)
-	assert.Equal(t, vmgatewaytypes.ConnectionStateWireGuardConnected, currentState)
+	assert.Equal(t, vmgatewaytypes.ConnectionStateTunnelConnected, currentState)
 
 	// Test HTTPS connected event (requires WireGuardConnected state)
 	eventChan <- eventbustypes.Event{
-		Type:      EventTypeHTTPSConnected,
+		Type:      EventTypeTransportConnected,
 		Source:    "test",
 		Timestamp: time.Now(),
 		Data:      make(map[string]interface{}),
 	}
 	time.Sleep(200 * time.Millisecond)
-	assert.Equal(t, vmgatewaytypes.ConnectionStateHTTPSConnected, currentState)
+	assert.Equal(t, vmgatewaytypes.ConnectionStateTransportConnected, currentState)
 
 	// Test Edge authenticated event (requires HTTPSConnected state)
 	eventChan <- eventbustypes.Event{
@@ -620,7 +620,7 @@ func TestCameraStateTransitions(t *testing.T) {
 
 	// Test camera discovered event
 	eventChan <- eventbustypes.Event{
-		Type:      EventTypeCameraDiscovered,
+		Type:      EventTypeDeviceDiscovered,
 		Source:    "test",
 		Timestamp: time.Now(),
 		Data: map[string]interface{}{
@@ -838,7 +838,7 @@ func TestHandleSnapshotRequested(t *testing.T) {
 
 	// Test snapshot requested event
 	eventChan <- eventbustypes.Event{
-		Type:      EventTypeSnapshotRequested,
+		Type:      EventTypeDataUnitRequested,
 		Source:    "test",
 		Timestamp: time.Now(),
 		Data: map[string]interface{}{
@@ -897,7 +897,7 @@ func TestHandleScreenshotSetReady(t *testing.T) {
 
 	// Test screenshot set ready event
 	eventChan <- eventbustypes.Event{
-		Type:      EventTypeScreenshotSetReady,
+		Type:      EventTypeDataUnitSetReady,
 		Source:    "test",
 		Timestamp: time.Now(),
 		Data: map[string]interface{}{
@@ -948,7 +948,7 @@ func TestHandleCameraDisconnected(t *testing.T) {
 
 	// Test camera disconnected event
 	eventChan <- eventbustypes.Event{
-		Type:      EventTypeCameraDisconnected,
+		Type:      EventTypeDeviceDisconnected,
 		Source:    "test",
 		Timestamp: time.Now(),
 		Data: map[string]interface{}{
@@ -1076,7 +1076,7 @@ func TestHandleModelDeployed_OutOfOrder(t *testing.T) {
 
 	// Trigger workflow by sending screenshot_set_ready event
 	eventChan <- eventbustypes.Event{
-		Type:      EventTypeScreenshotSetReady,
+		Type:      EventTypeDataUnitSetReady,
 		Source:    "test",
 		Timestamp: time.Now(),
 		Data: map[string]interface{}{
@@ -1135,8 +1135,8 @@ func TestDisconnectEvents(t *testing.T) {
 	mockVMGateway.EXPECT().IsConnected().DoAndReturn(func() bool {
 		return currentState != vmgatewaytypes.ConnectionStateDisconnected
 	}).AnyTimes()
-	mockVMGateway.EXPECT().IsHTTPConnected().DoAndReturn(func() bool {
-		return currentState == vmgatewaytypes.ConnectionStateHTTPSConnected ||
+		mockVMGateway.EXPECT().IsTransportConnected().DoAndReturn(func() bool {
+		return currentState == vmgatewaytypes.ConnectionStateTransportConnected ||
 			currentState == vmgatewaytypes.ConnectionStateAuthenticated ||
 			currentState == vmgatewaytypes.ConnectionStateCapabilitiesReceived
 	}).AnyTimes()
@@ -1150,25 +1150,25 @@ func TestDisconnectEvents(t *testing.T) {
 
 	// Set connection state to authenticated (via proper path)
 	currentState = vmgatewaytypes.ConnectionStateDisconnected
-	_ = mockVMGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateWGConnecting, "")
-	_ = mockVMGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateWireGuardConnected, "")
-	_ = mockVMGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateHTTPConnecting, "")
-	_ = mockVMGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateHTTPSConnected, "")
+	_ = mockVMGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateTunnelConnecting, "")
+	_ = mockVMGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateTunnelConnected, "")
+	_ = mockVMGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateTransportConnecting, "")
+	_ = mockVMGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateTransportConnected, "")
 	_ = mockVMGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateAuthenticated, "")
 
 	// Test HTTPS disconnect
 	eventChan <- eventbustypes.Event{
-		Type:      EventTypeHTTPSDisconnected,
+		Type:      EventTypeTransportDisconnected,
 		Source:    "test",
 		Timestamp: time.Now(),
 		Data:      make(map[string]interface{}),
 	}
 	time.Sleep(200 * time.Millisecond)
-	assert.Equal(t, vmgatewaytypes.ConnectionStateWireGuardConnected, mockVMGateway.GetConnectionState())
+	assert.Equal(t, vmgatewaytypes.ConnectionStateTunnelConnected, mockVMGateway.GetConnectionState())
 
 	// Test WireGuard disconnect
 	eventChan <- eventbustypes.Event{
-		Type:      EventTypeWireGuardDisconnected,
+		Type:      EventTypeTunnelDisconnected,
 		Source:    "test",
 		Timestamp: time.Now(),
 		Data:      make(map[string]interface{}),
@@ -1206,7 +1206,7 @@ func TestHandleScreenshotSaved(t *testing.T) {
 	}).AnyTimes()
 	mockVMGateway.EXPECT().TransitionConnectionState(gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
 	mockVMGateway.EXPECT().IsConnected().Return(true).AnyTimes()
-	mockVMGateway.EXPECT().IsHTTPConnected().Return(true).AnyTimes()
+		mockVMGateway.EXPECT().IsTransportConnected().Return(true).AnyTimes()
 	mockMetaStorage.EXPECT().ListSecurityEvents(gomock.Any(), gomock.Any()).Return([]map[string]interface{}{}, nil).AnyTimes()
 
 	sm, err := NewStateManagerImpl(mockEventBus, logger)
@@ -1221,7 +1221,7 @@ func TestHandleScreenshotSaved(t *testing.T) {
 	require.NoError(t, err)
 
 	eventChan <- eventbustypes.Event{
-		Type:      EventTypeScreenshotSaved,
+		Type:      EventTypeDataUnitSaved,
 		Source:    "test",
 		Timestamp: time.Now(),
 		Data: map[string]interface{}{
@@ -1257,7 +1257,7 @@ func TestHandleClipRecorded(t *testing.T) {
 	require.NoError(t, err)
 
 	eventChan <- eventbustypes.Event{
-		Type:      EventTypeClipRecorded,
+		Type:      EventTypeRawDeviceDataClipRecorded,
 		Source:    "test",
 		Timestamp: time.Now(),
 		Data: map[string]interface{}{
@@ -1293,7 +1293,7 @@ func TestHandleCameraRegistered(t *testing.T) {
 	require.NoError(t, err)
 
 	eventChan <- eventbustypes.Event{
-		Type:      EventTypeCameraRegistered,
+		Type:      EventTypeDeviceRegistered,
 		Source:    "test",
 		Timestamp: time.Now(),
 		Data: map[string]interface{}{
@@ -1328,7 +1328,7 @@ func TestHandleCameraConnected(t *testing.T) {
 	require.NoError(t, err)
 
 	eventChan <- eventbustypes.Event{
-		Type:      EventTypeCameraConnected,
+		Type:      EventTypeDeviceConnected,
 		Source:    "test",
 		Timestamp: time.Now(),
 		Data: map[string]interface{}{
@@ -1412,7 +1412,7 @@ func TestInitializeServicesAfterAuth(t *testing.T) {
 		LastUpdated: time.Now(),
 	}).AnyTimes()
 	mockVMGateway.EXPECT().TransitionConnectionState(gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
-	mockVMGateway.EXPECT().IsHTTPConnected().Return(true).AnyTimes()
+		mockVMGateway.EXPECT().IsTransportConnected().Return(true).AnyTimes()
 	sm.SetVMGateway(mockVMGateway)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1422,7 +1422,7 @@ func TestInitializeServicesAfterAuth(t *testing.T) {
 	require.NoError(t, err)
 
 	// Set connection state to authenticated first
-	_ = mockVMGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateHTTPSConnected, "")
+	_ = mockVMGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateTransportConnected, "")
 	_ = mockVMGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateAuthenticated, "")
 
 	// Trigger initializeServicesAfterAuth via EdgeAuthenticated event
@@ -1847,9 +1847,9 @@ func TestHandleConnectionErrorState(t *testing.T) {
 
 	// Set up mock VM gateway
 	mockVMGateway := vmgatewaymocks.NewMockVMGateway(ctrl)
-	mockVMGateway.EXPECT().GetConnectionState().Return(vmgatewaytypes.ConnectionStateWGConnectionError).AnyTimes()
+	mockVMGateway.EXPECT().GetConnectionState().Return(vmgatewaytypes.ConnectionStateTunnelConnectionError).AnyTimes()
 	mockVMGateway.EXPECT().GetConnectionStateInfo().Return(vmgatewaytypes.ConnectionStateInfo{
-		State:       vmgatewaytypes.ConnectionStateWGConnectionError,
+		State:       vmgatewaytypes.ConnectionStateTunnelConnectionError,
 		LastUpdated: time.Now(),
 	}).AnyTimes()
 	mockVMGateway.EXPECT().TransitionConnectionState(gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
@@ -1866,10 +1866,10 @@ func TestHandleConnectionErrorState(t *testing.T) {
 	require.NoError(t, err)
 
 	// Set connection state to error
-	_ = mockVMGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateWGConnectionError, "test error")
+	_ = mockVMGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateTunnelConnectionError, "test error")
 
 	// Handle error state
-	sm.handleConnectionErrorState(ctx, vmgatewaytypes.ConnectionStateWGConnectionError)
+	sm.handleConnectionErrorState(ctx, vmgatewaytypes.ConnectionStateTunnelConnectionError)
 
 	// Wait for recovery attempt
 	time.Sleep(200 * time.Millisecond)
@@ -2052,10 +2052,10 @@ func TestInitiateWireGuardConnection(t *testing.T) {
 	mockMetaStorage := metastoragemocks.NewMockMetaDataStore(ctrl)
 
 	// Test case: already connected
-	mockVMGateway.EXPECT().GetConnectionState().Return(vmgatewaytypes.ConnectionStateWireGuardConnected).AnyTimes()
+	mockVMGateway.EXPECT().GetConnectionState().Return(vmgatewaytypes.ConnectionStateTunnelConnected).AnyTimes()
 	mockVMGateway.EXPECT().IsConnected().Return(true).Times(1)
 	mockVMGateway.EXPECT().GetConnectionStateInfo().Return(vmgatewaytypes.ConnectionStateInfo{
-		State:       vmgatewaytypes.ConnectionStateWireGuardConnected,
+		State:       vmgatewaytypes.ConnectionStateTunnelConnected,
 		LastUpdated: time.Now(),
 	}).AnyTimes()
 	mockVMGateway.EXPECT().TransitionConnectionState(gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
@@ -2068,7 +2068,7 @@ func TestInitiateWireGuardConnection(t *testing.T) {
 
 	// Set state to wg_connecting (valid transition path)
 	_ = mockVMGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateDisconnected, "")
-	_ = mockVMGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateWGConnecting, "")
+	_ = mockVMGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateTunnelConnecting, "")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -2076,7 +2076,7 @@ func TestInitiateWireGuardConnection(t *testing.T) {
 	sm.initiateWireGuardConnection(ctx)
 
 	// Verify state transitioned to wireguard_connected
-	assert.Equal(t, vmgatewaytypes.ConnectionStateWireGuardConnected, mockVMGateway.GetConnectionState())
+	assert.Equal(t, vmgatewaytypes.ConnectionStateTunnelConnected, mockVMGateway.GetConnectionState())
 }
 
 // TestInitiateWireGuardConnection_NoVMGateway tests without VM gateway
@@ -2151,7 +2151,7 @@ func TestRecoverActiveWorkflows(t *testing.T) {
 	}).AnyTimes()
 	mockVMGateway.EXPECT().TransitionConnectionState(gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
 	mockVMGateway.EXPECT().IsConnected().Return(true).AnyTimes()
-	mockVMGateway.EXPECT().IsHTTPConnected().Return(true).AnyTimes()
+		mockVMGateway.EXPECT().IsTransportConnected().Return(true).AnyTimes()
 	mockVMGateway.EXPECT().SyncCapabilities(gomock.Any(), gomock.Any()).Return(&httpsclienttypes.SyncCapabilitiesResponse{
 		Success: true,
 	}, nil).AnyTimes()
@@ -2325,7 +2325,7 @@ func TestSyncCameraCapabilities(t *testing.T) {
 		RequiredSnapshotCount: 10,
 		SnapshotRequired:      true,
 	}, nil).AnyTimes()
-	mockVMGateway.EXPECT().IsHTTPConnected().Return(true).Times(1)
+		mockVMGateway.EXPECT().IsTransportConnected().Return(true).Times(1)
 	mockVMGateway.EXPECT().GetConnectionStateInfo().Return(vmgatewaytypes.ConnectionStateInfo{
 		State:       vmgatewaytypes.ConnectionStateAuthenticated,
 		LastUpdated: time.Now(),
@@ -2374,7 +2374,7 @@ func TestSyncCameraCapabilities_NotConnected(t *testing.T) {
 	mockEventBus.EXPECT().Name().Return("mock-event-bus").AnyTimes()
 
 	mockVMGateway := vmgatewaymocks.NewMockVMGateway(ctrl)
-	mockVMGateway.EXPECT().IsHTTPConnected().Return(false).Times(1)
+		mockVMGateway.EXPECT().IsTransportConnected().Return(false).Times(1)
 
 	sm, err := NewStateManagerImpl(mockEventBus, logger)
 	require.NoError(t, err)
@@ -2406,7 +2406,7 @@ func TestSyncOnce(t *testing.T) {
 		},
 	}
 
-	mockVMGateway.EXPECT().IsHTTPConnected().Return(true).Times(1)
+		mockVMGateway.EXPECT().IsTransportConnected().Return(true).Times(1)
 	mockCCTVService.EXPECT().ListCameras(gomock.Any(), false).Return(cameras, nil).Times(1)
 	mockCCTVService.EXPECT().GetDatasetStatus(gomock.Any(), "camera-1", gomock.Any()).Return(&cctvtypes.DatasetStatus{
 		LabeledSnapshotCount:  0,
@@ -2438,7 +2438,7 @@ func TestSyncOnce_NotConnected(t *testing.T) {
 	mockEventBus.EXPECT().Name().Return("mock-event-bus").AnyTimes()
 
 	mockVMGateway := vmgatewaymocks.NewMockVMGateway(ctrl)
-	mockVMGateway.EXPECT().IsHTTPConnected().Return(false).Times(1)
+		mockVMGateway.EXPECT().IsTransportConnected().Return(false).Times(1)
 
 	sm, err := NewStateManagerImpl(mockEventBus, logger)
 	require.NoError(t, err)
@@ -2466,7 +2466,7 @@ func TestSyncOnce_NoCameras(t *testing.T) {
 	mockCCTVService := mocks.NewMockCCTVService(ctrl)
 	mockVMGateway := vmgatewaymocks.NewMockVMGateway(ctrl)
 
-	mockVMGateway.EXPECT().IsHTTPConnected().Return(true).Times(1)
+		mockVMGateway.EXPECT().IsTransportConnected().Return(true).Times(1)
 	mockCCTVService.EXPECT().ListCameras(gomock.Any(), false).Return([]*cctvtypes.Camera{}, nil).Times(1)
 
 	sm, err := NewStateManagerImpl(mockEventBus, logger)
@@ -2491,10 +2491,10 @@ func TestInitiateHTTPConnection(t *testing.T) {
 	mockMetaStorage := metastoragemocks.NewMockMetaDataStore(ctrl)
 
 	// Test case: already connected
-	mockVMGateway.EXPECT().IsHTTPConnected().Return(true).Times(1)
+		mockVMGateway.EXPECT().IsTransportConnected().Return(true).Times(1)
 	mockVMGateway.EXPECT().Authenticate(gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
 	mockVMGateway.EXPECT().GetConnectionStateInfo().Return(vmgatewaytypes.ConnectionStateInfo{
-		State:       vmgatewaytypes.ConnectionStateHTTPSConnected,
+		State:       vmgatewaytypes.ConnectionStateTransportConnected,
 		LastUpdated: time.Now(),
 	}).AnyTimes()
 	mockVMGateway.EXPECT().TransitionConnectionState(gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
@@ -2506,7 +2506,7 @@ func TestInitiateHTTPConnection(t *testing.T) {
 	sm.SetMetaStorage(mockMetaStorage)
 
 	// Set state to wireguard_connected
-	_ = mockVMGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateWireGuardConnected, "")
+	_ = mockVMGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateTunnelConnected, "")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -2514,7 +2514,7 @@ func TestInitiateHTTPConnection(t *testing.T) {
 	sm.initiateHTTPConnection(ctx)
 
 	// Verify state transitioned to https_connected
-	assert.Equal(t, vmgatewaytypes.ConnectionStateHTTPSConnected, mockVMGateway.GetConnectionState())
+	assert.Equal(t, vmgatewaytypes.ConnectionStateTransportConnected, mockVMGateway.GetConnectionState())
 }
 
 // TestInitiateHTTPConnection_NoVMGateway tests without VM gateway
@@ -2624,7 +2624,7 @@ func TestCheckServicesHealth(t *testing.T) {
 		LastUpdated: time.Now(),
 	}).AnyTimes()
 	mockVMGateway.EXPECT().TransitionConnectionState(gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
-	mockVMGateway.EXPECT().IsHTTPConnected().Return(false).AnyTimes()
+		mockVMGateway.EXPECT().IsTransportConnected().Return(false).AnyTimes()
 	mockVMGateway.EXPECT().Authenticate(gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
 
 	sm, err := NewStateManagerImpl(mockEventBus, logger)
@@ -2690,14 +2690,14 @@ func TestInitiateConnection(t *testing.T) {
 
 	cfg := &config.Config{
 		VMGateway: vmgatewaytypes.VMGatewayConfig{
-			WireGuard: wgclienttypes.WGClientConfig{
+			WireGuard: vmgatewaytypes.WireGuardConfig{
 				Enabled: false, // Use HTTP mode
 			},
 		},
 	}
 
 	mockVMGateway.EXPECT().GetConnectionState().Return(vmgatewaytypes.ConnectionStateDisconnected).AnyTimes()
-	mockVMGateway.EXPECT().IsHTTPConnected().Return(true).Times(1)
+		mockVMGateway.EXPECT().IsTransportConnected().Return(true).Times(1)
 	mockVMGateway.EXPECT().Authenticate(gomock.Any(), gomock.Any()).Return(nil).Times(1)
 	mockVMGateway.EXPECT().GetConnectionStateInfo().Return(vmgatewaytypes.ConnectionStateInfo{
 		State:       vmgatewaytypes.ConnectionStateAuthenticated,
@@ -2742,7 +2742,7 @@ func TestInitiateConnection_WireGuardEnabled(t *testing.T) {
 
 	cfg := &config.Config{
 		VMGateway: vmgatewaytypes.VMGatewayConfig{
-			WireGuard: wgclienttypes.WGClientConfig{
+			WireGuard: vmgatewaytypes.WireGuardConfig{
 				Enabled: true, // Use WireGuard mode
 			},
 		},
@@ -2769,7 +2769,7 @@ func TestInitiateConnection_WireGuardEnabled(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// Verify state transitioned to wireguard_connected
-	assert.Equal(t, vmgatewaytypes.ConnectionStateWireGuardConnected, mockVMGateway.GetConnectionState())
+	assert.Equal(t, vmgatewaytypes.ConnectionStateTunnelConnected, mockVMGateway.GetConnectionState())
 }
 
 // TestInitiateConnection_NoVMGateway tests without VM gateway
@@ -2855,9 +2855,9 @@ func TestToCameraCapability(t *testing.T) {
 		LastSynced:            time.Now(),
 	}
 
-	capability := sm.toCameraCapability(camera, datasetStatus)
+	capability := sm.toDeviceCapability(camera, datasetStatus)
 	require.NotNil(t, capability)
-	assert.Equal(t, "test-camera-1", capability.CameraID)
+	assert.Equal(t, "test-camera-1", capability.DeviceID)
 	assert.Equal(t, "Test Camera", capability.Name)
 	assert.Equal(t, uint32(15), capability.LabeledSnapshotCount)
 	assert.Equal(t, uint32(20), capability.RequiredSnapshotCount)
@@ -3068,9 +3068,9 @@ func TestUpdateStateForEvent_AllEventTypes(t *testing.T) {
 	_, _, err = sm.updateStateForEvent(ev)
 	require.NoError(t, err)
 
-	// Test EventTypeFrameReceived
+	// Test EventTypeRawDeviceDataFrameReceived
 	ev = eventbustypes.Event{
-		Type:      EventTypeFrameReceived,
+		Type:      EventTypeRawDeviceDataFrameReceived,
 		Source:    "test",
 		Timestamp: time.Now(),
 		Data:      make(map[string]interface{}),
@@ -3100,9 +3100,9 @@ func TestExecuteWorkflow_AllWorkflows(t *testing.T) {
 
 	// Set up mock VM gateway
 	mockVMGateway := vmgatewaymocks.NewMockVMGateway(ctrl)
-	mockVMGateway.EXPECT().GetConnectionState().Return(vmgatewaytypes.ConnectionStateWireGuardConnected).AnyTimes()
+	mockVMGateway.EXPECT().GetConnectionState().Return(vmgatewaytypes.ConnectionStateTunnelConnected).AnyTimes()
 	mockVMGateway.EXPECT().GetConnectionStateInfo().Return(vmgatewaytypes.ConnectionStateInfo{
-		State:       vmgatewaytypes.ConnectionStateWireGuardConnected,
+		State:       vmgatewaytypes.ConnectionStateTunnelConnected,
 		LastUpdated: time.Now(),
 	}).AnyTimes()
 	mockVMGateway.EXPECT().TransitionConnectionState(gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
@@ -3119,19 +3119,19 @@ func TestExecuteWorkflow_AllWorkflows(t *testing.T) {
 	err = sm.Start(ctx)
 	require.NoError(t, err)
 
-	// Test EventTypeWireGuardConnected workflow
+	// Test EventTypeTunnelConnected workflow
 	eventChan <- eventbustypes.Event{
-		Type:      EventTypeWireGuardConnected,
+		Type:      EventTypeTunnelConnected,
 		Source:    "test",
 		Timestamp: time.Now(),
 		Data:      make(map[string]interface{}),
 	}
 	time.Sleep(100 * time.Millisecond)
 
-	// Test EventTypeHTTPSConnected workflow
-	_ = mockVMGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateWireGuardConnected, "")
+	// Test EventTypeTransportConnected workflow
+	_ = mockVMGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateTunnelConnected, "")
 	eventChan <- eventbustypes.Event{
-		Type:      EventTypeHTTPSConnected,
+		Type:      EventTypeTransportConnected,
 		Source:    "test",
 		Timestamp: time.Now(),
 		Data:      make(map[string]interface{}),
@@ -3162,7 +3162,7 @@ func TestSyncOnce_Error(t *testing.T) {
 	mockMetaStorage := metastoragemocks.NewMockMetaDataStore(ctrl)
 	mockMetaStorage.EXPECT().ListScreenshots(gomock.Any(), gomock.Any()).Return([]metastoragetypes.ScreenshotMetadata{}, nil).AnyTimes()
 
-	mockVMGateway.EXPECT().IsHTTPConnected().Return(true).Times(1)
+		mockVMGateway.EXPECT().IsTransportConnected().Return(true).Times(1)
 	mockCCTVService.EXPECT().ListCameras(gomock.Any(), false).Return(cameras, nil).Times(1)
 	mockCCTVService.EXPECT().GetDatasetStatus(gomock.Any(), "camera-1", gomock.Any()).Return(&cctvtypes.DatasetStatus{
 		LabeledSnapshotCount:  0,
@@ -3204,7 +3204,7 @@ func TestSyncOnce_AuthError(t *testing.T) {
 		{ID: "camera-1", Enabled: true},
 	}
 
-	mockVMGateway.EXPECT().IsHTTPConnected().Return(true).Times(1)
+		mockVMGateway.EXPECT().IsTransportConnected().Return(true).Times(1)
 	mockCCTVService.EXPECT().ListCameras(gomock.Any(), false).Return(cameras, nil).Times(1)
 	mockCCTVService.EXPECT().GetDatasetStatus(gomock.Any(), "camera-1", gomock.Any()).Return(&cctvtypes.DatasetStatus{
 		LabeledSnapshotCount:  0,
@@ -3247,7 +3247,7 @@ func TestSyncOnce_Rejected(t *testing.T) {
 		{ID: "camera-1", Enabled: true},
 	}
 
-	mockVMGateway.EXPECT().IsHTTPConnected().Return(true).Times(1)
+		mockVMGateway.EXPECT().IsTransportConnected().Return(true).Times(1)
 	mockCCTVService.EXPECT().ListCameras(gomock.Any(), false).Return(cameras, nil).Times(1)
 	mockCCTVService.EXPECT().GetDatasetStatus(gomock.Any(), "camera-1", gomock.Any()).Return(&cctvtypes.DatasetStatus{
 		LabeledSnapshotCount:  0,
@@ -3378,7 +3378,7 @@ func TestInitiateWireGuardConnection_Timeout(t *testing.T) {
 	// Test case: not connected, will timeout
 	mockVMGateway.EXPECT().IsConnected().Return(false).AnyTimes()
 	mockVMGateway.EXPECT().GetConnectionStateInfo().Return(vmgatewaytypes.ConnectionStateInfo{
-		State:       vmgatewaytypes.ConnectionStateWGConnecting,
+		State:       vmgatewaytypes.ConnectionStateTunnelConnecting,
 		LastUpdated: time.Now(),
 	}).AnyTimes()
 	mockVMGateway.EXPECT().TransitionConnectionState(gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
@@ -3391,7 +3391,7 @@ func TestInitiateWireGuardConnection_Timeout(t *testing.T) {
 
 	// Set state to wg_connecting
 	_ = mockVMGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateDisconnected, "")
-	_ = mockVMGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateWGConnecting, "")
+	_ = mockVMGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateTunnelConnecting, "")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
@@ -3406,7 +3406,7 @@ func TestInitiateWireGuardConnection_Timeout(t *testing.T) {
 	// Since we're using a short context timeout, the function may exit before the 60s timeout
 	// The state should remain wg_connecting if context is cancelled before timeout
 	state := mockVMGateway.GetConnectionState()
-	assert.True(t, state == vmgatewaytypes.ConnectionStateWGConnecting || state == vmgatewaytypes.ConnectionStateWGConnectionError,
+	assert.True(t, state == vmgatewaytypes.ConnectionStateTunnelConnecting || state == vmgatewaytypes.ConnectionStateTunnelConnectionError,
 		"State should be wg_connecting (context cancelled) or wg_connection_error (timeout)")
 }
 
@@ -3437,7 +3437,7 @@ func TestInitiateHTTPConnection_AuthError(t *testing.T) {
 	sm.SetEdgeID("test-edge-1")
 
 	// Set state to http_connecting
-	_ = mockVMGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateHTTPConnecting, "")
+	_ = mockVMGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateTransportConnecting, "")
 
 	ctx := context.Background()
 	sm.initiateHTTPConnection(ctx)
@@ -3460,7 +3460,7 @@ func TestRecoverActiveWorkflows_WGConnecting(t *testing.T) {
 
 	mockVMGateway.EXPECT().IsConnected().Return(true).AnyTimes()
 	mockVMGateway.EXPECT().GetConnectionStateInfo().Return(vmgatewaytypes.ConnectionStateInfo{
-		State:       vmgatewaytypes.ConnectionStateWGConnecting,
+		State:       vmgatewaytypes.ConnectionStateTunnelConnecting,
 		LastUpdated: time.Now(),
 	}).AnyTimes()
 	mockVMGateway.EXPECT().TransitionConnectionState(gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
@@ -3472,7 +3472,7 @@ func TestRecoverActiveWorkflows_WGConnecting(t *testing.T) {
 	sm.SetMetaStorage(mockMetaStorage)
 
 	// Set connection state to wg_connecting
-	_ = mockVMGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateWGConnecting, "")
+	_ = mockVMGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateTunnelConnecting, "")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -3755,9 +3755,9 @@ func TestInitiateConnection_NotDisconnected(t *testing.T) {
 	mockEventBus.EXPECT().Name().Return("mock-event-bus").AnyTimes()
 
 	mockVMGateway := vmgatewaymocks.NewMockVMGateway(ctrl)
-	mockVMGateway.EXPECT().GetConnectionState().Return(vmgatewaytypes.ConnectionStateWireGuardConnected).AnyTimes()
+	mockVMGateway.EXPECT().GetConnectionState().Return(vmgatewaytypes.ConnectionStateTunnelConnected).AnyTimes()
 	mockVMGateway.EXPECT().GetConnectionStateInfo().Return(vmgatewaytypes.ConnectionStateInfo{
-		State:       vmgatewaytypes.ConnectionStateWireGuardConnected,
+		State:       vmgatewaytypes.ConnectionStateTunnelConnected,
 		LastUpdated: time.Now(),
 	}).AnyTimes()
 	mockVMGateway.EXPECT().TransitionConnectionState(gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
@@ -3771,18 +3771,18 @@ func TestInitiateConnection_NotDisconnected(t *testing.T) {
 
 	// Set state to wireguard_connected (not disconnected)
 	// First transition to wg_connecting, then to wireguard_connected (valid transition path)
-	_ = mockVMGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateWGConnecting, "")
-	err = mockVMGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateWireGuardConnected, "")
+	_ = mockVMGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateTunnelConnecting, "")
+	err = mockVMGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateTunnelConnected, "")
 	require.NoError(t, err, "State transition should succeed")
 
 	// Verify state is set correctly before calling initiateConnection
-	assert.Equal(t, vmgatewaytypes.ConnectionStateWireGuardConnected, mockVMGateway.GetConnectionState(), "State should be wireguard_connected before calling initiateConnection")
+	assert.Equal(t, vmgatewaytypes.ConnectionStateTunnelConnected, mockVMGateway.GetConnectionState(), "State should be tunnel_connected before calling initiateConnection")
 
 	ctx := context.Background()
 	sm.initiateConnection(ctx)
 
 	// Verify state is still wireguard_connected (not changed)
-	assert.Equal(t, vmgatewaytypes.ConnectionStateWireGuardConnected, mockVMGateway.GetConnectionState(), "State should remain wireguard_connected after initiateConnection")
+	assert.Equal(t, vmgatewaytypes.ConnectionStateTunnelConnected, mockVMGateway.GetConnectionState(), "State should remain tunnel_connected after initiateConnection")
 }
 
 // TestInitiateConnection_NoConfig tests connection initiation without config
@@ -3795,7 +3795,7 @@ func TestInitiateConnection_NoConfig(t *testing.T) {
 	mockEventBus.EXPECT().Name().Return("mock-event-bus").AnyTimes()
 
 	mockVMGateway := vmgatewaymocks.NewMockVMGateway(ctrl)
-	mockVMGateway.EXPECT().IsHTTPConnected().Return(true).AnyTimes()
+		mockVMGateway.EXPECT().IsTransportConnected().Return(true).AnyTimes()
 	mockVMGateway.EXPECT().Authenticate(gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
 	mockVMGateway.EXPECT().GetConnectionStateInfo().Return(vmgatewaytypes.ConnectionStateInfo{
 		State:       vmgatewaytypes.ConnectionStateAuthenticated,
@@ -4126,7 +4126,7 @@ func TestHandleModelDeployed_MultipleQueuedDeployments(t *testing.T) {
 
 	// Trigger workflow by sending screenshot_set_ready event
 	eventChan <- eventbustypes.Event{
-		Type:      EventTypeScreenshotSetReady,
+		Type:      EventTypeDataUnitSetReady,
 		Source:    "test",
 		Timestamp: time.Now(),
 		Data: map[string]interface{}{
@@ -4210,7 +4210,7 @@ func TestHandleModelDeployed_QueuedThenReadyDeployment(t *testing.T) {
 
 	// Send screenshot_set_ready event to trigger state transition and pending deployment processing
 	eventChan <- eventbustypes.Event{
-		Type:      EventTypeScreenshotSetReady,
+		Type:      EventTypeDataUnitSetReady,
 		Source:    "test",
 		Timestamp: time.Now(),
 		Data: map[string]interface{}{
@@ -4364,7 +4364,7 @@ func TestHandleModelDeployed_QueuedThenErrorState(t *testing.T) {
 
 	// Trigger workflow
 	eventChan <- eventbustypes.Event{
-		Type:      EventTypeScreenshotSetReady,
+		Type:      EventTypeDataUnitSetReady,
 		Source:    "test",
 		Timestamp: time.Now(),
 		Data: map[string]interface{}{

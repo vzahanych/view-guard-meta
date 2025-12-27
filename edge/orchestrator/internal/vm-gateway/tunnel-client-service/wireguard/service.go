@@ -1,4 +1,4 @@
-package impl
+package wireguard
 
 import (
 	"context"
@@ -12,13 +12,12 @@ import (
 
 	eventbus "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/event-bus"
 	evtbusstypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/event-bus/types"
-	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/vm-gateway/wg-client-service/types"
 	"go.uber.org/zap"
 )
 
-// wgClientService implements the WGClientService interface
-type wgClientService struct {
-	config        *types.WGClientConfig
+// service implements the TunnelClientService interface for WireGuard
+type service struct {
+	config        *Config
 	logger        *zap.Logger
 	eventBus      eventbus.EventBus // Optional: for publishing events
 	interfaceName string
@@ -29,12 +28,13 @@ type wgClientService struct {
 	ctx           context.Context
 	cancel        context.CancelFunc
 	healthTicker  *time.Ticker
+	stopping      bool // Flag to prevent new reconnect attempts after Stop()
 }
 
-// NewWGClientService creates a new WireGuard client service
-func NewWGClientService(cfg *types.WGClientConfig, log *zap.Logger) *wgClientService {
-	ctx, cancel := context.WithCancel(context.Background())
-
+// NewService creates a new WireGuard tunnel client service.
+// Context is not created here - it will be created in Start() from the caller's context.
+// This ensures contexts flow from callers and are tied to the service lifecycle.
+func NewService(cfg *Config, log *zap.Logger) *service {
 	// Determine interface name
 	interfaceName := cfg.InterfaceName
 	if interfaceName == "" {
@@ -47,158 +47,179 @@ func NewWGClientService(cfg *types.WGClientConfig, log *zap.Logger) *wgClientSer
 		configPath = "/etc/wireguard/wg0.conf" // Default
 	}
 
-	return &wgClientService{
+	return &service{
 		config:        cfg,
 		logger:        log,
 		interfaceName: interfaceName,
 		configPath:    configPath,
 		connected:     false,
-		ctx:           ctx,
-		cancel:        cancel,
+		ctx:           nil, // Will be set in Start() from caller's context
+		cancel:        nil, // Will be set in Start() from caller's context
 	}
 }
 
 // SetEventBus sets the event bus for publishing events
-func (w *wgClientService) SetEventBus(bus eventbus.EventBus) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.eventBus = bus
+func (s *service) SetEventBus(bus eventbus.EventBus) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.eventBus = bus
 }
 
 // Name returns the service name
-func (w *wgClientService) Name() string {
+func (s *service) Name() string {
 	return "wireguard-client"
 }
 
 // Start starts the WireGuard client service
-func (w *wgClientService) Start(ctx context.Context) error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
+func (s *service) Start(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	if !w.config.Enabled {
-		w.logger.Info("WireGuard is disabled, skipping start")
+	if !s.config.Enabled {
+		s.logger.Info("WireGuard is disabled, skipping start")
 		return nil
 	}
 
-	w.ctx, w.cancel = context.WithCancel(ctx)
+	s.ctx, s.cancel = context.WithCancel(ctx)
 
 	// Check if WireGuard is installed
-	if !w.isWireGuardInstalled() {
+	if !s.isWireGuardInstalled() {
 		err := fmt.Errorf("wireguard tools not found (wg command not available)")
-		w.logger.Error("WireGuard tools not available", zap.Error(err))
+		s.logger.Error("WireGuard tools not available", zap.Error(err))
 		return err
 	}
 
 	// Ensure config file exists
-	if err := w.ensureConfigFile(); err != nil {
-		w.logger.Error("Failed to ensure config file", zap.Error(err))
+	if err := s.ensureConfigFile(); err != nil {
+		s.logger.Error("Failed to ensure config file", zap.Error(err))
 		return err
 	}
 
 	// Start tunnel
-	if err := w.startTunnel(); err != nil {
-		w.logger.Error("Failed to start tunnel", zap.Error(err))
+	if err := s.startTunnel(); err != nil {
+		s.logger.Error("Failed to start tunnel", zap.Error(err))
 		return err
 	}
 
-	w.connected = true
+	s.connected = true
 
 	// Start health monitoring
-	w.startHealthMonitoring(ctx)
+	s.startHealthMonitoring(ctx)
 
-	w.logger.Info("WireGuard client started", zap.String("interface", w.interfaceName), zap.String("endpoint", w.config.KVMEndpoint))
-	if w.eventBus != nil {
-		w.eventBus.Publish(evtbusstypes.Event{
-			Type:      evtbusstypes.EventType("network.wireguard.connected"),
-			Source:    w.Name(),
+	s.logger.Info("WireGuard client started", zap.String("interface", s.interfaceName), zap.String("endpoint", s.config.KVMEndpoint))
+	if s.eventBus != nil {
+		event := evtbusstypes.Event[evtbusstypes.NetworkEventData]{
+			Type:      evtbusstypes.EventTypeNetworkTunnelConnected,
+			Source:    s.Name(),
 			Timestamp: time.Now(),
-			Data: map[string]interface{}{
-				"interface": w.interfaceName,
-				"endpoint":  w.config.KVMEndpoint,
+			Data: evtbusstypes.NetworkEventData{
+				Interface: s.interfaceName,
+				Endpoint:  s.config.KVMEndpoint,
 			},
-		})
+		}
+		if err := eventbus.PublishTyped(s.eventBus, event); err != nil {
+			s.logger.Warn("Failed to publish wireguard connected event", zap.Error(err))
+		}
 	}
 
 	return nil
 }
 
 // Stop stops the WireGuard client service
-func (w *wgClientService) Stop(ctx context.Context) error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
+func (s *service) Stop(ctx context.Context) error {
+	s.mu.Lock()
+	// Set stopping flag first to prevent new reconnect attempts
+	s.stopping = true
+	s.mu.Unlock()
 
-	if !w.connected {
+	if !s.connected {
+		s.mu.Lock()
+		// Cancel context if it was created (in Start())
+		if s.cancel != nil {
+			s.cancel()
+		}
+		s.mu.Unlock()
 		return nil
 	}
 
 	// Stop health monitoring
-	if w.healthTicker != nil {
-		w.healthTicker.Stop()
+	s.mu.Lock()
+	if s.healthTicker != nil {
+		s.healthTicker.Stop()
 	}
+	s.mu.Unlock()
 
 	// Stop tunnel
-	if err := w.stopTunnel(); err != nil {
-		w.logger.Error("Failed to stop tunnel", zap.Error(err))
+	if err := s.stopTunnel(); err != nil {
+		s.logger.Error("Failed to stop tunnel", zap.Error(err))
 		// Continue with shutdown even if stop fails
 	}
 
-	w.cancel()
-	w.connected = false
+	s.mu.Lock()
+	// Cancel context if it was created (in Start())
+	if s.cancel != nil {
+		s.cancel()
+	}
+	s.connected = false
+	s.mu.Unlock()
 
-	w.logger.Info("WireGuard client stopped")
-	if w.eventBus != nil {
-		w.eventBus.Publish(evtbusstypes.Event{
-			Type:      evtbusstypes.EventType("network.wireguard.disconnected"),
-			Source:    w.Name(),
+	s.logger.Info("WireGuard client stopped")
+	if s.eventBus != nil {
+		event := evtbusstypes.Event[evtbusstypes.NetworkEventData]{
+			Type:      evtbusstypes.EventTypeNetworkTunnelDisconnected,
+			Source:    s.Name(),
 			Timestamp: time.Now(),
-			Data: map[string]interface{}{
-				"interface": w.interfaceName,
+			Data: evtbusstypes.NetworkEventData{
+				Interface: s.interfaceName,
 			},
-		})
+		}
+		if err := eventbus.PublishTyped(s.eventBus, event); err != nil {
+			s.logger.Warn("Failed to publish wireguard disconnected event", zap.Error(err))
+		}
 	}
 
 	return nil
 }
 
 // IsConnected returns whether the tunnel is connected
-func (w *wgClientService) IsConnected() bool {
-	w.mu.RLock()
-	defer w.mu.RUnlock()
-	return w.connected && w.isTunnelUp()
+func (s *service) IsConnected() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.connected && s.isTunnelUp()
 }
 
 // GetInterfaceName returns the WireGuard interface name
-func (w *wgClientService) GetInterfaceName() string {
-	return w.interfaceName
+func (s *service) GetInterfaceName() string {
+	return s.interfaceName
 }
 
 // GetEndpoint returns the KVM VM endpoint
-func (w *wgClientService) GetEndpoint() string {
-	return w.config.KVMEndpoint
+func (s *service) GetEndpoint() string {
+	return s.config.KVMEndpoint
 }
 
 // GetLatency returns the last measured latency
-func (w *wgClientService) GetLatency() time.Duration {
-	w.mu.RLock()
-	defer w.mu.RUnlock()
-	return w.lastLatency
+func (s *service) GetLatency() time.Duration {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.lastLatency
 }
 
 // GetStats returns tunnel statistics
-func (w *wgClientService) GetStats() (*TunnelStats, error) {
-	w.mu.RLock()
-	defer w.mu.RUnlock()
+func (s *service) GetStats() (*TunnelStats, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
 	stats := &TunnelStats{
-		InterfaceName: w.interfaceName,
-		Connected:     w.connected && w.isTunnelUp(),
-		Latency:       w.lastLatency,
-		Endpoint:      w.config.KVMEndpoint,
+		InterfaceName: s.interfaceName,
+		Connected:     s.connected && s.isTunnelUp(),
+		Latency:       s.lastLatency,
+		Endpoint:      s.config.KVMEndpoint,
 	}
 
 	// Get WireGuard statistics if tunnel is up
 	if stats.Connected {
-		cmd := exec.Command("wg", "show", w.interfaceName, "dump")
+		cmd := exec.Command("wg", "show", s.interfaceName, "dump")
 		output, err := cmd.Output()
 		if err == nil {
 			stats.RawStats = string(output)
@@ -290,19 +311,19 @@ func parseWireGuardConfig(configData string) (privateKey string, peerPublicKey s
 }
 
 // startTunnel starts the WireGuard tunnel
-func (w *wgClientService) startTunnel() error {
+func (s *service) startTunnel() error {
 	// Create WireGuard interface if it does not exist
-	linkAdd := exec.CommandContext(w.ctx, "ip", "link", "add", "dev", w.interfaceName, "type", "wireguard")
+	linkAdd := exec.CommandContext(s.ctx, "ip", "link", "add", "dev", s.interfaceName, "type", "wireguard")
 	linkAdd.Env = os.Environ()
 	if output, err := linkAdd.CombinedOutput(); err != nil {
 		// If the interface already exists, ignore the error
 		if !strings.Contains(string(output), "File exists") {
-			return fmt.Errorf("failed to add wireguard interface %s: %w, output: %s", w.interfaceName, err, string(output))
+			return fmt.Errorf("failed to add wireguard interface %s: %w, output: %s", s.interfaceName, err, string(output))
 		}
 	}
 
 	// Read and parse config file
-	configData, err := os.ReadFile(w.configPath)
+	configData, err := os.ReadFile(s.configPath)
 	if err != nil {
 		return fmt.Errorf("failed to read config file: %w", err)
 	}
@@ -314,7 +335,7 @@ func (w *wgClientService) startTunnel() error {
 
 	// Configure interface using individual wg set commands (more reliable than wg setconf)
 	// Set private key
-	cmd := exec.CommandContext(w.ctx, "wg", "set", w.interfaceName, "private-key", "/dev/stdin")
+	cmd := exec.CommandContext(s.ctx, "wg", "set", s.interfaceName, "private-key", "/dev/stdin")
 	cmd.Stdin = strings.NewReader(privateKey)
 	cmd.Env = os.Environ()
 	if output, err := cmd.CombinedOutput(); err != nil {
@@ -322,7 +343,7 @@ func (w *wgClientService) startTunnel() error {
 	}
 
 	// Add peer
-	peerCmd := exec.CommandContext(w.ctx, "wg", "set", w.interfaceName, "peer", peerPublicKey)
+	peerCmd := exec.CommandContext(s.ctx, "wg", "set", s.interfaceName, "peer", peerPublicKey)
 	if peerAllowedIPs != "" {
 		peerCmd.Args = append(peerCmd.Args, "allowed-ips", peerAllowedIPs)
 	}
@@ -346,93 +367,93 @@ func (w *wgClientService) startTunnel() error {
 	if address != "" {
 		ipAddr = address
 	}
-	addrAdd := exec.CommandContext(w.ctx, "ip", "addr", "add", ipAddr, "dev", w.interfaceName)
+	addrAdd := exec.CommandContext(s.ctx, "ip", "addr", "add", ipAddr, "dev", s.interfaceName)
 	addrAdd.Env = os.Environ()
 	if output, err := addrAdd.CombinedOutput(); err != nil {
 		// Ignore "File exists" error (address already assigned)
 		if !strings.Contains(string(output), "File exists") && !strings.Contains(string(output), "already assigned") {
-			return fmt.Errorf("failed to add IP address to interface %s: %w, output: %s", w.interfaceName, err, string(output))
+			return fmt.Errorf("failed to add IP address to interface %s: %w, output: %s", s.interfaceName, err, string(output))
 		}
 	}
 
 	// Bring interface up
-	linkUp := exec.CommandContext(w.ctx, "ip", "link", "set", "up", "dev", w.interfaceName)
+	linkUp := exec.CommandContext(s.ctx, "ip", "link", "set", "up", "dev", s.interfaceName)
 	linkUp.Env = os.Environ()
 	if output, err := linkUp.CombinedOutput(); err != nil {
 		return fmt.Errorf("failed to bring interface up: %w, output: %s", err, string(output))
 	}
 
-	w.logger.Info("WireGuard tunnel started", zap.String("interface", w.interfaceName), zap.String("address", ipAddr))
+	s.logger.Info("WireGuard tunnel started", zap.String("interface", s.interfaceName), zap.String("address", ipAddr))
 	return nil
 }
 
 // stopTunnel stops the WireGuard tunnel
-func (w *wgClientService) stopTunnel() error {
+func (s *service) stopTunnel() error {
 	// Bring interface down and delete it; ignore errors if it does not exist
-	linkDown := exec.CommandContext(w.ctx, "ip", "link", "set", "down", "dev", w.interfaceName)
+	linkDown := exec.CommandContext(s.ctx, "ip", "link", "set", "down", "dev", s.interfaceName)
 	linkDown.Env = os.Environ()
 	if output, err := linkDown.CombinedOutput(); err != nil && !strings.Contains(string(output), "Cannot find device") {
 		return fmt.Errorf("failed to bring interface down: %w, output: %s", err, string(output))
 	}
 
-	linkDel := exec.CommandContext(w.ctx, "ip", "link", "del", "dev", w.interfaceName)
+	linkDel := exec.CommandContext(s.ctx, "ip", "link", "del", "dev", s.interfaceName)
 	linkDel.Env = os.Environ()
 	if output, err := linkDel.CombinedOutput(); err != nil && !strings.Contains(string(output), "Cannot find device") {
 		return fmt.Errorf("failed to delete interface: %w, output: %s", err, string(output))
 	}
 
-	w.logger.Debug("Tunnel stopped", zap.String("interface", w.interfaceName))
+	s.logger.Debug("Tunnel stopped", zap.String("interface", s.interfaceName))
 	return nil
 }
 
 // isTunnelUp checks if the tunnel interface is up
-func (w *wgClientService) isTunnelUp() bool {
+func (s *service) isTunnelUp() bool {
 	// Check if interface exists
-	cmd := exec.CommandContext(w.ctx, "wg", "show", w.interfaceName)
+	cmd := exec.CommandContext(s.ctx, "wg", "show", s.interfaceName)
 	err := cmd.Run()
 	return err == nil
 }
 
 // isWireGuardInstalled checks if WireGuard tools are installed
-func (w *wgClientService) isWireGuardInstalled() bool {
+func (s *service) isWireGuardInstalled() bool {
 	cmd := exec.Command("which", "wg")
 	err := cmd.Run()
 	return err == nil
 }
 
 // ensureConfigFile ensures the WireGuard config file exists
-func (w *wgClientService) ensureConfigFile() error {
+func (s *service) ensureConfigFile() error {
 	// Check if config file exists
-	if _, err := os.Stat(w.configPath); err == nil {
+	if _, err := os.Stat(s.configPath); err == nil {
 		// Config file exists
 		return nil
 	}
 
 	// Create directory if it doesn't exist
-	configDir := filepath.Dir(w.configPath)
+	configDir := filepath.Dir(s.configPath)
 	if err := os.MkdirAll(configDir, 0755); err != nil {
 		return fmt.Errorf("failed to create config directory: %w", err)
 	}
 
 	// For PoC, we'll create a basic config file template
 	// In production, this would be generated from bootstrap tokens or ISO configuration
-	if w.config.KVMEndpoint == "" {
+	if s.config.KVMEndpoint == "" {
 		return fmt.Errorf("kvm_endpoint is required but not configured")
 	}
 
 	// Generate a basic config (this is a placeholder - real config would come from ISO/bootstrap)
-	configContent := w.generateConfigTemplate()
-	if err := os.WriteFile(w.configPath, []byte(configContent), 0600); err != nil {
+	configContent := s.generateConfigTemplate()
+	if err := os.WriteFile(s.configPath, []byte(configContent), 0600); err != nil {
 		return fmt.Errorf("failed to write config file: %w", err)
 	}
 
-	w.logger.Info("Created WireGuard config file", zap.String("path", w.configPath))
+	s.logger.Info("Created WireGuard config file", zap.String("path", s.configPath))
 	return nil
 }
 
 // generateConfigTemplate generates a basic WireGuard config template
 // In production, this would be populated from bootstrap tokens or ISO configuration
-func (w *wgClientService) generateConfigTemplate() string {
+func (s *service) generateConfigTemplate() string {
 	// This is a template - real implementation would use actual keys from bootstrap
 	return fmt.Sprintf(`[Interface]
 # PrivateKey = <generated-or-from-bootstrap>
@@ -443,95 +464,112 @@ func (w *wgClientService) generateConfigTemplate() string {
 Endpoint = %s:51820
 # AllowedIPs = <assigned-by-kvm-vm>
 PersistentKeepalive = 25
-`, w.config.KVMEndpoint)
+`, s.config.KVMEndpoint)
 }
 
 // startHealthMonitoring starts monitoring tunnel health
-func (w *wgClientService) startHealthMonitoring(ctx context.Context) {
-	interval := w.config.HealthCheckInterval
+func (s *service) startHealthMonitoring(ctx context.Context) {
+	interval := s.config.HealthCheckInterval
 	if interval == 0 {
 		interval = 10 * time.Second // Default
 	}
-	w.healthTicker = time.NewTicker(interval)
+	s.healthTicker = time.NewTicker(interval)
 
 	go func() {
-		defer w.healthTicker.Stop()
+		defer s.healthTicker.Stop()
 
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case <-w.ctx.Done():
+			case <-s.ctx.Done():
 				return
-			case <-w.healthTicker.C:
-				w.checkHealth()
+			case <-s.healthTicker.C:
+				s.checkHealth()
 			}
 		}
 	}()
 }
 
 // checkHealth checks tunnel health and latency
-func (w *wgClientService) checkHealth() {
-	w.mu.Lock()
-	defer w.mu.Unlock()
+func (s *service) checkHealth() {
+	s.mu.Lock()
+	stopping := s.stopping
+	s.mu.Unlock()
+
+	// Don't attempt reconnection if service is stopping
+	if stopping {
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	// Check if tunnel is up
-	if !w.isTunnelUp() {
-		if w.connected {
-			w.logger.Error("Tunnel is down", zap.Error(fmt.Errorf("interface %s is not up", w.interfaceName)))
-			w.connected = false
-			if w.eventBus != nil {
-				w.eventBus.Publish(evtbusstypes.Event{
-					Type:      evtbusstypes.EventType("network.wireguard.disconnected"),
-					Source:    w.Name(),
+	if !s.isTunnelUp() {
+		if s.connected {
+			s.logger.Error("Tunnel is down", zap.Error(fmt.Errorf("interface %s is not up", s.interfaceName)))
+			s.connected = false
+			if s.eventBus != nil {
+				event := evtbusstypes.Event[evtbusstypes.NetworkEventData]{
+					Type:      evtbusstypes.EventTypeNetworkTunnelDisconnected,
+					Source:    s.Name(),
 					Timestamp: time.Now(),
-					Data: map[string]interface{}{
-						"interface": w.interfaceName,
-						"reason":    "tunnel_down",
+					Data: evtbusstypes.NetworkEventData{
+						Interface: s.interfaceName,
+						Reason:    "tunnel_down",
 					},
-				})
+				}
+				if err := eventbus.PublishTyped(s.eventBus, event); err != nil {
+					s.logger.Warn("Failed to publish wireguard disconnected event", zap.Error(err))
+				}
 			}
 
-			// Attempt reconnection
-			go w.reconnect()
+			// Attempt reconnection only if not stopping
+			if !s.stopping {
+				go s.reconnect()
+			}
 		}
 		return
 	}
 
 	// Measure latency (ping KVM endpoint if configured)
-	if w.config.KVMEndpoint != "" {
-		latency := w.measureLatency()
-		w.lastLatency = latency
-		w.logger.Debug("Tunnel health check", zap.Duration("latency", latency), zap.Bool("connected", w.connected))
+	if s.config.KVMEndpoint != "" {
+		latency := s.measureLatency()
+		s.lastLatency = latency
+		s.logger.Debug("Tunnel health check", zap.Duration("latency", latency), zap.Bool("connected", s.connected))
 	}
 
 	// If we were disconnected but tunnel is now up, mark as connected
-	if !w.connected && w.isTunnelUp() {
-		w.connected = true
-		if w.eventBus != nil {
-			w.eventBus.Publish(evtbusstypes.Event{
-				Type:      evtbusstypes.EventType("network.wireguard.connected"),
-				Source:    w.Name(),
+	if !s.connected && s.isTunnelUp() {
+		s.connected = true
+		if s.eventBus != nil {
+			event := evtbusstypes.Event[evtbusstypes.NetworkEventData]{
+				Type:      evtbusstypes.EventTypeNetworkTunnelConnected,
+				Source:    s.Name(),
 				Timestamp: time.Now(),
-				Data: map[string]interface{}{
-					"interface": w.interfaceName,
-					"endpoint":  w.config.KVMEndpoint,
+				Data: evtbusstypes.NetworkEventData{
+					Interface: s.interfaceName,
+					Endpoint:  s.config.KVMEndpoint,
 				},
-			})
+			}
+			if err := eventbus.PublishTyped(s.eventBus, event); err != nil {
+				s.logger.Warn("Failed to publish wireguard connected event", zap.Error(err))
+			}
 		}
 	}
 }
 
 // measureLatency measures latency to the KVM endpoint
-func (w *wgClientService) measureLatency() time.Duration {
+func (s *service) measureLatency() time.Duration {
 	// Extract host from endpoint (remove port)
-	endpoint := w.config.KVMEndpoint
+	endpoint := s.config.KVMEndpoint
 	if idx := strings.LastIndex(endpoint, ":"); idx > 0 {
 		endpoint = endpoint[:idx]
 	}
 
 	// Use ping to measure latency
-	timeout := w.config.PingTimeout
+	timeout := s.config.PingTimeout
 	if timeout == 0 {
 		timeout = 2 * time.Second // Default
 	}
@@ -552,38 +590,71 @@ func (w *wgClientService) measureLatency() time.Duration {
 }
 
 // reconnect attempts to reconnect the tunnel
-func (w *wgClientService) reconnect() {
-	w.logger.Info("Attempting to reconnect tunnel", zap.String("interface", w.interfaceName))
+// This function respects context cancellation and will exit early if the service is stopping.
+func (s *service) reconnect() {
+	// Check if service is stopping before starting reconnection
+	s.mu.RLock()
+	stopping := s.stopping
+	ctx := s.ctx
+	s.mu.RUnlock()
 
-	// Wait before reconnecting
-	timeout := w.config.ReconnectTimeout
-	if timeout == 0 {
-		timeout = 5 * time.Second // Default
-	}
-	time.Sleep(timeout)
-
-	// Try to restart the tunnel
-	if err := w.startTunnel(); err != nil {
-		w.logger.Error("Reconnection failed", zap.Error(err))
+	if stopping {
+		s.logger.Debug("Skipping reconnection - service is stopping")
 		return
 	}
 
-	w.mu.Lock()
-	w.connected = true
-	w.mu.Unlock()
+	s.logger.Info("Attempting to reconnect tunnel", zap.String("interface", s.interfaceName))
 
-	w.logger.Info("Tunnel reconnected", zap.String("interface", w.interfaceName))
-	if w.eventBus != nil {
-		w.eventBus.Publish(evtbusstypes.Event{
-			Type:      evtbusstypes.EventType("network.wireguard.connected"),
-			Source:    w.Name(),
+	// Wait before reconnecting, but respect context cancellation
+	timeout := s.config.ReconnectTimeout
+	if timeout == 0 {
+		timeout = 5 * time.Second // Default
+	}
+
+	// Use context-aware sleep instead of time.Sleep
+	select {
+	case <-ctx.Done():
+		s.logger.Debug("Reconnection cancelled - service is stopping")
+		return
+	case <-time.After(timeout):
+		// Timeout expired, continue with reconnection
+	}
+
+	// Check again if service is stopping before attempting reconnection
+	s.mu.RLock()
+	stopping = s.stopping
+	s.mu.RUnlock()
+
+	if stopping {
+		s.logger.Debug("Skipping reconnection - service stopped during wait")
+		return
+	}
+
+	// Try to restart the tunnel
+	if err := s.startTunnel(); err != nil {
+		s.logger.Error("Reconnection failed", zap.Error(err))
+		return
+	}
+
+	s.mu.Lock()
+	s.connected = true
+	s.mu.Unlock()
+
+	s.logger.Info("Tunnel reconnected", zap.String("interface", s.interfaceName))
+	if s.eventBus != nil {
+		event := evtbusstypes.Event[evtbusstypes.NetworkEventData]{
+			Type:      evtbusstypes.EventTypeNetworkTunnelConnected,
+			Source:    s.Name(),
 			Timestamp: time.Now(),
-			Data: map[string]interface{}{
-				"interface":   w.interfaceName,
-				"endpoint":    w.config.KVMEndpoint,
-				"reconnected": true,
+			Data: evtbusstypes.NetworkEventData{
+				Interface:   s.interfaceName,
+				Endpoint:    s.config.KVMEndpoint,
+				Reconnected: true,
 			},
-		})
+		}
+		if err := eventbus.PublishTyped(s.eventBus, event); err != nil {
+			s.logger.Warn("Failed to publish wireguard reconnected event", zap.Error(err))
+		}
 	}
 }
 

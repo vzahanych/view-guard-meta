@@ -27,21 +27,32 @@ type EventBus interface {
 
 	// Subscribe subscribes to events of a specific type.
 	// The returned channel receives events until Unsubscribe is called or the bus is closed.
-	Subscribe(eventType types.EventType) <-chan types.Event
+	Subscribe(eventType types.EventType) <-chan types.EventAny
 
 	// SubscribeAll subscribes to all events, regardless of type.
-	SubscribeAll() <-chan types.Event
+	SubscribeAll() <-chan types.EventAny
 
 	// Publish publishes an event to all matching subscribers.
 	// Implementations should be non-blocking (e.g. use buffered channels and drop on overflow).
-	Publish(event types.Event)
+	Publish(event types.EventAny)
 
 	// Unsubscribe removes a subscription for the given event type and channel.
-	Unsubscribe(eventType types.EventType, ch <-chan types.Event)
+	Unsubscribe(eventType types.EventType, ch <-chan types.EventAny)
 
 	// Close shuts down the event bus and closes all subscriber channels.
 	// After Close, Publish and Subscribe calls should be no-ops.
 	Close() error
+}
+
+// PublishTyped publishes a typed event to the bus.
+// This is a convenience function that converts Event[T] to EventAny before publishing.
+func PublishTyped[T types.EventData](bus EventBus, event types.Event[T]) error {
+	eventAny, err := types.ToEventAny(event)
+	if err != nil {
+		return err
+	}
+	bus.Publish(eventAny)
+	return nil
 }
 
 func NewEventBus(ctx context.Context, config *types.EventBusConfig, logger *zap.Logger, metaStore *metastorage.MetaDataStore) (EventBus, error) {

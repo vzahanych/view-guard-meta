@@ -15,7 +15,7 @@ import (
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/audit-log/types"
 	objectstorage "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/object-storage"
 	vmgateway "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/vm-gateway"
-	httpsclienttypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/vm-gateway/http-impl/https-client-service/types"
+	vmgatewaytypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/vm-gateway/types"
 	"go.uber.org/zap"
 )
 
@@ -400,7 +400,7 @@ func (a *AuditLogImpl) syncBatchToVM(ctx context.Context, batch []*types.ExportE
 	}
 
 	// Convert export entries to VM AuditLogEntry format
-	auditLogEntries := make([]*httpsclienttypes.AuditLogEntry, 0, len(batch))
+	auditLogEntries := make([]*vmgatewaytypes.AuditLogEntry, 0, len(batch))
 	for _, exportEntry := range batch {
 		var baseEntry types.AuditEntry
 		if err := json.Unmarshal([]byte(exportEntry.JSON), &baseEntry); err != nil {
@@ -413,13 +413,13 @@ func (a *AuditLogImpl) syncBatchToVM(ctx context.Context, batch []*types.ExportE
 			continue
 		}
 
-		entry := &httpsclienttypes.AuditLogEntry{
+		entry := &vmgatewaytypes.AuditLogEntry{
 			ID:           baseEntry.ID,
 			Type:         string(baseEntry.Type),
 			Timestamp:    baseEntry.Timestamp.Unix(),
 			EdgeID:       baseEntry.EdgeID,
-			UserID:       baseEntry.UserID,
-			IPAddress:    baseEntry.IPAddress,
+			// UserID omitted - VM only knows about EdgeID, not individual users
+			// IPAddress omitted - Edge devices are behind NAT, internal IP not meaningful to VM
 			UserAgent:    baseEntry.UserAgent,
 			Result:       baseEntry.Result,
 			Error:        baseEntry.Error,
@@ -438,7 +438,7 @@ func (a *AuditLogImpl) syncBatchToVM(ctx context.Context, batch []*types.ExportE
 	}
 
 	// Create sync request
-	req := &httpsclienttypes.SyncAuditLogsRequest{
+	req := &vmgatewaytypes.SyncAuditLogsRequest{
 		EdgeID:     a.edgeID,
 		StartTime:  startTime.Unix(),
 		EndTime:    endTime.Unix(),

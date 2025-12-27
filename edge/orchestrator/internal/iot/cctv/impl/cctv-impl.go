@@ -104,7 +104,7 @@ func (s *CCTVServiceImpl) Start(ctx context.Context) error {
 
 	// Subscribe to discovery events
 	if s.eventBus != nil {
-		ch := s.eventBus.Subscribe(evtbusstypes.EventType("camera.discovered"))
+		ch := s.eventBus.Subscribe(evtbusstypes.EventTypeDeviceDiscovered)
 		go s.handleCameraDiscovered(ch)
 	}
 
@@ -143,7 +143,7 @@ func (s *CCTVServiceImpl) handleCameraDiscovered(ch <-chan evtbusstypes.Event) {
 			if !ok {
 				return
 			}
-			if string(event.Type) != "camera.discovered" {
+			if event.Type != evtbusstypes.EventTypeDeviceDiscovered {
 				continue
 			}
 
@@ -284,7 +284,7 @@ func (s *CCTVServiceImpl) DiscoverCameras(ctx context.Context) error {
 		// Publish camera.discovered event
 		if s.eventBus != nil {
 			s.eventBus.Publish(evtbusstypes.Event{
-				Type:      evtbusstypes.EventType("camera.discovered"),
+				Type:      evtbusstypes.EventTypeDeviceDiscovered,
 				Source:    s.Name(),
 				Timestamp: time.Now(),
 				Data: map[string]interface{}{
@@ -366,7 +366,7 @@ func (s *CCTVServiceImpl) RegisterCamera(ctx context.Context, camera *cctvtypes.
 	// Publish event
 	if s.eventBus != nil {
 		s.eventBus.Publish(evtbusstypes.Event{
-			Type:      evtbusstypes.EventType("camera.registered"),
+			Type:      evtbusstypes.EventTypeDeviceRegistered,
 			Source:    s.Name(),
 			Timestamp: time.Now(),
 			Data: map[string]interface{}{

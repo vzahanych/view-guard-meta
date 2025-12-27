@@ -2,6 +2,7 @@ package metastoragebus
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
@@ -20,8 +21,8 @@ type MetaStorageEventBus struct {
 	mu              sync.RWMutex
 	metaStorage     metastorage.MetaDataStore
 	logger          *zap.Logger
-	subscribers     map[types.EventType][]chan types.Event
-	allSubs         []chan types.Event
+	subscribers     map[types.EventType][]chan types.EventAny
+	allSubs         []chan types.EventAny
 	bufferSize      int
 	closed          bool
 	retryConfig     *RetryConfig
@@ -55,7 +56,7 @@ type OrderingConfig struct {
 type OrderingBuffer struct {
 	source          string
 	expectedSeq     int64                    // Next expected sequence number
-	buffered        map[int64]types.Event    // Buffered events by sequence number
+	buffered        map[int64]types.EventAny    // Buffered events by sequence number
 	lastDelivered   int64                    // Last delivered sequence number
 	timeouts        map[int64]time.Time       // Timeout tracking for strict mode
 	mu              sync.Mutex
@@ -81,8 +82,8 @@ func NewMetaStorageEventBus(metaStorage metastorage.MetaDataStore, bufferSize in
 	bus := &MetaStorageEventBus{
 		metaStorage:      metaStorage,
 		logger:           logger,
-		subscribers:      make(map[types.EventType][]chan types.Event),
-		allSubs:          make([]chan types.Event, 0),
+		subscribers:      make(map[types.EventType][]chan types.EventAny),
+		allSubs:          make([]chan types.EventAny, 0),
 		bufferSize:       bufferSize,
 		retryConfig:      retryConfig,
 		retryWorkerCtx:   ctx,
@@ -106,40 +107,40 @@ func (b *MetaStorageEventBus) Name() string {
 }
 
 // Subscribe subscribes to events of a specific type.
-func (b *MetaStorageEventBus) Subscribe(eventType types.EventType) <-chan types.Event {
+func (b *MetaStorageEventBus) Subscribe(eventType types.EventType) <-chan types.EventAny {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	if b.closed {
-		ch := make(chan types.Event)
+		ch := make(chan types.EventAny)
 		close(ch)
 		return ch
 	}
 
-	ch := make(chan types.Event, b.bufferSize)
+	ch := make(chan types.EventAny, b.bufferSize)
 	b.subscribers[eventType] = append(b.subscribers[eventType], ch)
 	return ch
 }
 
 // SubscribeAll subscribes to all events, regardless of type.
-func (b *MetaStorageEventBus) SubscribeAll() <-chan types.Event {
+func (b *MetaStorageEventBus) SubscribeAll() <-chan types.EventAny {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	if b.closed {
-		ch := make(chan types.Event)
+		ch := make(chan types.EventAny)
 		close(ch)
 		return ch
 	}
 
-	ch := make(chan types.Event, b.bufferSize)
+	ch := make(chan types.EventAny, b.bufferSize)
 	b.allSubs = append(b.allSubs, ch)
 	return ch
 }
 
 // Publish publishes an event to all matching subscribers and persists it to meta-storage.
 // If ordering is enabled, events are assigned sequence numbers and delivered in order per source.
-func (b *MetaStorageEventBus) Publish(event types.Event) {
+func (b *MetaStorageEventBus) Publish(event types.EventAny) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 
@@ -170,7 +171,7 @@ func (b *MetaStorageEventBus) Publish(event types.Event) {
 }
 
 // publishDirect publishes an event directly to subscribers without ordering
-func (b *MetaStorageEventBus) publishDirect(event types.Event) {
+func (b *MetaStorageEventBus) publishDirect(event types.EventAny) {
 	// Send to specific subscribers
 	if subs, ok := b.subscribers[event.Type]; ok {
 		for _, sub := range subs {
@@ -199,7 +200,7 @@ func (b *MetaStorageEventBus) publishDirect(event types.Event) {
 }
 
 // publishWithOrdering publishes an event with ordering guarantees per source
-func (b *MetaStorageEventBus) publishWithOrdering(event types.Event) {
+func (b *MetaStorageEventBus) publishWithOrdering(event types.EventAny) {
 	// Get or create ordering buffer for this source
 	buffer := b.getOrCreateOrderingBuffer(event.Source)
 	
@@ -247,9 +248,22 @@ func (b *MetaStorageEventBus) getOrCreateOrderingBuffer(source string) *Ordering
 
 // persistEvent persists an event to meta-storage.
 // This is called asynchronously to avoid blocking event publishing.
-func (b *MetaStorageEventBus) persistEvent(ctx context.Context, event types.Event) {
+func (b *MetaStorageEventBus) persistEvent(ctx context.Context, event types.EventAny) {
 	// Generate a unique event ID based on timestamp and a counter
 	eventID := b.generateEventID(event.Timestamp)
+
+	// Unmarshal event data from json.RawMessage to map for storage
+	var dataMap map[string]interface{}
+	if len(event.Data) > 0 {
+		if err := json.Unmarshal(event.Data, &dataMap); err != nil {
+			b.logger.Warn("Failed to unmarshal event data for storage, storing as empty map",
+				zap.String("event_id", eventID),
+				zap.Error(err))
+			dataMap = make(map[string]interface{})
+		}
+	} else {
+		dataMap = make(map[string]interface{})
+	}
 
 	// Convert event to map[string]interface{} for storage
 	eventData := map[string]interface{}{
@@ -257,7 +271,7 @@ func (b *MetaStorageEventBus) persistEvent(ctx context.Context, event types.Even
 		"type":      string(event.Type),
 		"source":    event.Source,
 		"timestamp": event.Timestamp.Format(time.RFC3339Nano),
-		"data":      event.Data,
+		"data":      dataMap,
 	}
 
 	// Store sequence number if present
@@ -300,7 +314,7 @@ func (b *MetaStorageEventBus) generateEventID(timestamp time.Time) string {
 }
 
 // Unsubscribe removes a subscription for the given event type and channel.
-func (b *MetaStorageEventBus) Unsubscribe(eventType types.EventType, ch <-chan types.Event) {
+func (b *MetaStorageEventBus) Unsubscribe(eventType types.EventType, ch <-chan types.EventAny) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -311,7 +325,7 @@ func (b *MetaStorageEventBus) Unsubscribe(eventType types.EventType, ch <-chan t
 
 	// Remove from specific subscribers and close the channel
 	if subs, ok := b.subscribers[eventType]; ok {
-		filtered := make([]chan types.Event, 0, len(subs))
+		filtered := make([]chan types.EventAny, 0, len(subs))
 		for _, sub := range subs {
 			if sub != ch {
 				filtered = append(filtered, sub)
@@ -337,7 +351,7 @@ func (b *MetaStorageEventBus) Unsubscribe(eventType types.EventType, ch <-chan t
 
 	// Remove from allSubs if present and close the channel
 	if len(b.allSubs) > 0 {
-		filteredAll := make([]chan types.Event, 0, len(b.allSubs))
+		filteredAll := make([]chan types.EventAny, 0, len(b.allSubs))
 		for _, sub := range b.allSubs {
 			if sub != ch {
 				filteredAll = append(filteredAll, sub)
@@ -382,7 +396,7 @@ func (b *MetaStorageEventBus) Close() error {
 	b.orderingMu.Unlock()
 
 	// Close all channels safely (in case Unsubscribe() already closed some)
-	closeChannel := func(ch chan types.Event) {
+	closeChannel := func(ch chan types.EventAny) {
 		defer func() {
 			// Recover from panic if channel is already closed
 			if r := recover(); r != nil {
@@ -402,15 +416,15 @@ func (b *MetaStorageEventBus) Close() error {
 		closeChannel(sub)
 	}
 
-	b.subscribers = make(map[types.EventType][]chan types.Event)
-	b.allSubs = make([]chan types.Event, 0)
+	b.subscribers = make(map[types.EventType][]chan types.EventAny)
+	b.allSubs = make([]chan types.EventAny, 0)
 
 	return nil
 }
 
 // QueryEvents queries events from meta-storage.
 // This is useful for debugging and troubleshooting.
-func (b *MetaStorageEventBus) QueryEvents(ctx context.Context, filters *EventQueryFilters) ([]types.Event, error) {
+func (b *MetaStorageEventBus) QueryEvents(ctx context.Context, filters *EventQueryFilters) ([]types.EventAny, error) {
 	if filters == nil {
 		filters = &EventQueryFilters{}
 	}
@@ -440,7 +454,7 @@ func (b *MetaStorageEventBus) QueryEvents(ctx context.Context, filters *EventQue
 	}
 
 	// Convert map[string]interface{} to types.Event
-	events := make([]types.Event, 0, len(eventMaps))
+	events := make([]types.EventAny, 0, len(eventMaps))
 	for _, eventMap := range eventMaps {
 		event, err := b.mapToEvent(eventMap)
 		if err != nil {
@@ -483,9 +497,9 @@ func (b *MetaStorageEventBus) QueryEvents(ctx context.Context, filters *EventQue
 	return events, nil
 }
 
-// mapToEvent converts a map[string]interface{} to types.Event.
-func (b *MetaStorageEventBus) mapToEvent(eventMap map[string]interface{}) (types.Event, error) {
-	event := types.Event{}
+// mapToEvent converts a map[string]interface{} to types.EventAny.
+func (b *MetaStorageEventBus) mapToEvent(eventMap map[string]interface{}) (types.EventAny, error) {
+	event := types.EventAny{}
 
 	// Extract type
 	if typeStr, ok := eventMap["type"].(string); ok {
@@ -512,11 +526,15 @@ func (b *MetaStorageEventBus) mapToEvent(eventMap map[string]interface{}) (types
 		return event, fmt.Errorf("missing or invalid timestamp field")
 	}
 
-	// Extract data
-	if data, ok := eventMap["data"].(map[string]interface{}); ok {
-		event.Data = data
+	// Extract data as JSON
+	if data, ok := eventMap["data"]; ok {
+		dataBytes, err := json.Marshal(data)
+		if err != nil {
+			return event, fmt.Errorf("failed to marshal event data: %w", err)
+		}
+		event.Data = json.RawMessage(dataBytes)
 	} else {
-		event.Data = make(map[string]interface{})
+		event.Data = json.RawMessage("{}")
 	}
 
 	// Extract sequence number if present
@@ -723,7 +741,7 @@ func NewOrderingBuffer(source string, config *OrderingConfig, logger *zap.Logger
 		source:        source,
 		expectedSeq:   1, // Start from 1
 		lastDelivered: 0,
-		buffered:      make(map[int64]types.Event),
+		buffered:      make(map[int64]types.EventAny),
 		timeouts:      make(map[int64]time.Time),
 		config:        config,
 		logger:        logger,
@@ -732,17 +750,17 @@ func NewOrderingBuffer(source string, config *OrderingConfig, logger *zap.Logger
 
 // AddEvent adds an event to the ordering buffer and returns any events ready for delivery
 // Returns events in sequence order that can be delivered
-func (ob *OrderingBuffer) AddEvent(event types.Event) []types.Event {
+func (ob *OrderingBuffer) AddEvent(event types.EventAny) []types.EventAny {
 	ob.mu.Lock()
 	defer ob.mu.Unlock()
 
 	seq := event.SequenceNumber
 	if seq <= 0 {
 		// No sequence number - deliver immediately
-		return []types.Event{event}
+		return []types.EventAny{event}
 	}
 
-	var readyEvents []types.Event
+	var readyEvents []types.EventAny
 
 	switch ob.config.Mode {
 	case types.OrderingModeBestEffort:
@@ -751,15 +769,15 @@ func (ob *OrderingBuffer) AddEvent(event types.Event) []types.Event {
 		readyEvents = ob.handleStrict(seq, event)
 	default:
 		// No ordering - deliver immediately
-		readyEvents = []types.Event{event}
+		readyEvents = []types.EventAny{event}
 	}
 
 	return readyEvents
 }
 
 // handleBestEffort handles events in best-effort mode (reorder if possible)
-func (ob *OrderingBuffer) handleBestEffort(seq int64, event types.Event) []types.Event {
-	var readyEvents []types.Event
+func (ob *OrderingBuffer) handleBestEffort(seq int64, event types.EventAny) []types.EventAny {
+	var readyEvents []types.EventAny
 
 	// If this is the expected sequence, deliver it and any buffered consecutive events
 	if seq == ob.expectedSeq {
@@ -791,7 +809,7 @@ func (ob *OrderingBuffer) handleBestEffort(seq int64, event types.Event) []types
 			zap.String("source", ob.source),
 			zap.Int64("sequence", seq),
 			zap.Int64("expected", ob.expectedSeq))
-		readyEvents = []types.Event{event}
+		readyEvents = []types.EventAny{event}
 	}
 
 	// Cleanup old buffered events (keep buffer size manageable)
@@ -801,8 +819,8 @@ func (ob *OrderingBuffer) handleBestEffort(seq int64, event types.Event) []types
 }
 
 // handleStrict handles events in strict mode (wait for missing sequences)
-func (ob *OrderingBuffer) handleStrict(seq int64, event types.Event) []types.Event {
-	var readyEvents []types.Event
+func (ob *OrderingBuffer) handleStrict(seq int64, event types.EventAny) []types.EventAny {
+	var readyEvents []types.EventAny
 
 	// If this is the expected sequence, deliver it and any buffered consecutive events
 	if seq == ob.expectedSeq {
@@ -837,7 +855,7 @@ func (ob *OrderingBuffer) handleStrict(seq int64, event types.Event) []types.Eve
 			zap.String("source", ob.source),
 			zap.Int64("sequence", seq),
 			zap.Int64("expected", ob.expectedSeq))
-		readyEvents = []types.Event{event}
+		readyEvents = []types.EventAny{event}
 	}
 
 	// Check for timed-out events in strict mode
@@ -850,12 +868,12 @@ func (ob *OrderingBuffer) handleStrict(seq int64, event types.Event) []types.Eve
 }
 
 // checkTimeouts checks for timed-out events in strict mode and delivers them
-func (ob *OrderingBuffer) checkTimeouts() []types.Event {
+func (ob *OrderingBuffer) checkTimeouts() []types.EventAny {
 	if ob.config.Mode != types.OrderingModeStrict {
 		return nil
 	}
 
-	var readyEvents []types.Event
+	var readyEvents []types.EventAny
 	now := time.Now()
 
 	// Check for missing sequences that have timed out

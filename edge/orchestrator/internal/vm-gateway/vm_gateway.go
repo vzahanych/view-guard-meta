@@ -2,98 +2,124 @@ package vmgateway
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"strings"
+	"time"
 
 	eventbus "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/event-bus"
 	metastorage "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/meta-storage"
 	objectstorage "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/object-storage"
-	httpimpl "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/vm-gateway/http-impl"
-	httpsclienttypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/vm-gateway/http-impl/https-client-service/types"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/vm-gateway/types"
-	wgclienttypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/vm-gateway/wg-client-service/types"
 	"go.uber.org/fx"
 	"go.uber.org/zap"
 )
 
+// Sentinel errors for common VM Gateway error conditions.
+// These errors can be checked using errors.Is() for programmatic error handling.
+var (
+	// ErrNotInitialized indicates that the service or a required component is not initialized.
+	// This typically occurs when trying to use the gateway before it has been properly started
+	// or when a required service (e.g., transport service) is nil.
+	ErrNotInitialized = errors.New("vm-gateway: service not initialized")
+
+	// ErrAlreadyStarted indicates that an operation was attempted on a service that is already started.
+	// This prevents double-starting the gateway.
+	ErrAlreadyStarted = errors.New("vm-gateway: service already started")
+
+	// ErrNotConnected indicates that the gateway is not connected to the VM.
+	// This can occur when trying to communicate with the VM before authentication or connection is established.
+	ErrNotConnected = errors.New("vm-gateway: not connected to VM")
+
+	// ErrInvalidState indicates that an invalid state transition was attempted.
+	// This is used by the connection state machine to reject invalid transitions.
+	ErrInvalidState = errors.New("vm-gateway: invalid state transition")
+)
+
 // VMGateway provides a unified interface for Edge↔VM bidirectional secure communication.
-// It combines three core services:
-//   - WireGuard client service (tunnel management)
-//   - HTTPS/HTTP2 server service (VM → Edge communication)
-//   - HTTPS/HTTP2 client service (Edge → VM communication)
+// It combines two core services:
+//   - Tunnel client service (tunnel management - WireGuard, OpenVPN, IPSec, etc.)
+//   - Transport service (transport layer - HTTP, gRPC, WebSocket, etc.)
 //
 // The gateway provides:
-//   - Unified lifecycle management for all three services
+//   - Unified lifecycle management for tunnel and transport services
 //   - Coordinated startup and shutdown
-//   - Complete API for Edge → VM communication
-//   - WireGuard tunnel status and management
+//   - Complete API for Edge → VM communication (transport-agnostic)
+//   - Tunnel status and management
+//   - Connection state machine for tracking connection lifecycle
 
 //go:generate go run go.uber.org/mock/mockgen -source=$GOFILE -destination=mocks/mock_vm_gateway.go -package=mocks
 type VMGateway interface {
 	// Lifecycle methods
 
-	// Start starts all underlying services (WireGuard client, HTTPS server, HTTPS client).
-	// Services are started in the correct order: WireGuard first, then HTTPS services.
+	// Start starts all underlying services (tunnel client, transport service).
+	// Services are started in the correct order: tunnel first, then transport.
 	// This method should be called after all dependencies are configured.
 	Start(ctx context.Context) error
 
 	// Stop gracefully shuts down all underlying services.
-	// Services are stopped in reverse order: HTTPS services first, then WireGuard.
+	// Services are stopped in reverse order: transport first, then tunnel.
 	// This method should be called during service shutdown.
 	Stop(ctx context.Context) error
 
 	// Name returns the service name for identification and logging.
 	Name() string
 
-	// WireGuard tunnel status and management
+	// Tunnel status and management
 
-	// IsConnected returns whether the WireGuard tunnel is connected and ready for communication.
+	// IsConnected returns whether the tunnel is connected and ready for communication.
 	IsConnected() bool
 
-	// IsHTTPConnected returns whether the HTTP/HTTPS client connection to VM is established and authenticated.
-	// In production mode, this requires WireGuard to be connected.
+	// IsTransportConnected returns whether the transport connection to VM is established and authenticated.
+	// In production mode, this requires the tunnel to be connected.
 	// In dev mode (localhost), this checks if authentication with VM has succeeded.
-	IsHTTPConnected() bool
+	// This is provider-agnostic and works with any transport (HTTP, gRPC, WebSocket, etc.).
+	IsTransportConnected() bool
 
-	// GetWireGuardInterfaceName returns the WireGuard interface name.
-	GetWireGuardInterfaceName() string
+	// GetTunnelInterfaceName returns the tunnel interface name.
+	// This is provider-agnostic and works with any tunnel provider (WireGuard, OpenVPN, IPSec, etc.).
+	GetTunnelInterfaceName() string
 
-	// GetWireGuardEndpoint returns the VM endpoint address.
-	GetWireGuardEndpoint() string
+	// GetTunnelEndpoint returns the VM endpoint address.
+	// This is provider-agnostic and works with any tunnel provider (WireGuard, OpenVPN, IPSec, etc.).
+	GetTunnelEndpoint() string
 
 	// VM communication methods (Edge → VM)
 
 	// Authenticate authenticates Edge with VM and establishes the connection.
-	// This should be called when Edge orchestrator starts (after WireGuard is connected).
+	// This should be called when Edge orchestrator starts (after tunnel is connected).
 	Authenticate(ctx context.Context, edgeID string) error
 
 	// GetConfig retrieves VM configuration.
-	GetConfig(ctx context.Context) (*httpsclienttypes.GetConfigResponse, error)
+	GetConfig(ctx context.Context) (*types.GetConfigResponse, error)
 
-	// SyncCapabilities syncs camera capabilities to the VM.
-	SyncCapabilities(ctx context.Context, req *httpsclienttypes.SyncCapabilitiesRequest) (*httpsclienttypes.SyncCapabilitiesResponse, error)
+	// SyncCapabilities syncs device capabilities to the VM.
+	// Supports all device types (cameras, sensors, etc.), not just cameras.
+	SyncCapabilities(ctx context.Context, req *types.SyncCapabilitiesRequest) (*types.SyncCapabilitiesResponse, error)
 
-	// SyncCameras syncs discovered cameras to the VM. VM decides which cameras should be enabled.
-	SyncCameras(ctx context.Context, req *httpsclienttypes.SyncCamerasRequest) (*httpsclienttypes.SyncCamerasResponse, error)
+	// SyncDevices syncs discovered devices to the VM. VM decides which devices should be enabled.
+	// Supports all device types (cameras, sensors, etc.), not just cameras.
+	SyncDevices(ctx context.Context, req *types.SyncDevicesRequest) (*types.SyncDevicesResponse, error)
 
-	// SyncScreenshots syncs labeled screenshots to the VM for model training.
-	SyncScreenshots(ctx context.Context, req *httpsclienttypes.SyncScreenshotsRequest) (*httpsclienttypes.SyncScreenshotsResponse, error)
+	// SyncDataUnits syncs labeled data units to the VM for model training.
+	// This is device-agnostic and supports all IoT device types (cameras, sensors, audio devices, etc.).
+	// Data units can be screenshots/images, sensor readings, audio samples, or any other labeled data.
+	SyncDataUnits(ctx context.Context, req *types.SyncDataUnitsRequest) (*types.SyncDataUnitsResponse, error)
 
 	// ReportDeploymentStatus reports model deployment status to the VM.
 	ReportDeploymentStatus(ctx context.Context, deploymentID string, status string, errorMessage *string, modelPath *string) error
 
 	// Heartbeat sends a heartbeat to the VM to maintain connection.
-	Heartbeat(ctx context.Context, req *wgclienttypes.HeartbeatRequest) error
+	Heartbeat(ctx context.Context, req *types.HeartbeatRequest) error
 
 	// SendTelemetry sends telemetry data to the VM.
-	SendTelemetry(ctx context.Context, data *wgclienttypes.TelemetryData) error
+	SendTelemetry(ctx context.Context, data *types.TelemetryData) error
 
 	// SendEvents sends events to the VM.
-	SendEvents(ctx context.Context, events []*wgclienttypes.Event) error
+	SendEvents(ctx context.Context, events []*types.Event) error
 
 	// SyncAuditLogs syncs audit logs to the VM for long-term storage and analysis.
 	// Audit logs are sent in batches with metadata for efficient transfer.
-	SyncAuditLogs(ctx context.Context, req *httpsclienttypes.SyncAuditLogsRequest) (*httpsclienttypes.SyncAuditLogsResponse, error)
+	SyncAuditLogs(ctx context.Context, req *types.SyncAuditLogsRequest) (*types.SyncAuditLogsResponse, error)
 
 	// Connection state machine methods
 
@@ -110,25 +136,88 @@ type VMGateway interface {
 	// CanTransitionConnectionState checks if a transition from current state to new state is valid
 	CanTransitionConnectionState(newState types.ConnectionState) bool
 
-	// Access to underlying services (for advanced use cases)
+	// Observability methods
 
-	// GetWGClientService returns the underlying WireGuard client service.
-	// This is primarily for advanced use cases or monitoring.
-	GetWGClientService() interface{}
+	// HealthSnapshot returns a comprehensive, structured health snapshot of the gateway.
+	// This includes connection state, tunnel status, transport status, and sub-service status.
+	// The snapshot is JSON-serializable and useful for debugging and monitoring.
+	HealthSnapshot() GatewayStatus
+}
 
-	// GetHTTPSServerService returns the underlying HTTPS server service.
-	// This is primarily for advanced use cases or monitoring.
-	GetHTTPSServerService() interface{}
+// GatewayStatus represents a comprehensive health snapshot of the VM Gateway.
+// This is tunnel/transport agnostic and works with any provider combination.
+type GatewayStatus struct {
+	// ConnectionState contains the current connection state information
+	ConnectionState types.ConnectionStateInfo `json:"connection_state"`
 
-	// GetHTTPSClientService returns the underlying HTTPS client service.
-	// This is primarily for advanced use cases or monitoring.
-	GetHTTPSClientService() interface{}
+	// TunnelStatus contains tunnel-specific status information
+	// This is provider-agnostic and works with WireGuard, OpenVPN, IPSec, etc.
+	TunnelStatus TunnelStatus `json:"tunnel_status"`
+
+	// TransportStatus contains transport-specific status information
+	// This is provider-agnostic and works with HTTP, gRPC, WebSocket, etc.
+	TransportStatus TransportStatus `json:"transport_status"`
+
+	// SubServices contains status information for sub-services
+	// Key is service name, value is service status
+	SubServices map[string]ServiceStatus `json:"sub_services"`
+
+	// Timestamp is when this snapshot was taken
+	Timestamp time.Time `json:"timestamp"`
+}
+
+// TunnelStatus represents the status of the tunnel service.
+// This is provider-agnostic and works with WireGuard, OpenVPN, IPSec, etc.
+type TunnelStatus struct {
+	// Enabled indicates whether tunnel is configured and enabled
+	Enabled bool `json:"enabled"`
+
+	// Connected indicates whether tunnel is connected
+	Connected bool `json:"connected"`
+
+	// InterfaceName is the tunnel network interface name (e.g., "wg0", "tun0")
+	InterfaceName string `json:"interface_name,omitempty"`
+
+	// Endpoint is the remote endpoint address
+	Endpoint string `json:"endpoint,omitempty"`
+
+	// ServiceName is the name of the tunnel service (e.g., "wireguard-client")
+	ServiceName string `json:"service_name,omitempty"`
+}
+
+// TransportStatus represents the status of the transport service.
+// This is provider-agnostic and works with HTTP, gRPC, WebSocket, etc.
+type TransportStatus struct {
+	// Connected indicates whether transport connection is established and authenticated
+	Connected bool `json:"connected"`
+
+	// ServiceName is the name of the transport service (e.g., "http-transport")
+	ServiceName string `json:"service_name,omitempty"`
+}
+
+// ServiceStatus represents the status of a sub-service.
+type ServiceStatus struct {
+	// Name is the service name
+	Name string `json:"name"`
+
+	// Started indicates whether the service has been started
+	Started bool `json:"started"`
+
+	// Connected indicates whether the service is connected (if applicable)
+	Connected bool `json:"connected,omitempty"`
+
+	// Error contains any error message if the service is in an error state
+	Error string `json:"error,omitempty"`
 }
 
 // NewVMGateway creates a new VM gateway instance.
 // This factory function should typically not be called directly;
 // use VMGatewayProvider instead for proper dependency injection.
 // Dependencies (meta-storage, object-storage, ai-gateway, event-bus) are injected via fx.
+//
+// The gateway now uses transport-service for transport-agnostic communication.
+// This allows switching between HTTP, gRPC, WebSocket, or other transports
+// without changing the gateway code.
 func NewVMGateway(
 	ctx context.Context,
 	config *types.VMGatewayConfig,
@@ -137,26 +226,30 @@ func NewVMGateway(
 	eventBus eventbus.EventBus,
 	logger *zap.Logger,
 ) (VMGateway, error) {
-	switch config.Provider {
-	case "http":
-		return httpimpl.NewVmGatewayHttpImpl(ctx, config, metaStore, objectStore, eventBus, logger)
-	default:
-		return nil, fmt.Errorf("unsupported provider: %s", config.Provider)
-	}
+	// Use the new transport-agnostic implementation
+	return NewVMGatewayImpl(ctx, config, metaStore, objectStore, eventBus, logger)
 }
 
 // VMGatewayProvider creates the VM gateway with fx lifecycle management.
-// The gateway is required when configured. If WireGuard is disabled and not in localhost mode,
-// the gateway will not be created (returns nil, nil). For development, the gateway can run
-// in localhost mode even when WireGuard is disabled.
 //
-// The gateway is a complex service with three internal components:
-//   - WireGuard client service (tunnel management)
-//   - HTTPS server service (VM → Edge communication) - requires meta-storage, event-bus, object-storage, ai-gateway
-//   - HTTPS client service (Edge → VM communication)
+// The gateway is a complex service with two internal components:
+//   - Tunnel client service (tunnel management - WireGuard, OpenVPN, IPSec, etc.)
+//   - Transport service (transport layer - HTTP, gRPC, WebSocket, etc.)
+//   - Requires meta-storage, event-bus, object-storage for server-side operations
 //
 // All dependencies are injected via fx at construction time.
-// If gateway creation fails, an error is returned and the application will not start.
+//
+// Architecture decision (Section 1.0): Gateway-owned lifecycle.
+//   - Fx manages only the gateway lifecycle.
+//   - Gateway Start/Stop is the single place that starts/stops sub-services.
+//   - Sub-services do not register their own fx.Lifecycle hooks.
+//
+// Fail-fast behavior: This provider will return an error (not nil) if:
+//   - Configuration is invalid or unsupported
+//   - Gateway creation fails
+//   - Required dependencies are missing
+//
+// The application will not start if gateway creation fails, ensuring production reliability.
 func VMGatewayProvider(
 	lc fx.Lifecycle,
 	cfg *types.VMGatewayConfig,
@@ -165,55 +258,31 @@ func VMGatewayProvider(
 	eventBus eventbus.EventBus,
 	logger *zap.Logger,
 ) (VMGateway, error) {
-	// Allow localhost mode for development even when WireGuard is disabled
-	if !cfg.WireGuard.Enabled {
-		// For dev mode, check if HTTPS server is configured to listen on localhost
-		serverAddr := cfg.HTTPServerConfig.ListenAddress
-		isLocalhostServer := serverAddr == "" || // Empty defaults to localhost
-			serverAddr == "localhost:8443" ||
-			serverAddr == "127.0.0.1:8443" ||
-			serverAddr == "0.0.0.0:8443" // 0.0.0.0 is also acceptable for dev
-
-		// HTTPS client endpoint is optional for dev - can be empty or localhost (any port)
-		clientEndpoint := cfg.HTTPSClientConfig.VMEndpoint
-		isLocalhostClient := clientEndpoint == "" || // Empty defaults to localhost
-			strings.HasPrefix(clientEndpoint, "localhost:") ||
-			strings.HasPrefix(clientEndpoint, "127.0.0.1:")
-
-		if isLocalhostServer && isLocalhostClient {
-			logger.Info("VM gateway running in localhost development mode (WireGuard disabled)",
-				zap.String("server_address", serverAddr),
-				zap.String("client_endpoint", clientEndpoint))
-		} else {
-			logger.Info("WireGuard disabled and not in localhost mode, VM gateway will not be available",
-				zap.String("server_address", serverAddr),
-				zap.String("client_endpoint", clientEndpoint))
-			return nil, nil
-		}
+	// Validate configuration before creating gateway
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid VM gateway configuration: %w", err)
 	}
 
 	// Create the gateway (this constructs all three internal components with dependencies)
+	// Note: We use context.Background() here because construction should not be cancellable.
+	// The context is only used for passing to sub-service constructors that may need it for
+	// initialization (not for cancellation). The actual Start() method will receive a proper
+	// context from fx lifecycle for cancellable operations.
 	gateway, err := NewVMGateway(context.Background(), cfg, metaStore, objectStore, eventBus, logger)
 	if err != nil {
 		logger.Error("Failed to create VM gateway", zap.Error(err))
 		return nil, fmt.Errorf("failed to create VM gateway: %w", err)
 	}
 
-	// Setup lifecycle hooks
+	// Setup lifecycle hooks - gateway owns the lifecycle of all sub-services
 	lc.Append(fx.Hook{
 		OnStart: func(ctx context.Context) error {
-			if gateway != nil {
-				logger.Info("Starting VM gateway (WireGuard client, HTTPS server, HTTPS client)...")
-				return gateway.Start(ctx)
-			}
-			return nil
+			logger.Info("Starting VM gateway (tunnel client, transport service)...")
+			return gateway.Start(ctx)
 		},
 		OnStop: func(ctx context.Context) error {
-			if gateway != nil {
-				logger.Info("Stopping VM gateway...")
-				return gateway.Stop(ctx)
-			}
-			return nil
+			logger.Info("Stopping VM gateway...")
+			return gateway.Stop(ctx)
 		},
 	})
 

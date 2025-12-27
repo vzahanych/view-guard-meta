@@ -224,7 +224,7 @@ func (g *WebGatewayImpl) handleMarkScreenshotSetReady(c *gin.Context) {
 	// Publish event to state manager
 	if g.eventBus != nil {
 		g.eventBus.Publish(evtbusstypes.Event{
-			Type:      evtbusstypes.EventType("screenshot_set.ready"),
+			Type:      evtbusstypes.EventTypeDataUnitSetReady,
 			Source:    "web-gateway",
 			Timestamp: time.Now(),
 			Data: map[string]interface{}{

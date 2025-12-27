@@ -173,7 +173,7 @@ func (g *WebGatewayImpl) handleAddCamera(c *gin.Context) {
 
 	if g.eventBus != nil {
 		g.eventBus.Publish(evtbusstypes.Event{
-			Type:      evtbusstypes.EventType("camera.registered"),
+			Type:      evtbusstypes.EventTypeDeviceRegistered,
 			Source:    "web-gateway",
 			Timestamp: time.Now(),
 			Data: map[string]interface{}{

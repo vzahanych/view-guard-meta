@@ -31,30 +31,29 @@ import (
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/state-mng/types"
 	vmgateway "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/vm-gateway"
 	vmgatewaytypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/vm-gateway/types"
-	httpsclienttypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/vm-gateway/http-impl/https-client-service/types"
 	webgateway "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/web-gateway"
 	"go.uber.org/zap"
 )
 
 // Known edge-related event types used by the state manager.
 const (
-	EventTypeWireGuardConnected    eventbustypes.EventType = "network.wireguard.connected"
-	EventTypeWireGuardDisconnected eventbustypes.EventType = "network.wireguard.disconnected"
-	EventTypeHTTPSConnected        eventbustypes.EventType = "network.https.connected"
-	EventTypeHTTPSDisconnected     eventbustypes.EventType = "network.https.disconnected"
+	EventTypeTunnelConnected    eventbustypes.EventType = "network.tunnel.connected"
+	EventTypeTunnelDisconnected eventbustypes.EventType = "network.tunnel.disconnected"
+	EventTypeTransportConnected    eventbustypes.EventType = "network.transport.connected"
+	EventTypeTransportDisconnected eventbustypes.EventType = "network.transport.disconnected"
 	EventTypeEdgeAuthenticated     eventbustypes.EventType = "edge.authenticated"
 	EventTypeCapabilitiesReceived  eventbustypes.EventType = "edge.capabilities_received"
-	EventTypeCameraDiscovered      eventbustypes.EventType = "camera.discovered"
-	EventTypeCameraRegistered      eventbustypes.EventType = "camera.registered"
-	EventTypeCameraConnected       eventbustypes.EventType = "camera.connected"
-	EventTypeCameraDisconnected    eventbustypes.EventType = "camera.disconnected"
-	EventTypeSnapshotRequested     eventbustypes.EventType = "snapshot.requested"
-	EventTypeScreenshotSetReady    eventbustypes.EventType = "screenshot_set.ready"
-	EventTypeFrameReceived         eventbustypes.EventType = "video.frame_received"
-	EventTypeDetection             eventbustypes.EventType = "ai.detection"
-	EventTypeInference             eventbustypes.EventType = "ai.inference"
-	EventTypeScreenshotSaved       eventbustypes.EventType = "screenshot.saved"
-	EventTypeClipRecorded          eventbustypes.EventType = "video.clip_recorded"
+	EventTypeDeviceDiscovered      eventbustypes.EventType = "device.discovered"
+	EventTypeDeviceRegistered      eventbustypes.EventType = "device.registered"
+	EventTypeDeviceConnected       eventbustypes.EventType = "device.connected"
+	EventTypeDeviceDisconnected    eventbustypes.EventType = "device.disconnected"
+	EventTypeDataUnitRequested          eventbustypes.EventType = "data_unit.requested"
+	EventTypeDataUnitSetReady           eventbustypes.EventType = "data_unit.set_ready"
+	EventTypeRawDeviceDataFrameReceived eventbustypes.EventType = "raw_device_data.frame_received"
+	EventTypeDetection                  eventbustypes.EventType = "ai.detection"
+	EventTypeInference                  eventbustypes.EventType = "ai.inference"
+	EventTypeDataUnitSaved              eventbustypes.EventType = "data_unit.saved"
+	EventTypeRawDeviceDataClipRecorded  eventbustypes.EventType = "raw_device_data.clip_recorded"
 	EventTypeStorageFull           eventbustypes.EventType = "storage.full"
 	EventTypeStorageWarning        eventbustypes.EventType = "storage.warning"
 	EventTypeModelDeployed         eventbustypes.EventType = "model.deployed"
@@ -1064,7 +1063,7 @@ func (m *StateManagerImpl) updateStateForEvent(ev eventbustypes.Event) (vmgatewa
 	// Update state based on event type
 	switch ev.Type {
 	// Network events - update connection state machine (via vm-gateway)
-	case EventTypeWireGuardConnected:
+	case EventTypeTunnelConnected:
 		if m.vmGateway != nil {
 			currentState := m.vmGateway.GetConnectionState()
 			if currentState == vmgatewaytypes.ConnectionStateDisconnected {
@@ -1077,7 +1076,7 @@ func (m *StateManagerImpl) updateStateForEvent(ev eventbustypes.Event) (vmgatewa
 				}
 			}
 		}
-	case EventTypeWireGuardDisconnected:
+	case EventTypeTunnelDisconnected:
 		// Note: Frame processing continues even when disconnected - Edge should monitor security zone independently
 		// Security events will be queued and synced when connection is restored
 		if m.vmGateway != nil {
@@ -1085,7 +1084,7 @@ func (m *StateManagerImpl) updateStateForEvent(ev eventbustypes.Event) (vmgatewa
 				m.logger.Warn("Failed to transition to disconnected", zap.Error(err))
 			}
 		}
-	case EventTypeHTTPSConnected:
+	case EventTypeTransportConnected:
 		if m.vmGateway != nil {
 			currentState := m.vmGateway.GetConnectionState()
 			if currentState == vmgatewaytypes.ConnectionStateWireGuardConnected {
@@ -1098,7 +1097,7 @@ func (m *StateManagerImpl) updateStateForEvent(ev eventbustypes.Event) (vmgatewa
 				}
 			}
 		}
-	case EventTypeHTTPSDisconnected:
+	case EventTypeTransportDisconnected:
 		if m.vmGateway != nil {
 			currentState := m.vmGateway.GetConnectionState()
 			if currentState == vmgatewaytypes.ConnectionStateHTTPSConnected || currentState == vmgatewaytypes.ConnectionStateAuthenticated {
@@ -1129,7 +1128,7 @@ func (m *StateManagerImpl) updateStateForEvent(ev eventbustypes.Event) (vmgatewa
 		}
 
 	// Camera events - update camera state machines
-	case EventTypeCameraDiscovered:
+	case EventTypeDeviceDiscovered:
 		if cameraID, ok := ev.Data["camera_id"].(string); ok {
 			cameraSM := m.getOrCreateCameraStateMachine(cameraID)
 			if cameraSM == nil {
@@ -1147,17 +1146,17 @@ func (m *StateManagerImpl) updateStateForEvent(ev eventbustypes.Event) (vmgatewa
 				}
 			}
 		}
-	case EventTypeCameraRegistered:
+	case EventTypeDeviceRegistered:
 		if cameraID, ok := ev.Data["camera_id"].(string); ok {
 			m.logger.Info("Camera registered", zap.String("camera_id", cameraID))
 			// State updated via workflow
 		}
-	case EventTypeCameraConnected:
+	case EventTypeDeviceConnected:
 		if cameraID, ok := ev.Data["camera_id"].(string); ok {
 			m.logger.Info("Camera connected", zap.String("camera_id", cameraID))
 			// State updated via workflow
 		}
-	case EventTypeCameraDisconnected:
+	case EventTypeDeviceDisconnected:
 		if cameraID, ok := ev.Data["camera_id"].(string); ok {
 			cameraSM := m.getCameraStateMachine(cameraID)
 			if cameraSM != nil {
@@ -1171,7 +1170,7 @@ func (m *StateManagerImpl) updateStateForEvent(ev eventbustypes.Event) (vmgatewa
 		}
 
 	// Snapshot request events - update camera state machines
-	case EventTypeSnapshotRequested:
+	case EventTypeDataUnitRequested:
 		if cameraID, ok := ev.Data["camera_id"].(string); ok {
 			cameraSM := m.getOrCreateCameraStateMachine(cameraID)
 			if cameraSM == nil {
@@ -1190,7 +1189,7 @@ func (m *StateManagerImpl) updateStateForEvent(ev eventbustypes.Event) (vmgatewa
 				}
 			}
 		}
-	case EventTypeScreenshotSetReady:
+	case EventTypeDataUnitSetReady:
 		if cameraID, ok := ev.Data["camera_id"].(string); ok {
 			cameraSM := m.getOrCreateCameraStateMachine(cameraID)
 			if cameraSM == nil {
@@ -1233,15 +1232,15 @@ func (m *StateManagerImpl) updateStateForEvent(ev eventbustypes.Event) (vmgatewa
 		m.logger.Warn("Storage full, may need cleanup")
 
 	// Video events
-	case EventTypeFrameReceived:
+	case EventTypeRawDeviceDataFrameReceived:
 		// Track frame processing
-	case EventTypeClipRecorded:
+	case EventTypeRawDeviceDataClipRecorded:
 		if cameraID, ok := ev.Data["camera_id"].(string); ok {
 			m.logger.Debug("Clip recorded", zap.String("camera_id", cameraID))
 		}
 
 	// Screenshot events
-	case EventTypeScreenshotSaved:
+	case EventTypeDataUnitSaved:
 		if cameraID, ok := ev.Data["camera_id"].(string); ok {
 			m.logger.Debug("Screenshot saved", zap.String("camera_id", cameraID))
 		}
@@ -1294,11 +1293,11 @@ func (m *StateManagerImpl) updateStateForEvent(ev eventbustypes.Event) (vmgatewa
 func (m *StateManagerImpl) executeWorkflow(ctx context.Context, ev eventbustypes.Event, connectionState vmgatewaytypes.ConnectionState, cameraStates map[string]types.CameraState) {
 	switch ev.Type {
 	// Network workflow
-	case EventTypeWireGuardConnected:
+	case EventTypeTunnelConnected:
 		m.logger.Info("WireGuard connected, waiting for HTTPS connection")
 		// Workflow: WireGuard -> HTTPS -> Auth -> Capabilities -> Camera Discovery -> Camera Sync -> Screenshot Set Ready
 
-	case EventTypeHTTPSConnected:
+	case EventTypeTransportConnected:
 		m.logger.Info("HTTPS connected, initiating authentication")
 		// Workflow: Trigger authentication if needed
 
@@ -1320,22 +1319,22 @@ func (m *StateManagerImpl) executeWorkflow(ctx context.Context, ev eventbustypes
 		m.handleCapabilitiesReceived(ctx, ev)
 
 	// Camera workflow
-	case EventTypeCameraDiscovered:
+	case EventTypeDeviceDiscovered:
 		m.logger.Info("Cameras discovered, updating state")
 		m.handleCameraDiscovered(ctx, ev)
 
 	// Snapshot request workflow (VM asks Edge/user for labeled screenshots)
-	case EventTypeSnapshotRequested:
+	case EventTypeDataUnitRequested:
 		m.logger.Info("Snapshot request received from VM, saving to meta-storage and updating state")
 		m.handleSnapshotRequested(ctx, ev)
 
-	case EventTypeScreenshotSetReady:
+	case EventTypeDataUnitSetReady:
 		m.logger.Info("Screenshot set marked as ready by user")
 		m.handleScreenshotSetReady(ctx, ev)
 
-	case EventTypeCameraRegistered:
+	case EventTypeDeviceRegistered:
 		m.handleCameraRegistered(ctx, ev)
-	case EventTypeCameraConnected:
+	case EventTypeDeviceConnected:
 		m.handleCameraConnected(ctx, ev)
 
 	// AI workflow
@@ -1354,13 +1353,13 @@ func (m *StateManagerImpl) executeWorkflow(ctx context.Context, ev eventbustypes
 		m.handleStorageFull(ctx, ev)
 
 	// Video workflow
-	case EventTypeFrameReceived:
+	case EventTypeRawDeviceDataFrameReceived:
 		// Frames are handled by AI gateway automatically
-	case EventTypeClipRecorded:
+	case EventTypeRawDeviceDataClipRecorded:
 		m.handleClipRecorded(ctx, ev)
 
 	// Screenshot workflow
-	case EventTypeScreenshotSaved:
+	case EventTypeDataUnitSaved:
 		m.handleScreenshotSaved(ctx, ev)
 
 	// Model deployment workflow
@@ -1439,7 +1438,7 @@ func (m *StateManagerImpl) initializeServicesAfterAuth(ctx context.Context) {
 		// Type assertion would be done here if we had the interface
 		// For now, we'll publish an event to trigger discovery
 		m.eventBus.Publish(eventbustypes.Event{
-			Type:      "workflow.camera.discover",
+			Type:      eventbustypes.EventTypeWorkflowDeviceDiscover,
 			Source:    "edge-state-manager",
 			Timestamp: time.Now(),
 			Data:      make(map[string]interface{}),
@@ -1672,18 +1671,19 @@ func (m *StateManagerImpl) syncScreenshotsToVM(ctx context.Context, cameraID str
 		return
 	}
 
-	// Filter to only labeled screenshots and fetch image data
-	labeledScreenshots := make([]*httpsclienttypes.ScreenshotInfo, 0)
+	// Filter to only labeled data units and fetch raw data
+	// Note: Currently screenshots (images) from cameras, but device-agnostic for future IoT support
+	labeledDataUnits := make([]*vmgatewaytypes.DataUnitInfo, 0)
 	for _, ss := range screenshots {
 		if ss.Label == "" {
-			continue // Skip unlabeled screenshots
+			continue // Skip unlabeled data units
 		}
 
-		// Convert to ScreenshotInfo format
-		screenshotInfo := &httpsclienttypes.ScreenshotInfo{
-			ScreenshotID: ss.ID,
-			CameraID:     ss.CameraID,
-			ObjectKey:    ss.ObjectKey, // Path to image in object storage
+		// Convert to DataUnitInfo format (device-agnostic)
+		dataUnitInfo := &vmgatewaytypes.DataUnitInfo{
+			DataUnitID:   ss.ID,
+			DeviceID:     ss.CameraID, // Map CameraID to DeviceID for device-agnostic API
+			ObjectKey:    ss.ObjectKey, // Path to data in object storage
 			Label:        ss.Label,
 			CustomLabel:  ss.CustomLabel,
 			Description:  ss.Description,
@@ -1692,96 +1692,100 @@ func (m *StateManagerImpl) syncScreenshotsToVM(ctx context.Context, cameraID str
 
 		// Add metadata if available
 		if ss.Metadata != nil {
-			screenshotInfo.Metadata = ss.Metadata
+			dataUnitInfo.Metadata = ss.Metadata
 		}
 
-		// Fetch image data from object storage
+		// Fetch raw data from object storage (currently images, but device-agnostic)
 		if ss.ObjectKey != "" && m.objectStorage != nil {
 			reader, err := m.objectStorage.LoadSnapshot(ctx, ss.ObjectKey)
 			if err != nil {
-				m.logger.Warn("Failed to load screenshot image from object storage",
-					zap.String("screenshot_id", ss.ID),
+				m.logger.Warn("Failed to load data unit from object storage",
+					zap.String("data_unit_id", ss.ID),
 					zap.String("object_key", ss.ObjectKey),
 					zap.Error(err),
 				)
 			} else {
-				// Read image data
-				imageData, err := io.ReadAll(reader)
+				// Read raw data
+				rawData, err := io.ReadAll(reader)
 				reader.Close()
 				if err != nil {
-					m.logger.Warn("Failed to read screenshot image data",
-						zap.String("screenshot_id", ss.ID),
+					m.logger.Warn("Failed to read data unit raw data",
+						zap.String("data_unit_id", ss.ID),
 						zap.Error(err),
 					)
 				} else {
 					// Encode as base64
-					screenshotInfo.ImageData = base64.StdEncoding.EncodeToString(imageData)
+					dataUnitInfo.RawData = base64.StdEncoding.EncodeToString(rawData)
 
-					// Determine image format from object key extension
+					// Determine data format from object key extension (device-agnostic)
 					ext := strings.ToLower(filepath.Ext(ss.ObjectKey))
 					switch ext {
 					case ".jpg", ".jpeg":
-						screenshotInfo.ImageFormat = "jpeg"
+						dataUnitInfo.RawDataFormat = "jpeg"
 					case ".png":
-						screenshotInfo.ImageFormat = "png"
+						dataUnitInfo.RawDataFormat = "png"
 					case ".gif":
-						screenshotInfo.ImageFormat = "gif"
+						dataUnitInfo.RawDataFormat = "gif"
 					case ".webp":
-						screenshotInfo.ImageFormat = "webp"
+						dataUnitInfo.RawDataFormat = "webp"
+					case ".json":
+						dataUnitInfo.RawDataFormat = "json"
+					case ".wav":
+						dataUnitInfo.RawDataFormat = "wav"
 					default:
-						screenshotInfo.ImageFormat = "jpeg" // Default to JPEG
+						dataUnitInfo.RawDataFormat = "jpeg" // Default to JPEG for cameras
 					}
 				}
 			}
 		}
 
-		labeledScreenshots = append(labeledScreenshots, screenshotInfo)
+		labeledDataUnits = append(labeledDataUnits, dataUnitInfo)
 	}
 
-	if len(labeledScreenshots) == 0 {
-		m.logger.Warn("No labeled screenshots found for camera",
-			zap.String("camera_id", cameraID),
+	if len(labeledDataUnits) == 0 {
+		m.logger.Warn("No labeled data units found for device",
+			zap.String("device_id", cameraID),
 		)
 		return
 	}
 
-	m.logger.Info("Prepared labeled screenshots for sync",
-		zap.String("camera_id", cameraID),
-		zap.Int("count", len(labeledScreenshots)),
+	m.logger.Info("Prepared labeled data units for sync",
+		zap.String("device_id", cameraID),
+		zap.Int("count", len(labeledDataUnits)),
 	)
 
 	// Get edge ID from state manager
 	edgeID := m.edgeID
 	if edgeID == "" {
-		m.logger.Warn("Edge ID not available, cannot sync screenshots")
+		m.logger.Warn("Edge ID not available, cannot sync data units")
 		return
 	}
 
-	// Batch screenshots to avoid loading all into memory at once
-	// Process in batches of 20 screenshots
+	// Batch data units to avoid loading all into memory at once
+	// Process in batches of 20 data units
 	batchSize := 20
-	for i := 0; i < len(labeledScreenshots); i += batchSize {
+	for i := 0; i < len(labeledDataUnits); i += batchSize {
 		end := i + batchSize
-		if end > len(labeledScreenshots) {
-			end = len(labeledScreenshots)
+		if end > len(labeledDataUnits) {
+			end = len(labeledDataUnits)
 		}
-		batch := labeledScreenshots[i:end]
+		batch := labeledDataUnits[i:end]
 
-		// Create sync request for this batch
-		req := &httpsclienttypes.SyncScreenshotsRequest{
-			EdgeID:      edgeID,
-			CameraID:    cameraID,
-			Screenshots: batch,
+		// Create sync request for this batch (device-agnostic)
+		req := &vmgatewaytypes.SyncDataUnitsRequest{
+			EdgeID:    edgeID,
+			DeviceID:  cameraID, // Device that produced the data units
+			DataUnits: batch,
 		}
 
-		// Call VM gateway to sync screenshots batch
+		// Call VM gateway to sync data units batch
 		callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		resp, err := m.vmGateway.SyncScreenshots(callCtx, req)
+		resp, err := m.vmGateway.SyncDataUnits(callCtx, req)
 		cancel()
 
 		if err != nil {
-			m.logger.Error("Failed to sync screenshot batch to VM",
-				zap.String("camera_id", cameraID),
+			m.logger.Error("Failed to sync data unit batch to VM",
+				zap.String("device_id", cameraID),
 				zap.Int("batch_start", i),
 				zap.Int("batch_size", len(batch)),
 				zap.Error(err),
@@ -1802,7 +1806,7 @@ func (m *StateManagerImpl) syncScreenshotsToVM(ctx context.Context, cameraID str
 		}
 
 		if !resp.Success {
-			m.logger.Error("VM rejected screenshot batch sync",
+			m.logger.Error("VM rejected data unit batch sync",
 				zap.String("camera_id", cameraID),
 				zap.Int("batch_start", i),
 				zap.Int("batch_size", len(batch)),
@@ -1823,8 +1827,8 @@ func (m *StateManagerImpl) syncScreenshotsToVM(ctx context.Context, cameraID str
 			return
 		}
 
-		m.logger.Info("Screenshot batch synced to VM successfully",
-			zap.String("camera_id", cameraID),
+		m.logger.Info("Data unit batch synced to VM successfully",
+			zap.String("device_id", cameraID),
 			zap.Int("batch_start", i),
 			zap.Int("batch_size", len(batch)),
 		)
@@ -1835,9 +1839,9 @@ func (m *StateManagerImpl) syncScreenshotsToVM(ctx context.Context, cameraID str
 	m.lastScreenshotSync[cameraID] = time.Now()
 	m.screenshotSyncMu.Unlock()
 
-	m.logger.Info("All screenshot batches synced to VM successfully",
-		zap.String("camera_id", cameraID),
-		zap.Int("total_count", len(labeledScreenshots)),
+	m.logger.Info("All data unit batches synced to VM successfully",
+		zap.String("device_id", cameraID),
+		zap.Int("total_count", len(labeledDataUnits)),
 	)
 }
 
@@ -1858,7 +1862,8 @@ func (m *StateManagerImpl) syncCamerasWithVM(ctx context.Context) {
 	}
 
 	// Convert cameras to sync request format
-	cameraInfos := make([]*httpsclienttypes.CameraInfo, 0, len(cameras))
+	// Build device-agnostic device info list (currently cameras, but supports other IoT devices)
+	deviceInfos := make([]*vmgatewaytypes.DeviceInfo, 0, len(cameras))
 	for _, cam := range cameras {
 		// Determine source based on camera type
 		source := ""
@@ -1870,8 +1875,8 @@ func (m *StateManagerImpl) syncCamerasWithVM(ctx context.Context) {
 			source = cam.IPAddress
 		}
 
-		cameraInfos = append(cameraInfos, &httpsclienttypes.CameraInfo{
-			CameraID: cam.ID,
+		deviceInfos = append(deviceInfos, &vmgatewaytypes.DeviceInfo{
+			DeviceID: cam.ID,
 			Name:     cam.Name,
 			Type:     string(cam.Type),
 			Source:   source,
@@ -1885,13 +1890,13 @@ func (m *StateManagerImpl) syncCamerasWithVM(ctx context.Context) {
 		edgeID = "edge-dev-001" // fallback
 	}
 
-	// Sync cameras with VM
-	syncReq := &httpsclienttypes.SyncCamerasRequest{
+	// Sync devices with VM (device-agnostic, currently cameras)
+	syncReq := &vmgatewaytypes.SyncDevicesRequest{
 		EdgeID:  edgeID,
-		Cameras: cameraInfos,
+		Devices: deviceInfos,
 	}
 
-	syncResp, err := m.vmGateway.SyncCameras(ctx, syncReq)
+	syncResp, err := m.vmGateway.SyncDevices(ctx, syncReq)
 	if err != nil {
 		m.logger.Error("Failed to sync cameras with VM", zap.Error(err))
 		// On error, set connection state to error
@@ -1905,33 +1910,34 @@ func (m *StateManagerImpl) syncCamerasWithVM(ctx context.Context) {
 	}
 
 	if !syncResp.Success {
-		m.logger.Error("Camera sync failed", zap.String("error", syncResp.ErrorMessage))
+		m.logger.Error("Device sync failed", zap.String("error", syncResp.ErrorMessage))
 		// On sync failure, set connection state to error
 		if m.vmGateway != nil {
 			_ = m.vmGateway.TransitionConnectionState(vmgatewaytypes.ConnectionStateError, fmt.Sprintf("VM gateway error: %s", syncResp.ErrorMessage))
 		}
 		connectionState := m.getConnectionState()
 		m.persistStateToStorage(ctx, connectionState, nil)
-		m.logger.Error("Connection state updated to error due to camera sync failure")
+		m.logger.Error("Connection state updated to error due to device sync failure")
 		return
 	}
 
-	m.logger.Info("Cameras synced with VM successfully",
-		zap.Int("total_cameras", len(cameras)),
-		zap.Int("enabled_cameras", len(syncResp.EnabledCameras)),
+	m.logger.Info("Devices synced with VM successfully",
+		zap.Int("total_devices", len(cameras)),
+		zap.Int("enabled_devices", len(syncResp.EnabledDevices)),
 	)
 
-	// Enable cameras that VM decided to enable
-	for _, enabledCam := range syncResp.EnabledCameras {
-		if enabledCam.Enabled {
-			if err := m.cctvService.EnableCamera(ctx, enabledCam.CameraID); err != nil {
-				m.logger.Warn("Failed to enable camera",
-					zap.String("camera_id", enabledCam.CameraID),
+	// Enable devices that VM decided to enable (currently cameras, but device-agnostic)
+	for _, enabledDev := range syncResp.EnabledDevices {
+		if enabledDev.Enabled {
+			// For now, all devices are cameras, but this is device-agnostic for future IoT support
+			if err := m.cctvService.EnableCamera(ctx, enabledDev.DeviceID); err != nil {
+				m.logger.Warn("Failed to enable device",
+					zap.String("device_id", enabledDev.DeviceID),
 					zap.Error(err),
 				)
 			} else {
-				m.logger.Info("Camera enabled by VM decision",
-					zap.String("camera_id", enabledCam.CameraID),
+				m.logger.Info("Device enabled by VM decision",
+					zap.String("device_id", enabledDev.DeviceID),
 				)
 			}
 		}
@@ -2324,9 +2330,9 @@ func (m *StateManagerImpl) handleModelDeploymentStatus(ctx context.Context, ev e
 		return
 	}
 
-	// Check if HTTPS is connected (required for reporting status)
-	if !m.vmGateway.IsHTTPConnected() {
-		m.logger.Debug("HTTPS not connected, cannot report deployment status",
+	// Check if transport is connected (required for reporting status)
+	if !m.vmGateway.IsTransportConnected() {
+		m.logger.Debug("Transport not connected, cannot report deployment status",
 			zap.String("deployment_id", deploymentID),
 		)
 		// Don't log as warning - this is expected during disconnection
@@ -3577,8 +3583,8 @@ func (m *StateManagerImpl) SyncCameraCapabilities(ctx context.Context, cameraID 
 		return fmt.Errorf("VM gateway not available")
 	}
 
-	if m.vmGateway == nil || !m.vmGateway.IsHTTPConnected() {
-		return fmt.Errorf("HTTPS not connected")
+	if m.vmGateway == nil || !m.vmGateway.IsTransportConnected() {
+		return fmt.Errorf("transport not connected")
 	}
 
 	// Get camera
@@ -3597,10 +3603,10 @@ func (m *StateManagerImpl) SyncCameraCapabilities(ctx context.Context, cameraID 
 		return fmt.Errorf("failed to build dataset status")
 	}
 
-	// Build sync request with single camera
-	req := &httpsclienttypes.SyncCapabilitiesRequest{
+	// Build sync request with single device (camera)
+	req := &vmgatewaytypes.SyncCapabilitiesRequest{
 		SyncedAt: time.Now().UnixNano(),
-		Cameras:  []*httpsclienttypes.CameraCapability{m.toCameraCapability(cam, status)},
+		Devices:  []*vmgatewaytypes.DeviceCapability{m.toDeviceCapability(cam, status)},
 	}
 
 	// Call SyncCapabilities with timeout
@@ -3656,9 +3662,9 @@ func (m *StateManagerImpl) capabilitySyncLoop(ctx context.Context) {
 
 // syncOnce performs a single capability sync for all cameras
 func (m *StateManagerImpl) syncOnce(ctx context.Context) {
-	// Check HTTPS connection first
-	if m.vmGateway == nil || !m.vmGateway.IsHTTPConnected() {
-		m.logger.Debug("Skipping capability sync - HTTPS not connected (will retry when connection is ready)")
+	// Check transport connection first
+	if m.vmGateway == nil || !m.vmGateway.IsTransportConnected() {
+		m.logger.Debug("Skipping capability sync - transport not connected (will retry when connection is ready)")
 		m.pendingSyncMu.Lock()
 		m.pendingSync = true // Mark as pending so we retry when connection is ready
 		m.pendingSyncMu.Unlock()
@@ -3691,8 +3697,9 @@ func (m *StateManagerImpl) syncOnce(ctx context.Context) {
 		zap.Int("camera_count", len(cameras)),
 	)
 
-	req := &httpsclienttypes.SyncCapabilitiesRequest{
+	req := &vmgatewaytypes.SyncCapabilitiesRequest{
 		SyncedAt: time.Now().UnixNano(),
+		Devices:  []*vmgatewaytypes.DeviceCapability{},
 	}
 
 	// Track which cameras have changed since last sync
@@ -3714,13 +3721,13 @@ func (m *StateManagerImpl) syncOnce(ctx context.Context) {
 		if shouldSync {
 			status := m.buildDatasetStatus(ctx, cam)
 			if status != nil {
-				req.Cameras = append(req.Cameras, m.toCameraCapability(cam, status))
+				req.Devices = append(req.Devices, m.toDeviceCapability(cam, status))
 				changedCameras[cam.ID] = true
 			}
 		}
 	}
 
-	if len(req.Cameras) == 0 {
+	if len(req.Devices) == 0 {
 		return
 	}
 
@@ -3791,8 +3798,8 @@ func (m *StateManagerImpl) syncOnce(ctx context.Context) {
 	}
 
 	m.logger.Info("Capability sync sent successfully",
-		zap.Int("cameras", len(req.Cameras)),
-		zap.Int("changed_cameras", len(changedCameras)),
+		zap.Int("devices", len(req.Devices)),
+		zap.Int("changed_devices", len(changedCameras)),
 	)
 }
 
@@ -3824,9 +3831,10 @@ func (m *StateManagerImpl) buildDatasetStatus(ctx context.Context, cam *cctvtype
 	return datasetStatus
 }
 
-// toCameraCapability converts a camera and dataset status to a DTO format
+// toDeviceCapability converts a camera and dataset status to a device-agnostic DTO format
 // used for capability sync over HTTPS.
-func (m *StateManagerImpl) toCameraCapability(cam *cctvtypes.Camera, status *cctvtypes.DatasetStatus) *httpsclienttypes.CameraCapability {
+// Note: Currently used for cameras, but designed to be device-agnostic for future IoT device support.
+func (m *StateManagerImpl) toDeviceCapability(cam *cctvtypes.Camera, status *cctvtypes.DatasetStatus) *vmgatewaytypes.DeviceCapability {
 	labelCounts := make(map[string]uint32, len(status.LabelCounts))
 	for label, count := range status.LabelCounts {
 		if count < 0 {
@@ -3835,8 +3843,8 @@ func (m *StateManagerImpl) toCameraCapability(cam *cctvtypes.Camera, status *cct
 		labelCounts[label] = uint32(count)
 	}
 
-	return &httpsclienttypes.CameraCapability{
-		CameraID:              cam.ID,
+	return &vmgatewaytypes.DeviceCapability{
+		DeviceID:              cam.ID,
 		Name:                  cam.Name,
 		Type:                  string(cam.Type),
 		Enabled:               cam.Enabled,
@@ -4355,9 +4363,9 @@ func (m *StateManagerImpl) ReportStatus(ctx context.Context, deploymentID string
 		return fmt.Errorf("VM gateway not available")
 	}
 
-	if !m.vmGateway.IsHTTPConnected() {
+	if !m.vmGateway.IsTransportConnected() {
 		// Queue for retry when connection is available
-		m.logger.Debug("HTTPS not connected, deployment status will be retried when connection is available",
+		m.logger.Debug("Transport not connected, deployment status will be retried when connection is available",
 			zap.String("deployment_id", deploymentID),
 			zap.String("status", status),
 		)

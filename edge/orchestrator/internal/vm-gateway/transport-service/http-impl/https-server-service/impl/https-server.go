@@ -17,27 +17,22 @@ import (
 
 	eventbus "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/event-bus"
 	evtbusstypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/event-bus/types"
-	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/iot/cctv"
 	metastorage "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/meta-storage"
 	objectstorage "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/object-storage"
-	httpsservertypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/vm-gateway/http-impl/https-server-service/types"
-	wgclienttypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/vm-gateway/wg-client-service/types"
+	httpsservertypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/vm-gateway/transport-service/http-impl/https-server-service/types"
+	tunnelclient "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/vm-gateway/tunnel-client-service"
 	"go.uber.org/zap"
 )
 
 // HTTPServer implements Edge-side HTTPS server for VM to call Edge
-// All traffic routes through WireGuard tunnel (or localhost for development)
+// All traffic routes through tunnel (WireGuard, OpenVPN, etc.) or localhost for development
 type HTTPServer struct {
-	serverCfg *httpsservertypes.HTTPServerConfig
-	wgCfg     *wgclienttypes.WGClientConfig
-	wgClient  interface { // WireGuard client for checking interface status
-		GetInterfaceName() string
-	}
+	serverCfg     *httpsservertypes.HTTPServerConfig
+	tunnelClient  tunnelclient.TunnelClientService // Tunnel client for checking interface status and connection state
 	logger        *zap.Logger
 	eventBus      eventbus.EventBus // Optional: for publishing events
 	httpServer    *http.Server
 	listener      net.Listener
-	cctvService   cctv.CCTVService // Optional: for snapshot capture (replaces snapshot_request.Service)
 	metaStorage   metastorage.MetaDataStore
 	objectStorage objectstorage.ObjectStorageService
 	edgeID        string // Edge ID for GetConfig
@@ -47,20 +42,16 @@ type HTTPServer struct {
 // NewHTTPServer creates a new HTTPS server for Edge
 func NewHTTPServer(
 	serverCfg *httpsservertypes.HTTPServerConfig,
-	wgCfg *wgclienttypes.WGClientConfig,
 	log *zap.Logger,
 	edgeID string, // Edge ID for GetConfig
-	wgClient interface { // WireGuard client for checking interface status
-		GetInterfaceName() string
-	},
+	tunnelClient tunnelclient.TunnelClientService, // Tunnel client for checking interface status and connection state
 	metaStore metastorage.MetaDataStore,
 	objectStore objectstorage.ObjectStorageService,
 	eventBus eventbus.EventBus,
 ) *HTTPServer {
 	return &HTTPServer{
 		serverCfg:     serverCfg,
-		wgCfg:         wgCfg,
-		wgClient:      wgClient,
+		tunnelClient:  tunnelClient,
 		logger:        log,
 		edgeID:        edgeID,
 		metaStorage:   metaStore,
@@ -70,21 +61,22 @@ func NewHTTPServer(
 }
 
 // deployModel deploys a model using meta-storage and object-storage
-func (s *HTTPServer) deployModel(ctx context.Context, modelID string, deploymentID *string, edgeID string, cameraID *string, modelData []byte, metadata map[string]interface{}) (string, error) {
+// deviceID is required - models are trained on specific device datasets and must be associated with a device
+func (s *HTTPServer) deployModel(ctx context.Context, modelID string, deploymentID *string, edgeID string, deviceID string, modelData []byte, metadata httpsservertypes.ModelDeploymentMetadata) (string, error) {
 	if s.metaStorage == nil || s.objectStorage == nil {
 		return "", fmt.Errorf("meta-storage or object-storage not available")
 	}
 
-	// Extract metadata fields
-	version, _ := metadata["version"].(string)
+	// Set defaults for metadata fields
+	version := metadata.Version
 	if version == "" {
 		version = "1.0"
 	}
-	modelType, _ := metadata["model_type"].(string)
+	modelType := metadata.ModelType
 	if modelType == "" {
 		modelType = "yolo"
 	}
-	framework, _ := metadata["framework"].(string)
+	framework := metadata.Framework
 	if framework == "" {
 		framework = "onnx"
 	}
@@ -94,25 +86,26 @@ func (s *HTTPServer) deployModel(ctx context.Context, modelID string, deployment
 	metadataKey := fmt.Sprintf("models/%s/metadata.json", modelID)
 
 	// Prepare metadata JSON for object storage
+	deviceIDPtr := &deviceID // Convert to pointer for JSON storage
 	metadataJSON := map[string]interface{}{
 		"model_id":    modelID,
 		"version":     version,
 		"model_type":  modelType,
 		"framework":   framework,
-		"camera_id":   cameraID,
+		"device_id":   deviceIDPtr,
 		"deployed_at": time.Now().Format(time.RFC3339),
 	}
-	if trainingDatasetID, ok := metadata["training_dataset_id"].(string); ok {
-		metadataJSON["training_dataset_id"] = trainingDatasetID
+	if metadata.TrainingDatasetID != "" {
+		metadataJSON["training_dataset_id"] = metadata.TrainingDatasetID
 	}
-	if trainingDate, ok := metadata["training_date"].(string); ok {
-		metadataJSON["training_date"] = trainingDate
+	if metadata.TrainingDate != "" {
+		metadataJSON["training_date"] = metadata.TrainingDate
 	}
-	if inputShape, ok := metadata["input_shape"].([]interface{}); ok {
-		metadataJSON["input_shape"] = inputShape
+	if len(metadata.InputShape) > 0 {
+		metadataJSON["input_shape"] = metadata.InputShape
 	}
-	if preprocessing, ok := metadata["preprocessing"].(map[string]interface{}); ok {
-		metadataJSON["preprocessing"] = preprocessing
+	if len(metadata.Preprocessing) > 0 {
+		metadataJSON["preprocessing"] = metadata.Preprocessing
 	}
 
 	metadataJSONBytes, err := json.Marshal(metadataJSON)
@@ -135,7 +128,7 @@ func (s *HTTPServer) deployModel(ctx context.Context, modelID string, deployment
 		DeployedAt:   now,
 		Status:       "active",
 		EdgeID:       edgeID,
-		CameraID:     cameraID,
+		CameraID:     deviceIDPtr, // TODO: MetaStorage should be updated to use DeviceID field name (reusing pointer from above)
 		Version:      version,
 		ModelType:    modelType,
 		Framework:    framework,
@@ -152,13 +145,6 @@ func (s *HTTPServer) deployModel(ctx context.Context, modelID string, deployment
 	return modelKey, nil
 }
 
-// SetCCTVService sets the CCTV service for snapshot capture (replaces snapshot_request.Service)
-func (s *HTTPServer) SetCCTVService(cctvSvc cctv.CCTVService) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.cctvService = cctvSvc
-}
-
 // Name returns the service name
 func (s *HTTPServer) Name() string {
 	return "https-server"
@@ -172,52 +158,52 @@ func (s *HTTPServer) Start(ctx context.Context) error {
 	// Use config values with defaults
 	listenAddr := s.serverCfg.ListenAddress
 	if listenAddr == "" {
-		// Default to WireGuard IP for production, localhost for dev
-		if s.wgCfg != nil && s.wgCfg.Enabled {
+		// Default to tunnel IP for production, localhost for dev
+		if s.isTunnelEnabled() {
 			listenAddr = "10.0.0.2:8443"
 		} else {
 			listenAddr = "localhost:8443" // Development mode
 		}
 	}
 
-	// For development mode (WireGuard disabled), allow localhost addresses
-	if s.wgCfg != nil && !s.wgCfg.Enabled {
-		// Allow localhost, 127.0.0.1, or 0.0.0.0 for dev mode
+	// For development mode (tunnel disabled), allow localhost addresses only
+	// Note: 0.0.0.0 is not allowed for security reasons (binds to all interfaces)
+	if !s.isTunnelEnabled() {
 		host, _, err := net.SplitHostPort(listenAddr)
 		if err != nil {
 			return fmt.Errorf("invalid listen address: %w", err)
 		}
-		isLocalhost := host == "localhost" || host == "127.0.0.1" || host == "0.0.0.0" || host == ""
+		isLocalhost := host == "localhost" || host == "127.0.0.1" || host == ""
 		if !isLocalhost {
-			s.logger.Info("HTTPS server disabled in dev mode - must use localhost address when WireGuard is disabled",
+			s.logger.Info("HTTPS server disabled in dev mode - must use localhost address when tunnel is disabled",
 				zap.String("listen_address", listenAddr))
 			return nil
 		}
 	}
 
-	maxWait := s.serverCfg.WireGuardInterfaceWaitTimeout
+	maxWait := s.serverCfg.TunnelInterfaceWaitTimeout
 	if maxWait == 0 {
 		maxWait = 30 * time.Second
 	}
-	waitInterval := s.serverCfg.WireGuardInterfaceCheckInterval
+	waitInterval := s.serverCfg.TunnelInterfaceCheckInterval
 	if waitInterval == 0 {
 		waitInterval = 500 * time.Millisecond
 	}
 
 	s.logger.Info("Starting Edge HTTPS server", zap.String("address", listenAddr))
 
-	// Wait for WireGuard interface only if WireGuard is enabled and not localhost
+	// Wait for tunnel interface only if tunnel is enabled and not localhost
 	host, _, _ := net.SplitHostPort(listenAddr)
-	if s.wgCfg != nil && s.wgCfg.Enabled && host != "localhost" && host != "127.0.0.1" {
+	if s.isTunnelEnabled() && host != "localhost" && host != "127.0.0.1" {
 		waited := time.Duration(0)
 		for waited < maxWait {
-			if s.isWireGuardInterfaceReady(host) {
-				s.logger.Info("WireGuard interface is ready", zap.String("address", listenAddr))
+			if s.isTunnelInterfaceReady(host) {
+				s.logger.Info("Tunnel interface is ready", zap.String("address", listenAddr))
 				break
 			}
 
 			if waited > 0 {
-				s.logger.Debug("Waiting for WireGuard interface to be ready",
+				s.logger.Debug("Waiting for tunnel interface to be ready",
 					zap.String("address", listenAddr),
 					zap.Duration("waited", waited))
 			}
@@ -227,7 +213,7 @@ func (s *HTTPServer) Start(ctx context.Context) error {
 		}
 
 		if waited >= maxWait {
-			s.logger.Info("WireGuard interface not ready after waiting, attempting to bind anyway",
+			s.logger.Info("Tunnel interface not ready after waiting, attempting to bind anyway",
 				zap.String("address", listenAddr),
 				zap.Duration("waited", waited))
 		}
@@ -244,16 +230,17 @@ func (s *HTTPServer) Start(ctx context.Context) error {
 	serverKeyPath := s.serverCfg.ServerKeyPath
 	caCertPath := s.serverCfg.CACertPath
 
-	// Check if we're in localhost dev mode (WireGuard disabled)
-	isLocalhostMode := s.wgCfg != nil && !s.wgCfg.Enabled
+	// Check if we're in localhost dev mode (tunnel disabled)
+	// Note: 0.0.0.0 is not allowed for security reasons (binds to all interfaces)
+	isLocalhostMode := !s.isTunnelEnabled()
 	if isLocalhostMode && listenAddr != "" {
 		host, _, err := net.SplitHostPort(listenAddr)
 		if err == nil {
-			isLocalhostMode = host == "localhost" || host == "127.0.0.1" || host == "0.0.0.0"
+			isLocalhostMode = host == "localhost" || host == "127.0.0.1"
 		}
 	}
 
-	// Only set defaults if not in localhost mode (production with WireGuard)
+	// Only set defaults if not in localhost mode (production with tunnel)
 	if !isLocalhostMode {
 		if serverCertPath == "" {
 			serverCertPath = "/etc/ssl/certs/edge-server.crt"
@@ -368,11 +355,17 @@ func (s *HTTPServer) Stop(ctx context.Context) error {
 	return nil
 }
 
-// isWireGuardInterfaceReady checks if the WireGuard interface exists and has the specified IP address
-func (s *HTTPServer) isWireGuardInterfaceReady(expectedIP string) bool {
-	// Method 1: Use WireGuard client's interface name if available
-	if s.wgClient != nil {
-		iface := s.wgClient.GetInterfaceName()
+// isTunnelEnabled returns true if tunnel service is enabled and not "none"
+func (s *HTTPServer) isTunnelEnabled() bool {
+	return s.tunnelClient != nil && s.tunnelClient.Name() != "none"
+}
+
+// isTunnelInterfaceReady checks if the tunnel interface exists and has the specified IP address.
+// This is provider-agnostic and works with WireGuard, OpenVPN, IPSec, etc.
+func (s *HTTPServer) isTunnelInterfaceReady(expectedIP string) bool {
+	// Method 1: Use tunnel client's interface name if available
+	if s.tunnelClient != nil {
+		iface := s.tunnelClient.GetInterfaceName()
 		if iface != "" {
 			// Check if interface exists and has the IP address
 			return s.checkInterfaceHasIP(iface, expectedIP)
@@ -381,6 +374,7 @@ func (s *HTTPServer) isWireGuardInterfaceReady(expectedIP string) bool {
 
 	// Method 2: Use system commands to check interface status
 	// Try 'ip addr show' to check if interface exists and has IP
+	// Default to "wg0" for backward compatibility, but this works with any tunnel provider
 	return s.checkInterfaceHasIP("wg0", expectedIP)
 }
 
@@ -420,7 +414,7 @@ func (s *HTTPServer) setupRoutes(mux *http.ServeMux) {
 	// API v1 endpoints
 	mux.HandleFunc("/api/v1/config/get", s.handleGetConfig)
 	mux.HandleFunc("/api/v1/config/update", s.handleUpdateConfig)
-	mux.HandleFunc("/api/v1/snapshots/capture", s.handleRequestSnapshotCapture)
+	mux.HandleFunc("/api/v1/snapshots/capture", s.handleRequestDataUnitCapture) // Data unit capture (device-agnostic)
 	mux.HandleFunc("/api/v1/models/deploy", s.handleDeployModel)
 	mux.HandleFunc("/api/v1/services/restart", s.handleRestartService)
 	mux.HandleFunc("/api/v1/capabilities/sync", s.handleSyncCapabilities)
@@ -500,20 +494,20 @@ func (s *HTTPServer) handleUpdateConfig(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
-// handleRequestSnapshotCapture handles snapshot capture requests from VM
+// handleRequestDataUnitCapture handles data unit capture requests from VM (snapshots, sensor readings, etc.)
 // This replaces the deprecated @snapshot_request package functionality
-func (s *HTTPServer) handleRequestSnapshotCapture(w http.ResponseWriter, r *http.Request) {
+// Supports device-agnostic data capture for any IoT device type
+func (s *HTTPServer) handleRequestDataUnitCapture(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
 	var req struct {
-		CameraID    string `json:"camera_id"`
-		Label       string `json:"label"`
+		DeviceID    string `json:"device_id"` // Device ID (device-agnostic)
+		Label       string `json:"label"`     // Suggested label (user will verify via UI)
 		CustomLabel string `json:"custom_label"`
 		Count       int32  `json:"count"`
-		AutoCapture bool   `json:"auto_capture"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -521,18 +515,22 @@ func (s *HTTPServer) handleRequestSnapshotCapture(w http.ResponseWriter, r *http
 		return
 	}
 
-	if req.CameraID == "" {
-		s.sendErrorResponse(w, http.StatusBadRequest, "camera_id is required")
+	if req.DeviceID == "" {
+		s.sendErrorResponse(w, http.StatusBadRequest, "device_id is required")
 		return
 	}
 
+	deviceID := req.DeviceID
+
 	ctx := r.Context()
 
-	// Validate camera exists (if CCTV service is available)
-	if s.cctvService != nil {
-		_, err := s.cctvService.GetCamera(ctx, req.CameraID)
-		if err != nil {
-			s.sendErrorResponse(w, http.StatusNotFound, fmt.Sprintf("camera %s not found", req.CameraID))
+	// Validate device exists in IoT inventory (meta-storage is the source of truth for discovered devices)
+	// Note: Currently using GetCamera for device validation (cameras are the primary device type)
+	// TODO: When generic device inventory is available in meta-storage, use GetDevice instead
+	if s.metaStorage != nil {
+		_, found := s.metaStorage.GetCamera(ctx, deviceID)
+		if !found {
+			s.sendErrorResponse(w, http.StatusBadRequest, fmt.Sprintf("device_id '%s' not found in device inventory", deviceID))
 			return
 		}
 	}
@@ -564,67 +562,35 @@ func (s *HTTPServer) handleRequestSnapshotCapture(w http.ResponseWriter, r *http
 		return
 	}
 
-	s.logger.Info("Received snapshot capture request from VM",
-		zap.String("camera_id", req.CameraID),
+	s.logger.Info("Received data unit capture request from VM",
+		zap.String("device_id", deviceID),
 		zap.String("label", label),
-		zap.Int32("count", count),
-		zap.Bool("auto_capture", req.AutoCapture))
+		zap.Int32("count", count))
 
-	// If auto_capture is true, capture snapshots immediately
-	if req.AutoCapture {
-		if s.cctvService == nil {
-			s.sendErrorResponse(w, http.StatusServiceUnavailable, "CCTV service not available for auto-capture")
-			return
-		}
-
-		var snapshotIDs []string
-		for i := int32(0); i < count; i++ {
-			description := fmt.Sprintf("Auto-captured snapshot %d/%d (VM request)", i+1, count)
-			screenshotID, err := s.cctvService.CaptureScreenshotWithLabel(ctx, req.CameraID, label, req.CustomLabel, description)
-			if err != nil {
-				s.logger.Error("Auto-capture failed", zap.Error(err), zap.String("camera_id", req.CameraID), zap.String("label", label), zap.Int32("index", i+1))
-				s.sendErrorResponse(w, http.StatusInternalServerError, fmt.Sprintf("auto-capture failed at snapshot %d/%d: %v", i+1, count, err))
-				return
-			}
-			snapshotIDs = append(snapshotIDs, screenshotID)
-
-			// Small delay between captures
-			if i < count-1 {
-				time.Sleep(500 * time.Millisecond)
-			}
-		}
-
-		s.logger.Info("Auto-captured snapshots successfully",
-			zap.String("camera_id", req.CameraID),
-			zap.Int("count", len(snapshotIDs)),
-			zap.Strings("snapshot_ids", snapshotIDs))
-
-		s.sendSuccessResponse(w, map[string]interface{}{
-			"accepted":     true,
-			"message":      fmt.Sprintf("Captured %d snapshots", len(snapshotIDs)),
-			"snapshot_ids": snapshotIDs,
-		})
-		return
-	}
-
-	// Publish event for state manager to handle pending snapshot request
+	// Always require user verification for training datasets
+	// VM provides a suggested label, but user must verify/correct it via UI before capture
+	// This ensures training data quality and prevents incorrect labels from polluting the dataset
+	// Publish event for state manager to handle pending data unit capture request
 	// State manager will save the request and notify UI
 	if s.eventBus != nil {
-		s.eventBus.Publish(evtbusstypes.Event{
-			Type:      evtbusstypes.EventType("snapshot.requested"),
+		event := evtbusstypes.Event[evtbusstypes.SnapshotRequestedEventData]{
+			Type:      evtbusstypes.EventTypeDataUnitRequested,
 			Source:    s.Name(),
 			Timestamp: time.Now(),
-			Data: map[string]interface{}{
-				"camera_id":    req.CameraID,
-				"label":        label,
-				"custom_label": req.CustomLabel,
-				"count":        count,
+			Data: evtbusstypes.SnapshotRequestedEventData{
+				DeviceID:    deviceID,
+				Label:       label,
+				CustomLabel: req.CustomLabel,
+				Count:       count,
 			},
-		})
+		}
+		if err := eventbus.PublishTyped(s.eventBus, event); err != nil {
+			s.logger.Warn("Failed to publish data unit capture event", zap.Error(err))
+		}
 	}
 
-	s.logger.Info("Stored pending snapshot request for UI",
-		zap.String("camera_id", req.CameraID),
+	s.logger.Info("Stored pending data unit capture request for UI",
+		zap.String("device_id", deviceID),
 		zap.String("label", label),
 		zap.Int32("count", count))
 
@@ -648,8 +614,13 @@ func (s *HTTPServer) handleDeployModel(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
-	// Parse multipart form (max 50MB)
-	if err := r.ParseMultipartForm(50 << 20); err != nil {
+	// Parse multipart form using configured max memory (default: 100MB if not configured)
+	// Note: This is the memory limit for buffering; larger files will be written to temp files on disk
+	maxMemory := s.serverCfg.MultipartFormMaxMemory
+	if maxMemory == 0 {
+		maxMemory = 100 << 20 // Default: 100MB
+	}
+	if err := r.ParseMultipartForm(maxMemory); err != nil {
 		s.sendErrorResponse(w, http.StatusBadRequest, fmt.Sprintf("failed to parse multipart form: %v", err))
 		return
 	}
@@ -661,19 +632,7 @@ func (s *HTTPServer) handleDeployModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var metadata struct {
-		DeploymentID      string                 `json:"deployment_id"`
-		ModelID           string                 `json:"model_id"`
-		Version           string                 `json:"version"`
-		ModelType         string                 `json:"model_type"`
-		CameraID          string                 `json:"camera_id"`
-		Framework         string                 `json:"framework"`
-		TrainingDatasetID string                 `json:"training_dataset_id"`
-		TrainingDate      string                 `json:"training_date"`
-		InputShape        []int                  `json:"input_shape"`
-		Preprocessing     map[string]interface{} `json:"preprocessing"`
-		TotalSize         uint64                 `json:"total_size"`
-	}
+	var metadata httpsservertypes.ModelDeploymentMetadata
 
 	if err := json.Unmarshal([]byte(metadataJSON), &metadata); err != nil {
 		s.sendErrorResponse(w, http.StatusBadRequest, fmt.Sprintf("invalid metadata JSON: %v", err))
@@ -702,10 +661,10 @@ func (s *HTTPServer) handleDeployModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse camera ID
-	var cameraID *string
-	if metadata.CameraID != "" {
-		cameraID = &metadata.CameraID
+	// Validate device ID (required - models are trained on specific device datasets)
+	if metadata.DeviceID == "" {
+		s.sendErrorResponse(w, http.StatusBadRequest, httpsservertypes.ErrDeviceIDRequired.Error())
+		return
 	}
 
 	var deploymentID *string
@@ -713,19 +672,8 @@ func (s *HTTPServer) handleDeployModel(w http.ResponseWriter, r *http.Request) {
 		deploymentID = &metadata.DeploymentID
 	}
 
-	// Convert metadata struct to map for deployModel
-	metadataMap := map[string]interface{}{
-		"version":             metadata.Version,
-		"model_type":          metadata.ModelType,
-		"framework":           metadata.Framework,
-		"training_dataset_id": metadata.TrainingDatasetID,
-		"training_date":       metadata.TrainingDate,
-		"input_shape":         metadata.InputShape,
-		"preprocessing":       metadata.Preprocessing,
-	}
-
 	// Deploy model using meta-storage and object-storage
-	modelKey, err := s.deployModel(ctx, metadata.ModelID, deploymentID, s.edgeID, cameraID, modelData, metadataMap)
+	modelKey, err := s.deployModel(ctx, metadata.ModelID, deploymentID, s.edgeID, metadata.DeviceID, modelData, metadata)
 	if err != nil {
 		s.logger.Error("Failed to deploy model", zap.Error(err), zap.String("model_id", metadata.ModelID))
 		s.sendErrorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to deploy model: %v", err))
@@ -742,17 +690,21 @@ func (s *HTTPServer) handleDeployModel(w http.ResponseWriter, r *http.Request) {
 	// Report "deployed" status after model is received and stored
 	// The AI service will load the model from MinIO and report "active" status separately
 	if s.eventBus != nil && deploymentID != nil {
-		s.eventBus.Publish(evtbusstypes.Event{
+		eventData := evtbusstypes.ModelDeploymentStatusEventData{
+			DeploymentID: *deploymentID,
+			Status:       "deployed",
+			ModelPath:    modelKey,
+			ModelID:      metadata.ModelID,
+		}
+		event := evtbusstypes.Event[evtbusstypes.ModelDeploymentStatusEventData]{
 			Type:      evtbusstypes.EventType("model.deployment.status"),
 			Source:    s.Name(),
 			Timestamp: time.Now(),
-			Data: map[string]interface{}{
-				"deployment_id": *deploymentID,
-				"status":        "deployed",
-				"model_path":    modelKey,
-				"model_id":      metadata.ModelID,
-			},
-		})
+			Data:      eventData,
+		}
+		if err := eventbus.PublishTyped(s.eventBus, event); err != nil {
+			s.logger.Warn("Failed to publish model deployment status event", zap.Error(err))
+		}
 	}
 
 	// Publish model deployment event to event bus
@@ -760,32 +712,33 @@ func (s *HTTPServer) handleDeployModel(w http.ResponseWriter, r *http.Request) {
 	if s.eventBus != nil {
 		ctx := r.Context()
 		// Get model metadata from meta-storage to include in event
-		eventData := map[string]interface{}{
-			"model_id":      metadata.ModelID,
-			"deployment_id": deploymentID,
+		eventData := evtbusstypes.ModelDeployedEventData{
+			ModelID:      metadata.ModelID,
+			DeploymentID: deploymentID,
 		}
 
 		if s.metaStorage != nil {
 			modelMeta, found := s.metaStorage.GetDeployedModel(ctx, metadata.ModelID)
 			if found {
-				eventData["version"] = modelMeta.Version
-				eventData["model_type"] = modelMeta.ModelType
-				eventData["framework"] = modelMeta.Framework
-				eventData["model_path"] = modelMeta.ModelPath
-				eventData["metadata_path"] = modelMeta.MetadataPath
+				eventData.Version = modelMeta.Version
+				eventData.ModelType = modelMeta.ModelType
+				eventData.Framework = modelMeta.Framework
+				eventData.ModelPath = modelMeta.ModelPath
+				eventData.MetadataPath = modelMeta.MetadataPath
 			}
 		}
 
-		if cameraID != nil && *cameraID != "" {
-			eventData["camera_id"] = *cameraID
-		}
+		eventData.DeviceID = metadata.DeviceID
 
-		s.eventBus.Publish(evtbusstypes.Event{
+		event := evtbusstypes.Event[evtbusstypes.ModelDeployedEventData]{
 			Type:      evtbusstypes.EventType("model.deployed"),
 			Source:    "vm-gateway",
 			Timestamp: time.Now(),
 			Data:      eventData,
-		})
+		}
+		if err := eventbus.PublishTyped(s.eventBus, event); err != nil {
+			s.logger.Warn("Failed to publish model deployed event", zap.Error(err))
+		}
 
 		deploymentIDStr := ""
 		if deploymentID != nil {
@@ -826,7 +779,7 @@ func (s *HTTPServer) handleRestartService(w http.ResponseWriter, r *http.Request
 }
 
 // handleSyncCapabilities handles capability sync requests from VM
-// VM sends Edge capabilities (e.g., CCTV camera capability) which Edge stores and processes
+// VM sends Edge device capabilities (video devices, sensors, etc.) which Edge stores and processes
 func (s *HTTPServer) handleSyncCapabilities(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -860,14 +813,17 @@ func (s *HTTPServer) handleSyncCapabilities(w http.ResponseWriter, r *http.Reque
 
 	// Send event to state manager to process capabilities
 	if s.eventBus != nil {
-		s.eventBus.Publish(evtbusstypes.Event{
-			Type:      "edge.capabilities_received",
+		event := evtbusstypes.Event[evtbusstypes.CapabilitiesReceivedEventData]{
+			Type:      evtbusstypes.EventType("edge.capabilities_received"),
 			Source:    "https-server",
 			Timestamp: time.Now(),
-			Data: map[string]interface{}{
-				"capabilities": req.Capabilities,
+			Data: evtbusstypes.CapabilitiesReceivedEventData{
+				Capabilities: req.Capabilities,
 			},
-		})
+		}
+		if err := eventbus.PublishTyped(s.eventBus, event); err != nil {
+			s.logger.Warn("Failed to publish capabilities received event", zap.Error(err))
+		}
 		s.logger.Info("Published capabilities_received event to state manager")
 	}
 

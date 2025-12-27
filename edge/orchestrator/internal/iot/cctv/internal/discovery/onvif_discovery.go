@@ -161,7 +161,7 @@ func (s *ONVIFDiscoveryService) discoverCameras() {
 			// Publish discovery event
 			if s.eventBus != nil {
 				s.eventBus.Publish(evtbusstypes.Event{
-					Type:      evtbusstypes.EventType("camera.discovered"),
+					Type:      evtbusstypes.EventTypeDeviceDiscovered,
 					Source:    s.Name(),
 					Timestamp: time.Now(),
 					Data: map[string]interface{}{

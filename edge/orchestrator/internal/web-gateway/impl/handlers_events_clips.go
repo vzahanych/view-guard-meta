@@ -211,7 +211,7 @@ func (g *WebGatewayImpl) handleTriggerObstructionEvent(c *gin.Context) {
 
 	if g.eventBus != nil {
 		g.eventBus.Publish(evtbusstypes.Event{
-			Type:      evtbusstypes.EventType("camera.capture_frame"),
+			Type:      evtbusstypes.EventTypeDeviceCaptureFrame,
 			Source:    "web-gateway",
 			Timestamp: time.Now(),
 			Data: map[string]interface{}{

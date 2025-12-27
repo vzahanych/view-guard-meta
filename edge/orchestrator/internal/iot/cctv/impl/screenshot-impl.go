@@ -130,7 +130,7 @@ func (s *CCTVServiceImpl) SaveScreenshot(ctx context.Context, screenshot *cctvty
 	// Publish event
 	if s.eventBus != nil {
 		s.eventBus.Publish(evtbusstypes.Event{
-			Type:      evtbusstypes.EventType("screenshot.saved"),
+			Type:      evtbusstypes.EventTypeDataUnitSaved,
 			Source:    s.Name(),
 			Timestamp: now,
 			Data: map[string]interface{}{
@@ -265,7 +265,7 @@ func (s *CCTVServiceImpl) UpdateScreenshot(ctx context.Context, screenshotID str
 	// Publish event
 	if s.eventBus != nil {
 		s.eventBus.Publish(evtbusstypes.Event{
-			Type:      evtbusstypes.EventType("screenshot.updated"),
+			Type:      evtbusstypes.EventTypeDataUnitUpdated,
 			Source:    s.Name(),
 			Timestamp: time.Now(),
 			Data: map[string]interface{}{
@@ -305,7 +305,7 @@ func (s *CCTVServiceImpl) DeleteScreenshot(ctx context.Context, screenshotID str
 	// Publish event
 	if s.eventBus != nil {
 		s.eventBus.Publish(evtbusstypes.Event{
-			Type:      evtbusstypes.EventType("screenshot.deleted"),
+			Type:      evtbusstypes.EventTypeDataUnitDeleted,
 			Source:    s.Name(),
 			Timestamp: time.Now(),
 			Data: map[string]interface{}{

@@ -11,17 +11,21 @@ const (
 	// ConnectionStateDisconnected indicates the Edge is not connected to the VM
 	ConnectionStateDisconnected ConnectionState = "disconnected"
 
-	// ConnectionStateWGConnecting indicates WireGuard connection is being established
-	ConnectionStateWGConnecting ConnectionState = "wg_connecting"
+	// ConnectionStateTunnelConnecting indicates tunnel connection is being established
+	// This is provider-agnostic and works with WireGuard, OpenVPN, IPSec, etc.
+	ConnectionStateTunnelConnecting ConnectionState = "tunnel_connecting"
 
-	// ConnectionStateWireGuardConnected indicates WireGuard tunnel is established
-	ConnectionStateWireGuardConnected ConnectionState = "wireguard_connected"
+	// ConnectionStateTunnelConnected indicates tunnel is established
+	// This is provider-agnostic and works with WireGuard, OpenVPN, IPSec, etc.
+	ConnectionStateTunnelConnected ConnectionState = "tunnel_connected"
 
-	// ConnectionStateHTTPConnecting indicates HTTPS connection is being established
-	ConnectionStateHTTPConnecting ConnectionState = "http_connecting"
+	// ConnectionStateTransportConnecting indicates transport connection is being established
+	// This is provider-agnostic and works with HTTP, gRPC, WebSocket, etc.
+	ConnectionStateTransportConnecting ConnectionState = "transport_connecting"
 
-	// ConnectionStateHTTPSConnected indicates HTTPS connection is established
-	ConnectionStateHTTPSConnected ConnectionState = "https_connected"
+	// ConnectionStateTransportConnected indicates transport connection is established
+	// This is provider-agnostic and works with HTTP, gRPC, WebSocket, etc.
+	ConnectionStateTransportConnected ConnectionState = "transport_connected"
 
 	// ConnectionStateAuthenticated indicates Edge is authenticated with the VM
 	ConnectionStateAuthenticated ConnectionState = "authenticated"
@@ -32,11 +36,13 @@ const (
 	// ConnectionStateError indicates a connection-level error occurred
 	ConnectionStateError ConnectionState = "error"
 
-	// ConnectionStateWGConnectionError indicates WireGuard connection error
-	ConnectionStateWGConnectionError ConnectionState = "wg_connection_error"
+	// ConnectionStateTunnelConnectionError indicates tunnel connection error
+	// This is provider-agnostic and works with WireGuard, OpenVPN, IPSec, etc.
+	ConnectionStateTunnelConnectionError ConnectionState = "tunnel_connection_error"
 
-	// ConnectionStateHTTPConnectionError indicates HTTPS connection error
-	ConnectionStateHTTPConnectionError ConnectionState = "http_connection_error"
+	// ConnectionStateTransportConnectionError indicates transport connection error
+	// This is provider-agnostic and works with HTTP, gRPC, WebSocket, etc.
+	ConnectionStateTransportConnectionError ConnectionState = "transport_connection_error"
 )
 
 // ConnectionStateInfo contains metadata about the connection state
@@ -51,7 +57,7 @@ type ConnectionStateInfo struct {
 // ConnectionStateMachine defines the state machine for connection-level states
 // Valid state transitions:
 //
-//	disconnected -> wg_connecting -> wireguard_connected -> http_connecting -> https_connected -> authenticated -> capabilities_received
+//	disconnected -> tunnel_connecting -> tunnel_connected -> transport_connecting -> transport_connected -> authenticated -> capabilities_received
 //	                                                                              |
 //	                                                                              v
 //	                                                                         error (on failure)
@@ -60,8 +66,8 @@ type ConnectionStateInfo struct {
 //	Any state -> error (on critical error)
 //
 // Error states can transition to:
-//   - wg_connection_error -> disconnected (retry) or wireguard_connected (recovered)
-//   - http_connection_error -> disconnected (retry) or https_connected (recovered)
+//   - tunnel_connection_error -> disconnected (retry) or tunnel_connected (recovered)
+//   - transport_connection_error -> disconnected (retry) or transport_connected (recovered)
 //   - error -> disconnected (retry)
 type ConnectionStateMachine interface {
 	// GetState returns the current connection state
@@ -77,10 +83,9 @@ type ConnectionStateMachine interface {
 	// CanTransition checks if a transition from current state to new state is valid
 	CanTransition(newState ConnectionState) bool
 
-	// IsConnected returns true if Edge is connected to VM (wireguard + https + authenticated)
+	// IsConnected returns true if Edge is connected to VM (tunnel + transport + authenticated)
 	IsConnected() bool
 
 	// IsAuthenticated returns true if Edge is authenticated with VM
 	IsAuthenticated() bool
 }
-

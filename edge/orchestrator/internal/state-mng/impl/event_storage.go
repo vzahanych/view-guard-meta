@@ -539,8 +539,8 @@ func (m *StateManagerImpl) syncPendingSecurityEvents(ctx context.Context) {
 	}
 
 	// Check if connection is ready
-	if !m.vmGateway.IsHTTPConnected() {
-		m.logger.Debug("HTTP connection not ready, skipping security event sync")
+	if !m.vmGateway.IsTransportConnected() {
+		m.logger.Debug("Transport connection not ready, skipping security event sync")
 		return
 	}
 

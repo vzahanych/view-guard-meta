@@ -14,27 +14,34 @@ import (
 	"sync"
 	"time"
 
-	httpsclienttypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/vm-gateway/http-impl/https-client-service/types"
-	wgclient "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/vm-gateway/wg-client-service"
-	wgclienttypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/vm-gateway/wg-client-service/types"
 	"go.uber.org/zap"
+
+	httpsclienttypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/vm-gateway/transport-service/http-impl/https-client-service/types"
+	tunnelclient "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/vm-gateway/tunnel-client-service"
+	vmgatewaytypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/vm-gateway/types"
 )
+
+// closeResponseBody safely closes the response body and logs any errors.
+func closeResponseBody(body io.Closer, logger *zap.Logger) {
+	if err := body.Close(); err != nil {
+		logger.Warn("Failed to close response body", zap.Error(err))
+	}
+}
 
 // TelemetryClient interface for sending telemetry data to the VM.
 // HTTPSClient implements this interface directly.
 type TelemetryClient interface {
 	IsConnected() bool
-	SendTelemetry(ctx context.Context, data *wgclienttypes.TelemetryData) error
-	Heartbeat(ctx context.Context, req *wgclienttypes.HeartbeatRequest) error
+	SendTelemetry(ctx context.Context, data *vmgatewaytypes.TelemetryData) error
+	Heartbeat(ctx context.Context, req *vmgatewaytypes.HeartbeatRequest) error
 }
 
-// HTTPSClient manages HTTPS connections to KVM VM over WireGuard tunnel
-// Replaces gRPC client for Edge → VM communication
-// HTTPSClient implements TelemetryClient interface directly
+// HTTPSClient manages HTTPS connections to KVM VM over tunnel (WireGuard, OpenVPN, IPSec, etc.).
+// Replaces gRPC client for Edge → VM communication.
+// HTTPSClient implements TelemetryClient interface directly.
 type HTTPSClient struct {
 	clientCfg     *httpsclienttypes.HTTPSClientConfig
-	wgCfg         *wgclienttypes.WGClientConfig
-	wgClient      wgclient.WGClientService
+	tunnelClient  tunnelclient.TunnelClientService
 	logger        *zap.Logger
 	httpClient    *http.Client
 	mu            sync.RWMutex
@@ -45,7 +52,7 @@ type HTTPSClient struct {
 }
 
 // NewHTTPSClient creates a new HTTPS client for Edge → VM calls
-func NewHTTPSClient(clientCfg *httpsclienttypes.HTTPSClientConfig, wgCfg *wgclienttypes.WGClientConfig, wgClient wgclient.WGClientService, edgeID string, log *zap.Logger) (*HTTPSClient, error) {
+func NewHTTPSClient(clientCfg *httpsclienttypes.HTTPSClientConfig, tunnelClient tunnelclient.TunnelClientService, edgeID string, log *zap.Logger) (*HTTPSClient, error) {
 	// Use config values, with defaults for development (localhost mode)
 	clientCertPath := clientCfg.ClientCertPath
 	clientKeyPath := clientCfg.ClientKeyPath
@@ -61,14 +68,14 @@ func NewHTTPSClient(clientCfg *httpsclienttypes.HTTPSClientConfig, wgCfg *wgclie
 		timeout = 30 * time.Second
 	}
 
-	// Detect localhost mode (WireGuard disabled and localhost endpoint)
-	isLocalhostMode := wgCfg != nil && !wgCfg.Enabled && vmEndpoint != ""
+	// Detect localhost mode (tunnel disabled and localhost endpoint)
+	isLocalhostMode := !isTunnelEnabled(tunnelClient) && vmEndpoint != ""
 	host, _, err := net.SplitHostPort(vmEndpoint)
 	if err == nil {
 		isLocalhostMode = isLocalhostMode && (host == "localhost" || host == "127.0.0.1")
 	}
 
-	// Only set default cert paths if not in localhost mode (for production with WireGuard)
+	// Only set default cert paths if not in localhost mode (for production with tunnel)
 	if !isLocalhostMode {
 		if clientCertPath == "" {
 			clientCertPath = "/etc/ssl/certs/edge-client.crt"
@@ -81,9 +88,9 @@ func NewHTTPSClient(clientCfg *httpsclienttypes.HTTPSClientConfig, wgCfg *wgclie
 		}
 	}
 
-	// When connecting via IP address through WireGuard tunnel,
+	// When connecting via IP address through tunnel,
 	// Go's TLS will verify against IP SANs in the certificate.
-	// For localhost development, use localhost as ServerName
+	// For localhost development, use localhost as ServerName.
 	serverName := ""
 	if vmEndpoint != "" {
 		host, _, err := net.SplitHostPort(vmEndpoint)
@@ -146,13 +153,12 @@ func NewHTTPSClient(clientCfg *httpsclienttypes.HTTPSClientConfig, wgCfg *wgclie
 	}
 
 	return &HTTPSClient{
-		clientCfg:  clientCfg,
-		wgCfg:      wgCfg,
-		wgClient:   wgClient,
-		logger:     log,
-		httpClient: httpClient,
-		vmEndpoint: vmEndpoint,
-		edgeID:     edgeID,
+		clientCfg:    clientCfg,
+		tunnelClient: tunnelClient,
+		logger:       log,
+		httpClient:   httpClient,
+		vmEndpoint:   vmEndpoint,
+		edgeID:       edgeID,
 	}, nil
 }
 
@@ -166,21 +172,25 @@ func (c *HTTPSClient) Start(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Allow localhost mode even when WireGuard is disabled
+	// Allow localhost mode even when tunnel is disabled
 	isLocalhostMode := false
-	if c.wgCfg != nil && !c.wgCfg.Enabled {
-		host, _, _ := net.SplitHostPort(c.vmEndpoint)
+	if !isTunnelEnabled(c.tunnelClient) {
+		host, _, err := net.SplitHostPort(c.vmEndpoint)
+		if err != nil {
+			c.logger.Info("HTTPS client disabled (tunnel disabled and invalid endpoint format)", zap.Error(err))
+			return nil
+		}
 		if host != "localhost" && host != "127.0.0.1" {
-			c.logger.Info("HTTPS client disabled (WireGuard disabled and not localhost mode)")
+			c.logger.Info("HTTPS client disabled (tunnel disabled and not localhost mode)")
 			return nil
 		}
 		isLocalhostMode = true
 		c.logger.Info("HTTPS client starting in localhost development mode")
 	}
 
-	// Wait for WireGuard to be connected (skip in localhost mode)
-	if !isLocalhostMode && c.wgClient != nil && !c.wgClient.IsConnected() {
-		c.logger.Info("Waiting for WireGuard connection...")
+	// Wait for tunnel to be connected (skip in localhost mode)
+	if !isLocalhostMode && c.tunnelClient != nil && !c.tunnelClient.IsConnected() {
+		c.logger.Info("Waiting for tunnel connection...")
 		timeout := time.After(30 * time.Second)
 		ticker := time.NewTicker(1 * time.Second)
 		defer ticker.Stop()
@@ -190,10 +200,10 @@ func (c *HTTPSClient) Start(ctx context.Context) error {
 			case <-ctx.Done():
 				return ctx.Err()
 			case <-timeout:
-				return fmt.Errorf("WireGuard not connected after 30 seconds")
+				return fmt.Errorf("tunnel not connected after 30 seconds")
 			case <-ticker.C:
-				if c.wgClient.IsConnected() {
-					c.logger.Info("WireGuard connected, HTTPS client ready")
+				if c.tunnelClient.IsConnected() {
+					c.logger.Info("Tunnel connected, HTTPS client ready")
 					return nil
 				}
 			}
@@ -202,28 +212,25 @@ func (c *HTTPSClient) Start(ctx context.Context) error {
 
 	c.logger.Info("HTTPS client started", zap.String("vm_endpoint", c.vmEndpoint))
 
-	// Authenticate with VM when HTTPS client starts (after WireGuard is connected)
+	// Authenticate with VM when HTTPS client starts (after tunnel is connected)
 	// This sets the connection state to "connected" in both VM and Edge
-	go func() {
-		// Wait a moment for everything to be ready
-		time.Sleep(2 * time.Second)
-
-		// Send authentication request using stored edge ID
-		if err := c.Authenticate(ctx, c.edgeID); err != nil {
-			c.mu.Lock()
-			c.authenticated = false
-			c.lastAuthError = err
-			c.mu.Unlock()
-			c.logger.Error("Failed to authenticate with VM", zap.Error(err))
-			// Don't fail startup - will retry on next heartbeat or can be retried
-		} else {
-			c.mu.Lock()
-			c.authenticated = true
-			c.lastAuthError = nil
-			c.mu.Unlock()
-			c.logger.Info("Successfully authenticated with VM", zap.String("edge_id", c.edgeID))
-		}
-	}()
+	// Note: Authentication is done synchronously to ensure the service is fully ready
+	// before Start() returns. If authentication fails, we log the error but don't fail
+	// startup - it can be retried on next heartbeat or by calling Authenticate again.
+	if err := c.Authenticate(ctx, c.edgeID); err != nil {
+		c.mu.Lock()
+		c.authenticated = false
+		c.lastAuthError = err
+		c.mu.Unlock()
+		c.logger.Error("Failed to authenticate with VM during startup", zap.Error(err))
+		// Don't fail startup - will retry on next heartbeat or can be retried
+	} else {
+		c.mu.Lock()
+		c.authenticated = true
+		c.lastAuthError = nil
+		c.mu.Unlock()
+		c.logger.Info("Successfully authenticated with VM", zap.String("edge_id", c.edgeID))
+	}
 
 	return nil
 }
@@ -240,29 +247,37 @@ func (c *HTTPSClient) Stop(ctx context.Context) error {
 
 // IsConnected returns true if the connection to VM is established and authenticated
 // In localhost mode, it checks if authentication has succeeded
-// In production mode, it checks if WireGuard is connected
+// In production mode, it checks if tunnel is connected
 func (c *HTTPSClient) IsConnected() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	if c.wgCfg != nil && !c.wgCfg.Enabled {
+	if !isTunnelEnabled(c.tunnelClient) {
 		// Localhost mode - check if authentication has succeeded
 		return c.authenticated
 	}
-	// Production mode - check if WireGuard is connected
-	return c.wgClient != nil && c.wgClient.IsConnected()
+	// Production mode - check if tunnel is connected
+	return c.tunnelClient != nil && c.tunnelClient.IsConnected()
+}
+
+// isTunnelEnabled returns true if tunnel service is enabled and not "none"
+func isTunnelEnabled(tunnelClient tunnelclient.TunnelClientService) bool {
+	return tunnelClient != nil && tunnelClient.Name() != "none"
 }
 
 // Heartbeat sends a heartbeat to the VM
-func (c *HTTPSClient) Heartbeat(ctx context.Context, req *wgclienttypes.HeartbeatRequest) error {
+func (c *HTTPSClient) Heartbeat(ctx context.Context, req *vmgatewaytypes.HeartbeatRequest) error {
 	url := fmt.Sprintf("https://%s/api/v1/telemetry/heartbeat", c.vmEndpoint)
 
 	reqBody := map[string]interface{}{
-		"edge_id":   req.EdgeId,
+		"edge_id":   req.EdgeID,
 		"timestamp": req.Timestamp,
 	}
 
-	jsonBody, _ := json.Marshal(reqBody)
+	jsonBody, err := json.Marshal(reqBody)
+	if err != nil {
+		return fmt.Errorf("failed to marshal heartbeat request: %w", err)
+	}
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonBody))
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
@@ -273,10 +288,13 @@ func (c *HTTPSClient) Heartbeat(ctx context.Context, req *wgclienttypes.Heartbea
 	if err != nil {
 		return fmt.Errorf("failed to send heartbeat: %w", err)
 	}
-	defer resp.Body.Close()
+	defer closeResponseBody(resp.Body, c.logger)
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return fmt.Errorf("heartbeat failed with status %d: failed to read response body: %w", resp.StatusCode, err)
+		}
 		return fmt.Errorf("heartbeat failed with status %d: %s", resp.StatusCode, string(body))
 	}
 
@@ -297,17 +315,20 @@ func (c *HTTPSClient) Heartbeat(ctx context.Context, req *wgclienttypes.Heartbea
 }
 
 // SendTelemetry sends telemetry data to the VM
-func (c *HTTPSClient) SendTelemetry(ctx context.Context, data *wgclienttypes.TelemetryData) error {
+func (c *HTTPSClient) SendTelemetry(ctx context.Context, data *vmgatewaytypes.TelemetryData) error {
 	url := fmt.Sprintf("https://%s/api/v1/telemetry/telemetry", c.vmEndpoint)
 
 	// Convert TelemetryData to JSON
 	reqBody := map[string]interface{}{
 		"timestamp": data.Timestamp,
-		"edge_id":   data.EdgeId,
+		"edge_id":   data.EdgeID,
 		// Add other telemetry fields as needed
 	}
 
-	jsonBody, _ := json.Marshal(reqBody)
+	jsonBody, err := json.Marshal(reqBody)
+	if err != nil {
+		return fmt.Errorf("failed to marshal telemetry request: %w", err)
+	}
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonBody))
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
@@ -318,10 +339,13 @@ func (c *HTTPSClient) SendTelemetry(ctx context.Context, data *wgclienttypes.Tel
 	if err != nil {
 		return fmt.Errorf("failed to send telemetry: %w", err)
 	}
-	defer resp.Body.Close()
+	defer closeResponseBody(resp.Body, c.logger)
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return fmt.Errorf("telemetry failed with status %d: failed to read response body: %w", resp.StatusCode, err)
+		}
 		return fmt.Errorf("telemetry failed with status %d: %s", resp.StatusCode, string(body))
 	}
 
@@ -329,14 +353,17 @@ func (c *HTTPSClient) SendTelemetry(ctx context.Context, data *wgclienttypes.Tel
 }
 
 // SendEvents sends events to the VM
-func (c *HTTPSClient) SendEvents(ctx context.Context, events []*wgclienttypes.Event) error {
+func (c *HTTPSClient) SendEvents(ctx context.Context, events []*vmgatewaytypes.Event) error {
 	url := fmt.Sprintf("https://%s/api/v1/telemetry/events", c.vmEndpoint)
 
 	reqBody := map[string]interface{}{
 		"events": events,
 	}
 
-	jsonBody, _ := json.Marshal(reqBody)
+	jsonBody, err := json.Marshal(reqBody)
+	if err != nil {
+		return fmt.Errorf("failed to marshal events request: %w", err)
+	}
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonBody))
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
@@ -347,10 +374,13 @@ func (c *HTTPSClient) SendEvents(ctx context.Context, events []*wgclienttypes.Ev
 	if err != nil {
 		return fmt.Errorf("failed to send events: %w", err)
 	}
-	defer resp.Body.Close()
+	defer closeResponseBody(resp.Body, c.logger)
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return fmt.Errorf("send events failed with status %d: failed to read response body: %w", resp.StatusCode, err)
+		}
 		return fmt.Errorf("send events failed with status %d: %s", resp.StatusCode, string(body))
 	}
 
@@ -371,8 +401,8 @@ func (c *HTTPSClient) SendEvents(ctx context.Context, events []*wgclienttypes.Ev
 	return nil
 }
 
-// Authenticate authenticates Edge with VM and sets connection state to "connected"
-// This should be called when Edge orchestrator starts (after WireGuard is connected)
+// Authenticate authenticates Edge with VM and sets connection state to "connected".
+// This should be called when Edge orchestrator starts (after tunnel is connected).
 func (c *HTTPSClient) Authenticate(ctx context.Context, edgeID string) error {
 	url := fmt.Sprintf("https://%s/api/v1/auth/authenticate", c.vmEndpoint)
 
@@ -380,7 +410,10 @@ func (c *HTTPSClient) Authenticate(ctx context.Context, edgeID string) error {
 		"edge_id": edgeID,
 	}
 
-	jsonBody, _ := json.Marshal(reqBody)
+	jsonBody, err := json.Marshal(reqBody)
+	if err != nil {
+		return fmt.Errorf("failed to marshal authentication request: %w", err)
+	}
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonBody))
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
@@ -391,11 +424,19 @@ func (c *HTTPSClient) Authenticate(ctx context.Context, edgeID string) error {
 	if err != nil {
 		return fmt.Errorf("failed to send authentication request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer closeResponseBody(resp.Body, c.logger)
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		err := fmt.Errorf("authentication failed with status %d: %s", resp.StatusCode, string(body))
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			authErr := fmt.Errorf("authentication failed with status %d: failed to read response body: %w", resp.StatusCode, err)
+			c.mu.Lock()
+			c.authenticated = false
+			c.lastAuthError = authErr
+			c.mu.Unlock()
+			return authErr
+		}
+		err = fmt.Errorf("authentication failed with status %d: %s", resp.StatusCode, string(body))
 		c.mu.Lock()
 		c.authenticated = false
 		c.lastAuthError = err
@@ -431,7 +472,7 @@ func (c *HTTPSClient) Authenticate(ctx context.Context, edgeID string) error {
 }
 
 // GetConfig retrieves VM configuration
-func (c *HTTPSClient) GetConfig(ctx context.Context) (*httpsclienttypes.GetConfigResponse, error) {
+func (c *HTTPSClient) GetConfig(ctx context.Context) (*vmgatewaytypes.GetConfigResponse, error) {
 	url := fmt.Sprintf("https://%s/api/v1/config/get", c.vmEndpoint)
 
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer([]byte("{}")))
@@ -444,10 +485,13 @@ func (c *HTTPSClient) GetConfig(ctx context.Context) (*httpsclienttypes.GetConfi
 	if err != nil {
 		return nil, fmt.Errorf("failed to call GetConfig: %w", err)
 	}
-	defer resp.Body.Close()
+	defer closeResponseBody(resp.Body, c.logger)
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("GetConfig failed with status %d: failed to read response body: %w", resp.StatusCode, err)
+		}
 		return nil, fmt.Errorf("GetConfig failed with status %d: %s", resp.StatusCode, string(body))
 	}
 
@@ -462,30 +506,34 @@ func (c *HTTPSClient) GetConfig(ctx context.Context) (*httpsclienttypes.GetConfi
 	}
 
 	if !result.Success {
-		return &httpsclienttypes.GetConfigResponse{
+		return &vmgatewaytypes.GetConfigResponse{
 			Success:      false,
 			ErrorMessage: result.ErrorMessage,
 		}, nil
 	}
 
-	return &httpsclienttypes.GetConfigResponse{
+	return &vmgatewaytypes.GetConfigResponse{
 		Success:    true,
 		ConfigJSON: result.ConfigJSON,
 	}, nil
 }
 
-// SyncCapabilities syncs camera capabilities to the VM.
-// This method uses local DTO types defined in the HTTPS client types package
+// SyncCapabilities syncs device capabilities to the VM.
+// This method uses local types defined in the HTTPS client types package
 // to avoid a direct dependency on protobuf-generated messages.
-func (c *HTTPSClient) SyncCapabilities(ctx context.Context, req *httpsclienttypes.SyncCapabilitiesRequest) (*httpsclienttypes.SyncCapabilitiesResponse, error) {
+// Supports all device types (cameras, sensors, etc.), not just cameras.
+func (c *HTTPSClient) SyncCapabilities(ctx context.Context, req *vmgatewaytypes.SyncCapabilitiesRequest) (*vmgatewaytypes.SyncCapabilitiesResponse, error) {
 	url := fmt.Sprintf("https://%s/api/v1/capabilities/sync", c.vmEndpoint)
 
 	reqBody := map[string]interface{}{
-		"cameras":   req.Cameras,
+		"devices":   req.Devices,
 		"synced_at": req.SyncedAt,
 	}
 
-	jsonBody, _ := json.Marshal(reqBody)
+	jsonBody, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal sync capabilities request: %w", err)
+	}
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonBody))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
@@ -496,10 +544,13 @@ func (c *HTTPSClient) SyncCapabilities(ctx context.Context, req *httpsclienttype
 	if err != nil {
 		return nil, fmt.Errorf("failed to sync capabilities: %w", err)
 	}
-	defer resp.Body.Close()
+	defer closeResponseBody(resp.Body, c.logger)
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("sync capabilities failed with status %d: failed to read response body: %w", resp.StatusCode, err)
+		}
 		return nil, fmt.Errorf("sync capabilities failed with status %d: %s", resp.StatusCode, string(body))
 	}
 
@@ -512,22 +563,26 @@ func (c *HTTPSClient) SyncCapabilities(ctx context.Context, req *httpsclienttype
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
 
-	return &httpsclienttypes.SyncCapabilitiesResponse{
+	return &vmgatewaytypes.SyncCapabilitiesResponse{
 		Success:      result.Success,
 		ErrorMessage: result.ErrorMessage,
 	}, nil
 }
 
-// SyncCameras syncs discovered cameras to the VM. VM decides which cameras should be enabled.
-func (c *HTTPSClient) SyncCameras(ctx context.Context, req *httpsclienttypes.SyncCamerasRequest) (*httpsclienttypes.SyncCamerasResponse, error) {
-	url := fmt.Sprintf("https://%s/api/v1/cameras/sync", c.vmEndpoint)
+// SyncDevices syncs discovered devices to the VM. VM decides which devices should be enabled.
+// Supports all device types (cameras, sensors, etc.), not just cameras.
+func (c *HTTPSClient) SyncDevices(ctx context.Context, req *vmgatewaytypes.SyncDevicesRequest) (*vmgatewaytypes.SyncDevicesResponse, error) {
+	url := fmt.Sprintf("https://%s/api/v1/devices/sync", c.vmEndpoint)
 
 	reqBody := map[string]interface{}{
 		"edge_id": req.EdgeID,
-		"cameras": req.Cameras,
+		"devices": req.Devices,
 	}
 
-	jsonBody, _ := json.Marshal(reqBody)
+	jsonBody, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal sync devices request: %w", err)
+	}
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonBody))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
@@ -536,43 +591,51 @@ func (c *HTTPSClient) SyncCameras(ctx context.Context, req *httpsclienttypes.Syn
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("failed to sync cameras: %w", err)
+		return nil, fmt.Errorf("failed to sync devices: %w", err)
 	}
-	defer resp.Body.Close()
+	defer closeResponseBody(resp.Body, c.logger)
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("sync cameras failed with status %d: %s", resp.StatusCode, string(body))
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("sync devices failed with status %d: failed to read response body: %w", resp.StatusCode, err)
+		}
+		return nil, fmt.Errorf("sync devices failed with status %d: %s", resp.StatusCode, string(body))
 	}
 
 	var result struct {
-		Success        bool                              `json:"success"`
-		ErrorMessage   string                            `json:"error_message"`
-		EnabledCameras []*httpsclienttypes.EnabledCamera `json:"enabled_cameras"`
+		Success        bool                            `json:"success"`
+		ErrorMessage   string                          `json:"error_message"`
+		EnabledDevices []*vmgatewaytypes.EnabledDevice `json:"enabled_devices"`
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
 
-	return &httpsclienttypes.SyncCamerasResponse{
+	return &vmgatewaytypes.SyncDevicesResponse{
 		Success:        result.Success,
 		ErrorMessage:   result.ErrorMessage,
-		EnabledCameras: result.EnabledCameras,
+		EnabledDevices: result.EnabledDevices,
 	}, nil
 }
 
-// SyncScreenshots syncs labeled screenshots to the VM for model training.
-func (c *HTTPSClient) SyncScreenshots(ctx context.Context, req *httpsclienttypes.SyncScreenshotsRequest) (*httpsclienttypes.SyncScreenshotsResponse, error) {
-	url := fmt.Sprintf("https://%s/api/v1/screenshots/sync", c.vmEndpoint)
+// SyncDataUnits syncs labeled data units to the VM for model training.
+// This is device-agnostic and supports all IoT device types (cameras, sensors, audio devices, etc.).
+// Data units can be screenshots/images, sensor readings, audio samples, or any other labeled data.
+func (c *HTTPSClient) SyncDataUnits(ctx context.Context, req *vmgatewaytypes.SyncDataUnitsRequest) (*vmgatewaytypes.SyncDataUnitsResponse, error) {
+	url := fmt.Sprintf("https://%s/api/v1/data-units/sync", c.vmEndpoint)
 
 	reqBody := map[string]interface{}{
-		"edge_id":     req.EdgeID,
-		"camera_id":   req.CameraID,
-		"screenshots": req.Screenshots,
+		"edge_id":    req.EdgeID,
+		"device_id":  req.DeviceID,
+		"data_units": req.DataUnits,
 	}
 
-	jsonBody, _ := json.Marshal(reqBody)
+	jsonBody, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal sync data units request: %w", err)
+	}
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonBody))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
@@ -581,13 +644,16 @@ func (c *HTTPSClient) SyncScreenshots(ctx context.Context, req *httpsclienttypes
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("failed to sync screenshots: %w", err)
+		return nil, fmt.Errorf("failed to sync data units: %w", err)
 	}
-	defer resp.Body.Close()
+	defer closeResponseBody(resp.Body, c.logger)
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("sync screenshots failed with status %d: %s", resp.StatusCode, string(body))
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("sync data units failed with status %d: failed to read response body: %w", resp.StatusCode, err)
+		}
+		return nil, fmt.Errorf("sync data units failed with status %d: %s", resp.StatusCode, string(body))
 	}
 
 	var result struct {
@@ -600,7 +666,7 @@ func (c *HTTPSClient) SyncScreenshots(ctx context.Context, req *httpsclienttypes
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
 
-	return &httpsclienttypes.SyncScreenshotsResponse{
+	return &vmgatewaytypes.SyncDataUnitsResponse{
 		Success:      result.Success,
 		ErrorMessage: result.ErrorMessage,
 		Message:      result.Message,
@@ -608,7 +674,7 @@ func (c *HTTPSClient) SyncScreenshots(ctx context.Context, req *httpsclienttypes
 }
 
 // SyncAuditLogs syncs audit logs to the VM for long-term storage and analysis.
-func (c *HTTPSClient) SyncAuditLogs(ctx context.Context, req *httpsclienttypes.SyncAuditLogsRequest) (*httpsclienttypes.SyncAuditLogsResponse, error) {
+func (c *HTTPSClient) SyncAuditLogs(ctx context.Context, req *vmgatewaytypes.SyncAuditLogsRequest) (*vmgatewaytypes.SyncAuditLogsResponse, error) {
 	url := fmt.Sprintf("https://%s/api/v1/audit-logs/sync", c.vmEndpoint)
 
 	reqBody := map[string]interface{}{
@@ -635,10 +701,13 @@ func (c *HTTPSClient) SyncAuditLogs(ctx context.Context, req *httpsclienttypes.S
 	if err != nil {
 		return nil, fmt.Errorf("failed to sync audit logs: %w", err)
 	}
-	defer resp.Body.Close()
+	defer closeResponseBody(resp.Body, c.logger)
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("sync audit logs failed with status %d: failed to read response body: %w", resp.StatusCode, err)
+		}
 		return nil, fmt.Errorf("sync audit logs failed with status %d: %s", resp.StatusCode, string(body))
 	}
 
@@ -652,7 +721,7 @@ func (c *HTTPSClient) SyncAuditLogs(ctx context.Context, req *httpsclienttypes.S
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
 
-	return &httpsclienttypes.SyncAuditLogsResponse{
+	return &vmgatewaytypes.SyncAuditLogsResponse{
 		Success:      result.Success,
 		ErrorMessage: result.ErrorMessage,
 		SyncedCount:  result.SyncedCount,
@@ -687,10 +756,13 @@ func (c *HTTPSClient) ReportDeploymentStatus(ctx context.Context, deploymentID s
 	if err != nil {
 		return fmt.Errorf("failed to send request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer closeResponseBody(resp.Body, c.logger)
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(resp.Body)
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return fmt.Errorf("VM returned status %d: failed to read response body: %w", resp.StatusCode, err)
+		}
 		return fmt.Errorf("VM returned status %d: %s", resp.StatusCode, string(body))
 	}
 
