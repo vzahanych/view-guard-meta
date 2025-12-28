@@ -2,10 +2,12 @@ package cctv
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"time"
 
 	eventbus "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/event-bus"
+	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/iot"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/iot/cctv/impl"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/iot/cctv/internal/discovery"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/iot/cctv/types"
@@ -226,4 +228,41 @@ func CCTVServiceProvider(
 	})
 
 	return service, nil
+}
+
+// CCTVDevicePluginProvider provides CCTVDevicePlugin and registers it with IoTService.
+// This enables cameras to be discovered and managed through the device-agnostic IoT service
+// while maintaining backward compatibility with existing CCTVService consumers.
+//
+// Dependencies:
+//   - fx.Lifecycle: For lifecycle hooks
+//   - CCTVService: The CCTV service instance (must be provided before this provider)
+//   - iot.IoTService: The IoT service instance (must be provided before this provider)
+//   - *zap.Logger: Logger for plugin operations
+//
+// The plugin is registered with IoTService on startup via a lifecycle hook.
+// This ensures the plugin is available for device discovery and management.
+func CCTVDevicePluginProvider(
+	lc fx.Lifecycle,
+	cctvService CCTVService,
+	iotService iot.IoTService,
+	logger *zap.Logger,
+) (*CCTVDevicePlugin, error) {
+	// Create CCTV plugin
+	cctvPlugin := NewCCTVDevicePlugin(cctvService, logger)
+
+	// Register plugin with IoTService on startup
+	lc.Append(fx.Hook{
+		OnStart: func(ctx context.Context) error {
+			logger.Info("Registering CCTV device plugin with IoT service")
+			if err := iotService.RegisterPlugin(ctx, cctvPlugin); err != nil {
+				logger.Error("Failed to register CCTV plugin", zap.Error(err))
+				return fmt.Errorf("failed to register CCTV plugin: %w", err)
+			}
+			logger.Info("CCTV device plugin registered successfully")
+			return nil
+		},
+	})
+
+	return cctvPlugin, nil
 }

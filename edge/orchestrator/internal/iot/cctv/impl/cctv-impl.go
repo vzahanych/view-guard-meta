@@ -136,7 +136,7 @@ func (s *CCTVServiceImpl) Stop(ctx context.Context) error {
 }
 
 // handleCameraDiscovered handles camera discovery events
-func (s *CCTVServiceImpl) handleCameraDiscovered(ch <-chan evtbusstypes.Event) {
+func (s *CCTVServiceImpl) handleCameraDiscovered(ch <-chan evtbusstypes.EventAny) {
 	for {
 		select {
 		case event, ok := <-ch:
@@ -147,7 +147,14 @@ func (s *CCTVServiceImpl) handleCameraDiscovered(ch <-chan evtbusstypes.Event) {
 				continue
 			}
 
-			cameraID, _ := event.Data["camera_id"].(string)
+			// Unmarshal typed event data
+			typedEvent, err := evtbusstypes.FromEventAny[evtbusstypes.DeviceDiscoveredEventData](event)
+			if err != nil {
+				s.logger.Warn("Failed to unmarshal device discovered event", zap.Error(err))
+				continue
+			}
+
+			cameraID := typedEvent.Data.DeviceID
 			if cameraID == "" {
 				continue
 			}
@@ -236,7 +243,7 @@ func (s *CCTVServiceImpl) discoveredToCCTV(discovered *discovery.DiscoveredCamer
 // This should only be called by state manager after camera capabilities are confirmed from VM
 func (s *CCTVServiceImpl) DiscoverCameras(ctx context.Context) error {
 	s.logger.Info("Initiating camera discovery (triggered by state manager)")
-	
+
 	// Start discovery services if they're not already running
 	// This allows discovery to be triggered on-demand rather than automatically on startup
 	// We always start them here since they're not started automatically in Start()
@@ -257,10 +264,10 @@ func (s *CCTVServiceImpl) DiscoverCameras(ctx context.Context) error {
 		// Trigger immediate discovery
 		s.usbDiscovery.TriggerDiscovery()
 	}
-	
+
 	// Wait a moment for discovery to complete
 	time.Sleep(500 * time.Millisecond)
-	
+
 	// Get all discovered cameras from discovery services
 	discoveredCameras, err := s.GetDiscoveredCameras(ctx)
 	if err != nil {
@@ -274,7 +281,7 @@ func (s *CCTVServiceImpl) DiscoverCameras(ctx context.Context) error {
 		if !found {
 			// Register the camera
 			if err := s.RegisterCamera(ctx, camera); err != nil {
-				s.logger.Warn("Failed to register discovered camera", 
+				s.logger.Warn("Failed to register discovered camera",
 					zap.String("camera_id", camera.ID),
 					zap.Error(err))
 				continue
@@ -283,16 +290,19 @@ func (s *CCTVServiceImpl) DiscoverCameras(ctx context.Context) error {
 
 		// Publish camera.discovered event
 		if s.eventBus != nil {
-			s.eventBus.Publish(evtbusstypes.Event{
+			event := evtbusstypes.Event[evtbusstypes.DeviceDiscoveredEventData]{
 				Type:      evtbusstypes.EventTypeDeviceDiscovered,
 				Source:    s.Name(),
 				Timestamp: time.Now(),
-				Data: map[string]interface{}{
-					"camera_id": camera.ID,
-					"name":       camera.Name,
-					"type":       string(camera.Type),
+				Data: evtbusstypes.DeviceDiscoveredEventData{
+					DeviceID: camera.ID,
+					Name:     camera.Name,
+					Type:     string(camera.Type),
 				},
-			})
+			}
+			if err := eventbus.PublishTyped(s.eventBus, event); err != nil {
+				s.logger.Warn("Failed to publish device discovered event", zap.Error(err))
+			}
 		}
 	}
 
@@ -365,16 +375,19 @@ func (s *CCTVServiceImpl) RegisterCamera(ctx context.Context, camera *cctvtypes.
 
 	// Publish event
 	if s.eventBus != nil {
-		s.eventBus.Publish(evtbusstypes.Event{
+		event := evtbusstypes.Event[evtbusstypes.DeviceRegisteredEventData]{
 			Type:      evtbusstypes.EventTypeDeviceRegistered,
 			Source:    s.Name(),
 			Timestamp: time.Now(),
-			Data: map[string]interface{}{
-				"camera_id": camera.ID,
-				"name":      camera.Name,
-				"type":      string(camera.Type),
+			Data: evtbusstypes.DeviceRegisteredEventData{
+				DeviceID: camera.ID,
+				Name:     camera.Name,
+				Type:     string(camera.Type),
 			},
-		})
+		}
+		if err := eventbus.PublishTyped(s.eventBus, event); err != nil {
+			s.logger.Warn("Failed to publish device registered event", zap.Error(err))
+		}
 	}
 
 	s.logger.Info("Registered camera", zap.String("id", camera.ID), zap.String("name", camera.Name))

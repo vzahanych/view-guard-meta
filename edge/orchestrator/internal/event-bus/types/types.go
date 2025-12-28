@@ -61,7 +61,7 @@ func (e EventType) String() string {
 // EventData is a type set (interface constraint) for all event data types.
 // This ensures type safety while allowing different event payload types.
 type EventData interface {
-	ModelDeployedEventData | ModelDeploymentStatusEventData | SnapshotRequestedEventData | CapabilitiesReceivedEventData | NetworkEventData
+	ModelDeployedEventData | ModelDeploymentStatusEventData | SnapshotRequestedEventData | CapabilitiesReceivedEventData | NetworkEventData | DeviceEventData | DeviceFrameReceivedEventData | DeviceDiscoveredEventData | DeviceRegisteredEventData | DataUnitSavedEventData | DataUnitUpdatedEventData | DataUnitDeletedEventData
 }
 
 // Event represents an application-level event flowing through the bus.
@@ -137,9 +137,9 @@ const (
 
 // EventBusConfig contains event bus configuration
 type EventBusConfig struct {
-	Provider           string        `yaml:"provider"`             // Event bus provider (e.g., "inmemory", "bbolt", "nats")
+	Provider           string        `yaml:"provider"`             // Event bus provider (must be "metastorage")
 	BufferSize         int           `yaml:"buffer_size"`          // Buffer size for event channels
-	DataDir            string        `yaml:"data_dir"`             // Data directory for persistent storage (used by bbolt)
+	DataDir            string        `yaml:"data_dir"`             // Data directory (deprecated, no longer used)
 	MaxRetries         int           `yaml:"max_retries"`          // Maximum number of retry attempts for failed events
 	InitialBackoff     time.Duration `yaml:"initial_backoff"`      // Initial backoff duration for retries
 	MaxBackoff         time.Duration `yaml:"max_backoff"`          // Maximum backoff duration (caps exponential backoff)
@@ -196,4 +196,60 @@ type NetworkEventData struct {
 	Reason      string                 `json:"reason,omitempty"`      // Disconnection reason
 	Reconnected bool                   `json:"reconnected,omitempty"` // Whether this is a reconnection
 	Metadata    map[string]interface{} `json:"metadata,omitempty"`    // Additional metadata
+}
+
+// DeviceEventData contains data for device connection/disconnection events.
+// Used for device.connected and device.disconnected event types.
+type DeviceEventData struct {
+	DeviceID string  `json:"device_id,omitempty"` // Device ID (device-agnostic)
+	URL      string  `json:"url,omitempty"`       // Device URL/endpoint
+	Reason   string  `json:"reason,omitempty"`    // Disconnection reason (for disconnected events)
+}
+
+// DeviceFrameReceivedEventData contains data for device frame received events.
+// Used for raw_device_data.frame_received and similar frame events.
+type DeviceFrameReceivedEventData struct {
+	DeviceID  string `json:"device_id"`  // Device ID (device-agnostic)
+	FrameData []byte `json:"frame_data"` // Frame data as bytes (will be base64 encoded in JSON)
+}
+
+// DeviceDiscoveredEventData contains data for device.discovered events.
+// Used when a device (camera, sensor, etc.) is discovered on the network or system.
+type DeviceDiscoveredEventData struct {
+	DeviceID    string  `json:"device_id"`              // Device ID (device-agnostic)
+	Name        string  `json:"name,omitempty"`         // Device name
+	Type        string  `json:"type,omitempty"`         // Device type (e.g., "camera", "sensor")
+	Manufacturer string `json:"manufacturer,omitempty"` // Device manufacturer
+	Model       string  `json:"model,omitempty"`        // Device model
+	IPAddress   string  `json:"ip_address,omitempty"`   // IP address (for network devices)
+	DevicePath  string  `json:"device_path,omitempty"`  // Device path (for USB/local devices)
+}
+
+// DeviceRegisteredEventData contains data for device.registered events.
+// Used when a device is registered with the system.
+type DeviceRegisteredEventData struct {
+	DeviceID string `json:"device_id"`        // Device ID (device-agnostic)
+	Name     string `json:"name,omitempty"`    // Device name
+	Type     string `json:"type,omitempty"`    // Device type (e.g., "camera", "sensor")
+}
+
+// DataUnitSavedEventData contains data for data_unit.saved events.
+// Used when a data unit (screenshot, sensor reading, etc.) is saved.
+type DataUnitSavedEventData struct {
+	DataUnitID string `json:"data_unit_id"`   // Data unit ID (e.g., screenshot_id)
+	DeviceID   string `json:"device_id"`      // Device ID (device-agnostic)
+	Label      string `json:"label,omitempty"` // Label for the data unit
+}
+
+// DataUnitUpdatedEventData contains data for data_unit.updated events.
+// Used when a data unit is updated.
+type DataUnitUpdatedEventData struct {
+	DataUnitID string `json:"data_unit_id"` // Data unit ID (e.g., screenshot_id)
+}
+
+// DataUnitDeletedEventData contains data for data_unit.deleted events.
+// Used when a data unit is deleted.
+type DataUnitDeletedEventData struct {
+	DataUnitID string `json:"data_unit_id"` // Data unit ID (e.g., screenshot_id)
+	DeviceID   string `json:"device_id"`    // Device ID (device-agnostic)
 }

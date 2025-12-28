@@ -92,9 +92,9 @@ func ExampleTunnelConfig() {
 		TransportProvider: types.TransportProviderHTTP,
 		EdgeID:            "edge-123",
 		Tunnel: types.TunnelConfig{
-			Provider:     types.TunnelProviderWireGuard,
-			Enabled:      true,
-			KVMEndpoint:  "10.0.0.1:51820",
+			Provider:      types.TunnelProviderWireGuard,
+			Enabled:       true,
+			KVMEndpoint:   "10.0.0.1:51820",
 			InterfaceName: "wg0",
 			RawConfig: map[string]interface{}{
 				"config_path": "/etc/wireguard/wg0.conf",

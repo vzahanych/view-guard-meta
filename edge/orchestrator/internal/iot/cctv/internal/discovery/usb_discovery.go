@@ -162,17 +162,20 @@ func (s *USBDiscoveryService) discoverCameras() {
 
 			// Publish discovery event (CCTV service will handle storage via meta-storage interface)
 			if s.eventBus != nil {
-				s.eventBus.Publish(evtbusstypes.Event{
+				event := evtbusstypes.Event[evtbusstypes.DeviceDiscoveredEventData]{
 					Type:      evtbusstypes.EventTypeDeviceDiscovered,
 					Source:    s.Name(),
 					Timestamp: time.Now(),
-					Data: map[string]interface{}{
-						"camera_id":    camera.ID,
-						"device_path":  primaryDevice,
-						"manufacturer": camera.Manufacturer,
-						"model":        camera.Model,
+					Data: evtbusstypes.DeviceDiscoveredEventData{
+						DeviceID:    camera.ID,
+						DevicePath:  primaryDevice,
+						Manufacturer: camera.Manufacturer,
+						Model:       camera.Model,
 					},
-				})
+				}
+				if err := eventbus.PublishTyped(s.eventBus, event); err != nil {
+					s.logger.Warn("Failed to publish device discovered event", zap.Error(err))
+				}
 			}
 
 			s.logger.Info("Discovered new USB camera",

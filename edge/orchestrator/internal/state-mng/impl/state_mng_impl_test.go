@@ -53,7 +53,8 @@ func waitForGoroutines(_ *testing.T, initialCount int, timeout time.Duration) in
 // setupDeviceStateService creates and sets up DeviceStateService for tests that need camera state machines
 func setupDeviceStateService(t *testing.T, sm *StateManagerImpl) {
 	t.Helper()
-	deviceStateService, err := iot.NewDeviceStateServiceWithDefaults()
+	logger := zaptest.NewLogger(t)
+	deviceStateService, err := iot.NewDeviceStateServiceWithDefaults(logger)
 	require.NoError(t, err)
 	sm.SetDeviceStateService(deviceStateService)
 }
@@ -451,7 +452,7 @@ func TestStateMachineOperations(t *testing.T) {
 	require.NoError(t, err)
 
 	// Set up DeviceStateService (required for camera state machines)
-	deviceStateService, err := iot.NewDeviceStateServiceWithDefaults()
+	deviceStateService, err := iot.NewDeviceStateServiceWithDefaults(logger)
 	require.NoError(t, err)
 	sm.SetDeviceStateService(deviceStateService)
 
@@ -606,7 +607,7 @@ func TestCameraStateTransitions(t *testing.T) {
 	require.NoError(t, err)
 
 	// Set up DeviceStateService (required for camera state machines)
-	deviceStateService, err := iot.NewDeviceStateServiceWithDefaults()
+	deviceStateService, err := iot.NewDeviceStateServiceWithDefaults(logger)
 	require.NoError(t, err)
 	sm.SetDeviceStateService(deviceStateService)
 
@@ -811,7 +812,7 @@ func TestHandleSnapshotRequested(t *testing.T) {
 	sm.SetMetaStorage(mockMetaStorage)
 
 	// Set up DeviceStateService (required for camera state machines)
-	deviceStateService, err := iot.NewDeviceStateServiceWithDefaults()
+	deviceStateService, err := iot.NewDeviceStateServiceWithDefaults(logger)
 	require.NoError(t, err)
 	sm.SetDeviceStateService(deviceStateService)
 
@@ -877,7 +878,7 @@ func TestHandleScreenshotSetReady(t *testing.T) {
 	require.NoError(t, err)
 
 	// Set up DeviceStateService (required for camera state machines)
-	deviceStateService, err := iot.NewDeviceStateServiceWithDefaults()
+	deviceStateService, err := iot.NewDeviceStateServiceWithDefaults(logger)
 	require.NoError(t, err)
 	sm.SetDeviceStateService(deviceStateService)
 

@@ -8,6 +8,8 @@ import (
 	aigwtypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/ai-gateway/types"
 	eventbus "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/event-bus"
 	evtbustypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/event-bus/types"
+	iot "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/iot"
+	iottypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/iot/types"
 	cctv "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/iot/cctv"
 	cctvtypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/iot/cctv/types"
 	metastorage "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/meta-storage"
@@ -45,22 +47,18 @@ func Module() fx.Option {
 				return &cfg.MetaStorage
 			},
 			// MetaStorageProvider - must be created before EventBus
-			// If event-bus provider is "metastorage", meta-storage must be available
+			// Meta-storage is required for event bus (event bus uses metastorage provider)
 			// Dependencies: Config (via MetaStorageConfig)
 			metastorage.MetaStorageProvider,
 			// Provide EventBusConfig from Config (EventBus depends on Config and MetaStorage)
 			func(cfg *config.Config) *evtbustypes.EventBusConfig {
 				return &cfg.EventBus
 			},
-			// EventBusProvider - depends on Config and MetaStorage (for "metastorage" provider)
+			// EventBusProvider - depends on Config and MetaStorage
 			// MetaStorage dependency ensures MetaStorage is created before EventBus
-			// If provider is "metastorage", MetaStorage must be provided
 			func(cfg *config.Config, lc fx.Lifecycle, evtCfg *evtbustypes.EventBusConfig, logger *zap.Logger, metaStore metastorage.MetaDataStore) (eventbus.EventBus, error) {
-				// Pass meta-storage as pointer (nil if not needed for other providers)
-				var metaStorePtr *metastorage.MetaDataStore
-				if cfg.EventBus.Provider == "metastorage" {
-					metaStorePtr = &metaStore
-				}
+				// Event bus always uses meta-storage provider
+				metaStorePtr := &metaStore
 				return eventbus.EventBusProvider(lc, evtCfg, logger, metaStorePtr)
 			},
 			// Provide ObjectStorageConfig from Config
@@ -74,6 +72,23 @@ func Module() fx.Option {
 			},
 			// StateManagerProvider from internal/state-mng
 			statemng.StateManagerProvider,
+			// Provide IoTServiceConfig from Config (optional - can be nil for defaults)
+			// If IoT config is not in Config, this will return nil (service will use defaults)
+			func(cfg *config.Config) *iottypes.IoTServiceConfig {
+				// TODO: Add IoT config to Config struct when needed
+				// For now, return nil to use default config
+				return nil
+			},
+			// IoTServiceProvider - creates all subcomponents internally
+			// Dependencies: Config (optional), Logger
+			// Note: IoT service is self-contained and creates all subcomponents internally
+			// (plugin registry, device registry, state registry, processing service, hook registry)
+			iot.IoTServiceProvider,
+			// CCTVDevicePluginProvider - registers CCTV as a device plugin with IoTService
+			// Dependencies: fx.Lifecycle, CCTVService, IoTService, Logger
+			// Note: This provider must be called after both CCTVService and IoTService are provided
+			// The plugin is registered with IoTService on startup via a lifecycle hook
+			cctv.CCTVDevicePluginProvider,
 			// Provide AIGatewayConfig from Config
 			func(cfg *config.Config) *aigwtypes.AIGatewayConfig {
 				return &cfg.AI

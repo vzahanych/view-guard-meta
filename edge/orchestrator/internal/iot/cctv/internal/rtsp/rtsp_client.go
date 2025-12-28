@@ -120,15 +120,18 @@ func (c *RTSPClient) run() {
 
 				// Publish disconnection event
 				if c.eventBus != nil {
-					c.eventBus.Publish(evtbusstypes.Event{
+					event := evtbusstypes.Event[evtbusstypes.DeviceEventData]{
 						Type:      evtbusstypes.EventTypeDeviceDisconnected,
 						Source:    c.Name(),
 						Timestamp: time.Now(),
-						Data: map[string]interface{}{
-							"url":    c.url,
-							"reason": err.Error(),
+						Data: evtbusstypes.DeviceEventData{
+							URL:    c.url,
+							Reason: err.Error(),
 						},
-					})
+					}
+					if err := eventbus.PublishTyped(c.eventBus, event); err != nil {
+						c.logger.Warn("Failed to publish device disconnected event", zap.Error(err))
+					}
 				}
 
 				// Wait before reconnecting
@@ -220,9 +223,9 @@ func (c *RTSPClient) connect() error {
 	// Setup packet handler
 	client.OnPacketRTP(h264Media, h264Format, func(pkt *rtp.Packet) {
 		// Decode packet
-		nalus, err := h264Decoder.Decode(pkt)
-		if err != nil {
-			c.logger.Debug("Failed to decode packet", zap.Error(err))
+		nalus, decodeErr := h264Decoder.Decode(pkt)
+		if decodeErr != nil {
+			c.logger.Debug("Failed to decode packet", zap.Error(decodeErr))
 			return
 		}
 
@@ -245,15 +248,18 @@ func (c *RTSPClient) connect() error {
 		if c.eventBus != nil {
 			// Extract camera ID from URL or use URL as identifier
 			cameraID := c.url // For now, use URL as camera ID (will be improved when camera manager integrates)
-			c.eventBus.Publish(evtbusstypes.Event{
-				Type:      evtbusstypes.EventType("camera.frame.received"),
+			event := evtbusstypes.Event[evtbusstypes.DeviceFrameReceivedEventData]{
+				Type:      evtbusstypes.EventTypeRawDeviceDataFrameReceived,
 				Source:    c.Name(),
 				Timestamp: timestamp,
-				Data: map[string]interface{}{
-					"camera_id":  cameraID,
-					"frame_data": frameData,
+				Data: evtbusstypes.DeviceFrameReceivedEventData{
+					DeviceID:  cameraID,
+					FrameData: frameData,
 				},
-			})
+			}
+			if pubErr := eventbus.PublishTyped(c.eventBus, event); pubErr != nil {
+				c.logger.Warn("Failed to publish frame received event", zap.Error(pubErr))
+			}
 		}
 	})
 
@@ -274,14 +280,17 @@ func (c *RTSPClient) connect() error {
 
 	// Publish connection event
 	if c.eventBus != nil {
-		c.eventBus.Publish(evtbusstypes.Event{
+		event := evtbusstypes.Event[evtbusstypes.DeviceEventData]{
 			Type:      evtbusstypes.EventTypeDeviceConnected,
 			Source:    c.Name(),
 			Timestamp: time.Now(),
-			Data: map[string]interface{}{
-				"url": c.url,
+			Data: evtbusstypes.DeviceEventData{
+				URL: c.url,
 			},
-		})
+		}
+		if err := eventbus.PublishTyped(c.eventBus, event); err != nil {
+			c.logger.Warn("Failed to publish device connected event", zap.Error(err))
+		}
 	}
 
 	// Wait for connection to close or error
@@ -337,15 +346,18 @@ func (c *RTSPClient) monitorHealth() {
 
 				// Publish health event
 				if c.eventBus != nil {
-					c.eventBus.Publish(evtbusstypes.Event{
+					event := evtbusstypes.Event[evtbusstypes.DeviceEventData]{
 						Type:      evtbusstypes.EventTypeDeviceDisconnected,
 						Source:    c.Name(),
 						Timestamp: time.Now(),
-						Data: map[string]interface{}{
-							"url":    c.url,
-							"reason": "no_frames",
+						Data: evtbusstypes.DeviceEventData{
+							URL:    c.url,
+							Reason: "no_frames",
 						},
-					})
+					}
+					if err := eventbus.PublishTyped(c.eventBus, event); err != nil {
+						c.logger.Warn("Failed to publish device disconnected event", zap.Error(err))
+					}
 				}
 			} else {
 				c.mu.Lock()

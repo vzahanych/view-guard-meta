@@ -6,8 +6,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/iot"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/iot/cctv/types"
+	iottypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/iot/types"
 	"go.uber.org/zap"
 )
 
@@ -34,16 +34,16 @@ type CameraDevice struct {
 	logger *zap.Logger
 
 	// activeStreams tracks active data streams (for video streaming capability)
-	activeStreams map[string]chan *iot.DeviceData
+	activeStreams map[string]chan *iottypes.DeviceData
 	streamsMu     sync.RWMutex
 
 	// metadata cache (updated when camera metadata changes)
-	metadataCache *iot.DeviceMetadata
+	metadataCache *iottypes.DeviceMetadata
 	metadataMu    sync.RWMutex
 }
 
 var (
-	_ iot.Device = (*CameraDevice)(nil) // Ensure CameraDevice implements Device interface
+	_ iottypes.Device = (*CameraDevice)(nil) // Ensure CameraDevice implements Device interface
 )
 
 // NewCameraDevice creates a new CameraDevice adapter for a specific camera.
@@ -79,7 +79,7 @@ func NewCameraDevice(ctx context.Context, cameraID string, cctvService CCTVServi
 		cameraID:      cameraID,
 		cctvService:   cctvService,
 		logger:        logger,
-		activeStreams: make(map[string]chan *iot.DeviceData),
+		activeStreams: make(map[string]chan *iottypes.DeviceData),
 	}
 
 	// Initialize metadata from camera
@@ -94,21 +94,21 @@ func (d *CameraDevice) updateMetadataFromCamera(camera *types.Camera) {
 	defer d.metadataMu.Unlock()
 
 	// Map camera type to device type
-	deviceType := iot.DeviceTypeCamera
+	deviceType := iottypes.DeviceTypeCamera
 
 	// Map camera status to device status
-	var deviceStatus iot.DeviceStatus
+	var deviceStatus iottypes.DeviceStatus
 	switch camera.Status {
 	case types.CameraStatusOnline:
-		deviceStatus = iot.DeviceStatusOnline
+		deviceStatus = iottypes.DeviceStatusOnline
 	case types.CameraStatusOffline:
-		deviceStatus = iot.DeviceStatusOffline
+		deviceStatus = iottypes.DeviceStatusOffline
 	case types.CameraStatusConnecting:
-		deviceStatus = iot.DeviceStatusConnecting
+		deviceStatus = iottypes.DeviceStatusConnecting
 	case types.CameraStatusError:
-		deviceStatus = iot.DeviceStatusError
+		deviceStatus = iottypes.DeviceStatusError
 	default:
-		deviceStatus = iot.DeviceStatusUnknown
+		deviceStatus = iottypes.DeviceStatusUnknown
 	}
 
 	// Build capabilities from camera capabilities
@@ -137,7 +137,7 @@ func (d *CameraDevice) updateMetadataFromCamera(camera *types.Camera) {
 	config["frame_rate"] = camera.Config.FrameRate
 	config["resolution"] = camera.Config.Resolution
 
-	d.metadataCache = &iot.DeviceMetadata{
+	d.metadataCache = &iottypes.DeviceMetadata{
 		ID:           camera.ID,
 		Name:         camera.Name,
 		Type:         deviceType,
@@ -156,34 +156,34 @@ func (d *CameraDevice) updateMetadataFromCamera(camera *types.Camera) {
 }
 
 // buildCapabilitiesFromCamera maps camera capabilities to device capabilities
-func (d *CameraDevice) buildCapabilitiesFromCamera(camera *types.Camera) iot.DeviceCapabilities {
-	capabilities := make(iot.DeviceCapabilities)
+func (d *CameraDevice) buildCapabilitiesFromCamera(camera *types.Camera) iottypes.DeviceCapabilities {
+	capabilities := make(iottypes.DeviceCapabilities)
 
 	// All cameras support data capture (frames)
-	capabilities.Add(iot.DeviceCapabilityDataCapture)
+	capabilities.Add(iottypes.DeviceCapabilityDataCapture)
 
 	// Video-specific capabilities
-	capabilities.Add(iot.DeviceCapabilityVideoCapture)
-	capabilities.Add(iot.DeviceCapabilityVideoStreaming) // MJPEG streaming
-	capabilities.Add(iot.DeviceCapabilityVideoRecording) // Clip recording
-	capabilities.Add(iot.DeviceCapabilitySnapshot)       // Screenshot capture
+	capabilities.Add(iottypes.DeviceCapabilityVideoCapture)
+	capabilities.Add(iottypes.DeviceCapabilityVideoStreaming) // MJPEG streaming
+	capabilities.Add(iottypes.DeviceCapabilityVideoRecording) // Clip recording
+	capabilities.Add(iottypes.DeviceCapabilitySnapshot)       // Screenshot capture
 
 	// Data streaming (via MJPEG)
-	capabilities.Add(iot.DeviceCapabilityDataStreaming)
+	capabilities.Add(iottypes.DeviceCapabilityDataStreaming)
 
 	// PTZ capability
 	if camera.Capabilities.HasPTZ {
-		capabilities.Add(iot.DeviceCapabilityPTZ)
-		capabilities.Add(iot.DeviceCapabilityControl) // PTZ requires control capability
+		capabilities.Add(iottypes.DeviceCapabilityPTZ)
+		capabilities.Add(iottypes.DeviceCapabilityControl) // PTZ requires control capability
 	}
 
 	// Motion detection
 	if camera.Config.MotionDetection {
-		capabilities.Add(iot.DeviceCapabilityMotionDetection)
+		capabilities.Add(iottypes.DeviceCapabilityMotionDetection)
 	}
 
 	// Event generation (cameras can generate events via AI detection)
-	capabilities.Add(iot.DeviceCapabilityEventGeneration)
+	capabilities.Add(iottypes.DeviceCapabilityEventGeneration)
 
 	return capabilities
 }
@@ -221,13 +221,13 @@ func (d *CameraDevice) GetID() string {
 }
 
 // GetMetadata returns device metadata for the camera
-func (d *CameraDevice) GetMetadata() iot.DeviceMetadata {
+func (d *CameraDevice) GetMetadata() iottypes.DeviceMetadata {
 	d.metadataMu.RLock()
 	defer d.metadataMu.RUnlock()
 
 	// Return a copy to prevent external modification
 	if d.metadataCache == nil {
-		return iot.DeviceMetadata{}
+		return iottypes.DeviceMetadata{}
 	}
 
 	metadata := *d.metadataCache
@@ -235,7 +235,7 @@ func (d *CameraDevice) GetMetadata() iot.DeviceMetadata {
 }
 
 // UpdateMetadata updates camera metadata by updating the underlying camera
-func (d *CameraDevice) UpdateMetadata(ctx context.Context, updates *iot.DeviceMetadataUpdate) error {
+func (d *CameraDevice) UpdateMetadata(ctx context.Context, updates *iottypes.DeviceMetadataUpdate) error {
 	// Convert DeviceMetadataUpdate to CameraUpdate
 	cameraUpdate := &types.CameraUpdate{}
 
@@ -300,18 +300,18 @@ func (d *CameraDevice) IsEnabled() bool {
 }
 
 // GetStatus returns the current operational status of the camera
-func (d *CameraDevice) GetStatus() iot.DeviceStatus {
+func (d *CameraDevice) GetStatus() iottypes.DeviceStatus {
 	d.metadataMu.RLock()
 	defer d.metadataMu.RUnlock()
 
 	if d.metadataCache == nil {
-		return iot.DeviceStatusUnknown
+		return iottypes.DeviceStatusUnknown
 	}
 	return d.metadataCache.Status
 }
 
 // HasCapability checks if the camera supports a specific capability
-func (d *CameraDevice) HasCapability(capability iot.DeviceCapability) bool {
+func (d *CameraDevice) HasCapability(capability iottypes.DeviceCapability) bool {
 	d.metadataMu.RLock()
 	defer d.metadataMu.RUnlock()
 
@@ -322,16 +322,16 @@ func (d *CameraDevice) HasCapability(capability iot.DeviceCapability) bool {
 }
 
 // GetCapabilities returns all capabilities supported by the camera
-func (d *CameraDevice) GetCapabilities() iot.DeviceCapabilities {
+func (d *CameraDevice) GetCapabilities() iottypes.DeviceCapabilities {
 	d.metadataMu.RLock()
 	defer d.metadataMu.RUnlock()
 
 	if d.metadataCache == nil {
-		return make(iot.DeviceCapabilities)
+		return make(iottypes.DeviceCapabilities)
 	}
 
 	// Return a copy to prevent external modification
-	capabilities := make(iot.DeviceCapabilities)
+	capabilities := make(iottypes.DeviceCapabilities)
 	for cap, val := range d.metadataCache.Capabilities {
 		capabilities[cap] = val
 	}
@@ -340,8 +340,8 @@ func (d *CameraDevice) GetCapabilities() iot.DeviceCapabilities {
 
 // CaptureData captures a frame from the camera
 // Requires: DeviceCapabilityDataCapture or DeviceCapabilityVideoCapture
-func (d *CameraDevice) CaptureData(ctx context.Context) (*iot.DeviceData, error) {
-	if !d.HasCapability(iot.DeviceCapabilityVideoCapture) {
+func (d *CameraDevice) CaptureData(ctx context.Context) (*iottypes.DeviceData, error) {
+	if !d.HasCapability(iottypes.DeviceCapabilityVideoCapture) {
 		return nil, fmt.Errorf("camera does not support video capture")
 	}
 
@@ -352,10 +352,10 @@ func (d *CameraDevice) CaptureData(ctx context.Context) (*iot.DeviceData, error)
 	}
 
 	// Convert Frame to DeviceData
-	deviceData := &iot.DeviceData{
+	deviceData := &iottypes.DeviceData{
 		DeviceID:  d.cameraID,
 		Timestamp: frame.Timestamp,
-		DataType:  iot.DeviceDataTypeVideoFrame,
+		DataType:  iottypes.DeviceDataTypeVideoFrame,
 		Data:      frame.Data,
 		Width:     frame.Width,
 		Height:    frame.Height,
@@ -370,8 +370,8 @@ func (d *CameraDevice) CaptureData(ctx context.Context) (*iot.DeviceData, error)
 
 // StartDataStream starts an MJPEG stream from the camera
 // Requires: DeviceCapabilityDataStreaming or DeviceCapabilityVideoStreaming
-func (d *CameraDevice) StartDataStream(ctx context.Context) (<-chan *iot.DeviceData, error) {
-	if !d.HasCapability(iot.DeviceCapabilityVideoStreaming) {
+func (d *CameraDevice) StartDataStream(ctx context.Context) (<-chan *iottypes.DeviceData, error) {
+	if !d.HasCapability(iottypes.DeviceCapabilityVideoStreaming) {
 		return nil, fmt.Errorf("camera does not support video streaming")
 	}
 
@@ -382,7 +382,7 @@ func (d *CameraDevice) StartDataStream(ctx context.Context) (<-chan *iot.DeviceD
 	}
 
 	// Create device data channel
-	deviceDataChan := make(chan *iot.DeviceData, 10)
+	deviceDataChan := make(chan *iottypes.DeviceData, 10)
 
 	// Start goroutine to convert MJPEG frames to DeviceData
 	streamID := fmt.Sprintf("mjpeg_%s_%d", d.cameraID, time.Now().Unix())
@@ -409,10 +409,10 @@ func (d *CameraDevice) StartDataStream(ctx context.Context) (<-chan *iot.DeviceD
 					return
 				}
 
-				deviceData := &iot.DeviceData{
+				deviceData := &iottypes.DeviceData{
 					DeviceID:  d.cameraID,
 					Timestamp: time.Now(),
-					DataType:  iot.DeviceDataTypeVideoFrame,
+					DataType:  iottypes.DeviceDataTypeVideoFrame,
 					Data:      frameData,
 					Format:    "jpeg",
 					Metadata: map[string]interface{}{
@@ -435,7 +435,7 @@ func (d *CameraDevice) StartDataStream(ctx context.Context) (<-chan *iot.DeviceD
 // StopDataStream stops an active data stream
 // Requires: DeviceCapabilityDataStreaming
 func (d *CameraDevice) StopDataStream(ctx context.Context) error {
-	if !d.HasCapability(iot.DeviceCapabilityVideoStreaming) {
+	if !d.HasCapability(iottypes.DeviceCapabilityVideoStreaming) {
 		return fmt.Errorf("camera does not support video streaming")
 	}
 
@@ -457,20 +457,20 @@ func (d *CameraDevice) StopDataStream(ctx context.Context) error {
 
 // ReadSensor is not supported for cameras (cameras don't have sensors)
 // Requires: DeviceCapabilitySensorReadings
-func (d *CameraDevice) ReadSensor(ctx context.Context, sensorType string) (*iot.SensorReading, error) {
+func (d *CameraDevice) ReadSensor(ctx context.Context, sensorType string) (*iottypes.SensorReading, error) {
 	return nil, fmt.Errorf("cameras do not support sensor readings")
 }
 
 // ReadAllSensors is not supported for cameras
 // Requires: DeviceCapabilitySensorReadings
-func (d *CameraDevice) ReadAllSensors(ctx context.Context) (map[string]*iot.SensorReading, error) {
+func (d *CameraDevice) ReadAllSensors(ctx context.Context) (map[string]*iottypes.SensorReading, error) {
 	return nil, fmt.Errorf("cameras do not support sensor readings")
 }
 
 // ExecuteCommand executes a control command on the camera (e.g., PTZ movement)
 // Requires: DeviceCapabilityControl
-func (d *CameraDevice) ExecuteCommand(ctx context.Context, command iot.DeviceCommand) error {
-	if !d.HasCapability(iot.DeviceCapabilityControl) {
+func (d *CameraDevice) ExecuteCommand(ctx context.Context, command iottypes.DeviceCommand) error {
+	if !d.HasCapability(iottypes.DeviceCapabilityControl) {
 		return fmt.Errorf("camera does not support control commands")
 	}
 
@@ -493,16 +493,16 @@ func (d *CameraDevice) ExecuteCommand(ctx context.Context, command iot.DeviceCom
 
 // GetAvailableCommands returns list of commands supported by the camera
 // Requires: DeviceCapabilityControl
-func (d *CameraDevice) GetAvailableCommands(ctx context.Context) ([]iot.DeviceCommand, error) {
-	if !d.HasCapability(iot.DeviceCapabilityControl) {
+func (d *CameraDevice) GetAvailableCommands(ctx context.Context) ([]iottypes.DeviceCommand, error) {
+	if !d.HasCapability(iottypes.DeviceCapabilityControl) {
 		return nil, fmt.Errorf("camera does not support control commands")
 	}
 
-	commands := make([]iot.DeviceCommand, 0)
+	commands := make([]iottypes.DeviceCommand, 0)
 
 	// Add PTZ commands if camera supports PTZ
-	if d.HasCapability(iot.DeviceCapabilityPTZ) {
-		commands = append(commands, iot.DeviceCommand{
+	if d.HasCapability(iottypes.DeviceCapabilityPTZ) {
+		commands = append(commands, iottypes.DeviceCommand{
 			CommandType: "ptz_move",
 			Parameters: map[string]interface{}{
 				"description": "Move camera PTZ (pan/tilt/zoom)",

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	eventbus "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/event-bus"
 	evtbusstypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/event-bus/types"
 	cctvtypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/iot/cctv/types"
 	metastorage "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/meta-storage"
@@ -129,16 +130,19 @@ func (s *CCTVServiceImpl) SaveScreenshot(ctx context.Context, screenshot *cctvty
 
 	// Publish event
 	if s.eventBus != nil {
-		s.eventBus.Publish(evtbusstypes.Event{
+		event := evtbusstypes.Event[evtbusstypes.DataUnitSavedEventData]{
 			Type:      evtbusstypes.EventTypeDataUnitSaved,
 			Source:    s.Name(),
 			Timestamp: now,
-			Data: map[string]interface{}{
-				"screenshot_id": screenshot.ID,
-				"camera_id":     screenshot.CameraID,
-				"label":         screenshot.Label,
+			Data: evtbusstypes.DataUnitSavedEventData{
+				DataUnitID: screenshot.ID,
+				DeviceID:   screenshot.CameraID,
+				Label:      screenshot.Label,
 			},
-		})
+		}
+		if err := eventbus.PublishTyped(s.eventBus, event); err != nil {
+			s.logger.Warn("Failed to publish data unit saved event", zap.Error(err))
+		}
 	}
 
 	s.logger.Info("Screenshot saved", zap.String("screenshot_id", screenshot.ID), zap.String("camera_id", screenshot.CameraID), zap.String("label", screenshot.Label))
@@ -264,14 +268,17 @@ func (s *CCTVServiceImpl) UpdateScreenshot(ctx context.Context, screenshotID str
 
 	// Publish event
 	if s.eventBus != nil {
-		s.eventBus.Publish(evtbusstypes.Event{
+		event := evtbusstypes.Event[evtbusstypes.DataUnitUpdatedEventData]{
 			Type:      evtbusstypes.EventTypeDataUnitUpdated,
 			Source:    s.Name(),
 			Timestamp: time.Now(),
-			Data: map[string]interface{}{
-				"screenshot_id": screenshotID,
+			Data: evtbusstypes.DataUnitUpdatedEventData{
+				DataUnitID: screenshotID,
 			},
-		})
+		}
+		if err := eventbus.PublishTyped(s.eventBus, event); err != nil {
+			s.logger.Warn("Failed to publish data unit updated event", zap.Error(err))
+		}
 	}
 
 	return nil
@@ -304,15 +311,18 @@ func (s *CCTVServiceImpl) DeleteScreenshot(ctx context.Context, screenshotID str
 
 	// Publish event
 	if s.eventBus != nil {
-		s.eventBus.Publish(evtbusstypes.Event{
+		event := evtbusstypes.Event[evtbusstypes.DataUnitDeletedEventData]{
 			Type:      evtbusstypes.EventTypeDataUnitDeleted,
 			Source:    s.Name(),
 			Timestamp: time.Now(),
-			Data: map[string]interface{}{
-				"screenshot_id": screenshotID,
-				"camera_id":     screenshot.CameraID,
+			Data: evtbusstypes.DataUnitDeletedEventData{
+				DataUnitID: screenshotID,
+				DeviceID:   screenshot.CameraID,
 			},
-		})
+		}
+		if err := eventbus.PublishTyped(s.eventBus, event); err != nil {
+			s.logger.Warn("Failed to publish data unit deleted event", zap.Error(err))
+		}
 	}
 
 	return nil
@@ -432,14 +442,14 @@ func (s *CCTVServiceImpl) CaptureScreenshot(ctx context.Context, cameraID string
 
 	// Create screenshot object (initially unlabeled)
 	screenshot := &cctvtypes.Screenshot{
-		ID:           uuid.New().String(),
-		CameraID:     cameraID,
-		Label:        "", // Unlabeled initially - user will label it later
-		CustomLabel:  "",
-		Description:  fmt.Sprintf("Screenshot captured from camera %s", cam.Name),
-		Metadata:     make(map[string]interface{}),
-		CreatedAt:    time.Now(),
-		UpdatedAt:    time.Now(),
+		ID:          uuid.New().String(),
+		CameraID:    cameraID,
+		Label:       "", // Unlabeled initially - user will label it later
+		CustomLabel: "",
+		Description: fmt.Sprintf("Screenshot captured from camera %s", cam.Name),
+		Metadata:    make(map[string]interface{}),
+		CreatedAt:   time.Now(),
+		UpdatedAt:   time.Now(),
 	}
 
 	// Add event ID to metadata if provided

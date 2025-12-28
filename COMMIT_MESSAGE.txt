@@ -1,0 +1,24 @@
+refactor(vm-gateway): make gateway fully provider-agnostic
+
+Refactor VM Gateway service to be fully provider-agnostic, enabling
+support for multiple tunnel (WireGuard, OpenVPN, IPSec) and transport
+(HTTP, gRPC, WebSocket) providers.
+
+Key changes:
+- Reorganize structure: extract transport-service and tunnel-client-service
+  abstractions with factory pattern
+- Consolidate types: move all VM API types to vm-gateway/types package
+- Promote TunnelConfig: make tunnel configuration top-level in VMGatewayConfig
+- Generalize state machine: use generic tunnel/transport state terminology
+- Remove interface{} assertions: use typed interfaces from types package
+- Standardize error handling: add sentinel errors and consistent wrapping
+- Fix lifecycle issues: ensure contexts flow from callers, fix reconnection
+- Enhance observability: add HealthSnapshot() method for debugging
+- Update naming: replace provider-specific method names with generic ones
+- Add comprehensive tests: factory selection, config validation, state transitions
+- Add package documentation: doc.go with architecture diagrams and examples
+
+This refactoring removes all provider-specific coupling, making it easy
+to add new tunnel/transport providers without changing application code.
+
+

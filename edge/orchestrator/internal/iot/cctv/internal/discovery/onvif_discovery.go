@@ -26,15 +26,15 @@ type ONVIFDiscoveryService struct {
 
 // DiscoveredCamera represents a discovered ONVIF camera
 type DiscoveredCamera struct {
-	ID              string
-	Manufacturer    string
-	Model           string
-	IPAddress       string
-	ONVIFEndpoint   string
-	RTSPURLs        []string
-	Capabilities    CameraCapabilities
-	LastSeen        time.Time
-	DiscoveredAt    time.Time
+	ID            string
+	Manufacturer  string
+	Model         string
+	IPAddress     string
+	ONVIFEndpoint string
+	RTSPURLs      []string
+	Capabilities  CameraCapabilities
+	LastSeen      time.Time
+	DiscoveredAt  time.Time
 }
 
 // CameraCapabilities represents camera capabilities
@@ -47,18 +47,18 @@ type CameraCapabilities struct {
 
 // StreamProfile represents a video stream profile
 type StreamProfile struct {
-	Name        string
-	Width       int
-	Height      int
-	FrameRate   float64
-	RTSPURL     string
-	Encoding    string
+	Name      string
+	Width     int
+	Height    int
+	FrameRate float64
+	RTSPURL   string
+	Encoding  string
 }
 
 // NewONVIFDiscoveryService creates a new ONVIF discovery service
 func NewONVIFDiscoveryService(discoveryInterval time.Duration, log *zap.Logger) *ONVIFDiscoveryService {
 	ctx, cancel := context.WithCancel(context.Background())
-	
+
 	return &ONVIFDiscoveryService{
 		logger:            log,
 		discoveredCameras: make(map[string]*DiscoveredCamera),
@@ -97,7 +97,6 @@ func (s *ONVIFDiscoveryService) Start(ctx context.Context) error {
 
 	return nil
 }
-
 
 // Stop stops the ONVIF discovery service
 func (s *ONVIFDiscoveryService) Stop(ctx context.Context) error {
@@ -157,22 +156,25 @@ func (s *ONVIFDiscoveryService) discoverCameras() {
 		} else {
 			camera.DiscoveredAt = time.Now()
 			s.discoveredCameras[camera.ID] = camera
-			
+
 			// Publish discovery event
 			if s.eventBus != nil {
-				s.eventBus.Publish(evtbusstypes.Event{
+				event := evtbusstypes.Event[evtbusstypes.DeviceDiscoveredEventData]{
 					Type:      evtbusstypes.EventTypeDeviceDiscovered,
 					Source:    s.Name(),
 					Timestamp: time.Now(),
-					Data: map[string]interface{}{
-						"camera_id":    camera.ID,
-						"manufacturer": camera.Manufacturer,
-						"model":        camera.Model,
-						"ip_address":   camera.IPAddress,
+					Data: evtbusstypes.DeviceDiscoveredEventData{
+						DeviceID:     camera.ID,
+						Manufacturer: camera.Manufacturer,
+						Model:        camera.Model,
+						IPAddress:    camera.IPAddress,
 					},
-				})
+				}
+				if err := eventbus.PublishTyped(s.eventBus, event); err != nil {
+					s.logger.Warn("Failed to publish device discovered event", zap.Error(err))
+				}
 			}
-			
+
 			s.logger.Info("Discovered new camera",
 				zap.String("id", camera.ID),
 				zap.String("manufacturer", camera.Manufacturer),
@@ -190,7 +192,7 @@ func (s *ONVIFDiscoveryService) wsDiscoveryProbe() ([]string, error) {
 	// WS-Discovery uses UDP multicast on port 3702
 	// This works on home WiFi networks as long as devices are on the same subnet
 	multicastAddr := "239.255.255.250:3702"
-	
+
 	// Try to find a suitable network interface (WiFi or Ethernet)
 	// On home networks, we want to use the interface connected to the local network
 	localAddr, err := s.findLocalNetworkInterface()
@@ -200,7 +202,7 @@ func (s *ONVIFDiscoveryService) wsDiscoveryProbe() ([]string, error) {
 	} else {
 		s.logger.Debug("Using network interface", zap.String("address", localAddr))
 	}
-	
+
 	// Create UDP connection on local interface
 	conn, err := net.ListenPacket("udp4", localAddr)
 	if err != nil {
@@ -267,7 +269,7 @@ func (s *ONVIFDiscoveryService) wsDiscoveryProbe() ([]string, error) {
 			}
 			if !duplicate {
 				devices = append(devices, endpoint)
-				s.logger.Info("Received ONVIF probe response", zap.String("from", addr.String()), zap.String("endpoint", endpoint))		
+				s.logger.Info("Received ONVIF probe response", zap.String("from", addr.String()), zap.String("endpoint", endpoint))
 			}
 		}
 	}
@@ -284,18 +286,18 @@ func (s *ONVIFDiscoveryService) parseProbeMatch(xmlResponse string) string {
 		return ""
 	}
 	start += len("<d:XAddrs>")
-	
+
 	end := strings.Index(xmlResponse[start:], "</d:XAddrs>")
 	if end == -1 {
 		return ""
 	}
-	
+
 	endpoint := strings.TrimSpace(xmlResponse[start : start+end])
 	// Extract first URL if multiple
 	if idx := strings.Index(endpoint, " "); idx != -1 {
 		endpoint = endpoint[:idx]
 	}
-	
+
 	return endpoint
 }
 
@@ -337,20 +339,20 @@ func (s *ONVIFDiscoveryService) extractIPFromEndpoint(endpoint string) string {
 		return ""
 	}
 	start += 3
-	
+
 	end := strings.Index(endpoint[start:], "/")
 	if end == -1 {
 		end = len(endpoint)
 	} else {
 		end = start + end
 	}
-	
+
 	// Remove port if present
 	host := endpoint[start:end]
 	if idx := strings.Index(host, ":"); idx != -1 {
 		host = host[:idx]
 	}
-	
+
 	return host
 }
 
@@ -358,13 +360,13 @@ func (s *ONVIFDiscoveryService) extractIPFromEndpoint(endpoint string) string {
 func (s *ONVIFDiscoveryService) guessRTSPURLs(ip string) []string {
 	// Common RTSP URL patterns
 	commonPaths := []string{
-		"/Streaming/Channels/101",           // Hikvision
-		"/h264",                             // Generic
-		"/live",                             // Generic
-		"/stream1",                          // Generic
-		"/videoMain",                        // Generic
-		"/cam/realmonitor",                  // Dahua
-		"/rtsp/videoMain",                   // Generic
+		"/Streaming/Channels/101", // Hikvision
+		"/h264",                   // Generic
+		"/live",                   // Generic
+		"/stream1",                // Generic
+		"/videoMain",              // Generic
+		"/cam/realmonitor",        // Dahua
+		"/rtsp/videoMain",         // Generic
 	}
 
 	urls := make([]string, 0)
@@ -399,4 +401,3 @@ func (s *ONVIFDiscoveryService) GetCameraByID(id string) *DiscoveredCamera {
 func (s *ONVIFDiscoveryService) TriggerDiscovery() {
 	go s.discoverCameras()
 }
-

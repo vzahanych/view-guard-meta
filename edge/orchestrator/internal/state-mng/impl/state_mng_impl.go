@@ -26,6 +26,8 @@ import (
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/iot"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/iot/cctv"
 	cctvtypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/iot/cctv/types"
+	iotadapters "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/iot/state-machine/adapters"
+	iottypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/iot/types"
 	metastorage "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/meta-storage"
 	objectstorage "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/object-storage"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/state-mng/types"
@@ -477,7 +479,7 @@ func (m *StateManagerImpl) getOrCreateCameraStateMachine(cameraID string) types.
 
 	// Get or create device state machine from iot service
 	ctx := context.Background()
-	deviceSM, err := m.deviceStateService.GetOrCreateStateMachine(ctx, cameraID, iot.DeviceTypeCamera)
+	deviceSM, err := m.deviceStateService.GetOrCreateStateMachine(ctx, cameraID, iottypes.DeviceTypeCamera)
 	if err != nil {
 		m.logger.Error("Failed to get/create device state machine",
 			zap.String("camera_id", cameraID),
@@ -487,7 +489,7 @@ func (m *StateManagerImpl) getOrCreateCameraStateMachine(cameraID string) types.
 	}
 
 	// Wrap device state machine in adapter
-	adapter := iot.NewCameraStateMachineAdapter(deviceSM)
+	adapter := iotadapters.NewCameraStateMachineAdapter(deviceSM, m.logger)
 
 	// Cache the adapter
 	m.cameraStateMachinesMu.Lock()
@@ -516,8 +518,8 @@ func (m *StateManagerImpl) getCameraStateMachine(cameraID string) types.CameraSt
 	if m.deviceStateService != nil {
 		deviceSM, err := m.deviceStateService.GetStateMachine(cameraID)
 		if err == nil {
-			// Wrap in adapter and cache
-			adapter := iot.NewCameraStateMachineAdapter(deviceSM)
+		// Wrap in adapter and cache
+		adapter := iotadapters.NewCameraStateMachineAdapter(deviceSM, m.logger)
 			m.cameraStateMachinesMu.Lock()
 			m.cameraStateMachineAdapters[cameraID] = adapter
 			m.cameraStateMachinesMu.Unlock()
@@ -532,7 +534,7 @@ func (m *StateManagerImpl) getCameraStateMachine(cameraID string) types.CameraSt
 func (m *StateManagerImpl) getAllCameraStateMachines() map[string]types.CameraStateMachine {
 	// If device state service is available, get all camera state machines from there
 	if m.deviceStateService != nil {
-		allDeviceSMs := m.deviceStateService.GetStateMachinesByType(iot.DeviceTypeCamera)
+		allDeviceSMs := m.deviceStateService.GetStateMachinesByType(iottypes.DeviceTypeCamera)
 		
 		m.cameraStateMachinesMu.Lock()
 		defer m.cameraStateMachinesMu.Unlock()
@@ -547,7 +549,7 @@ func (m *StateManagerImpl) getAllCameraStateMachines() map[string]types.CameraSt
 				result[cameraID] = adapter
 			} else {
 				// Create and cache new adapter
-				adapter := iot.NewCameraStateMachineAdapter(deviceSM)
+				adapter := iotadapters.NewCameraStateMachineAdapter(deviceSM, m.logger)
 				m.cameraStateMachineAdapters[cameraID] = adapter
 				result[cameraID] = adapter
 			}
