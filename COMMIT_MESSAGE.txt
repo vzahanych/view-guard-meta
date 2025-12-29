@@ -1,24 +1,38 @@
-refactor(vm-gateway): make gateway fully provider-agnostic
+refactor(iot): implement device-agnostic service architecture
 
-Refactor VM Gateway service to be fully provider-agnostic, enabling
-support for multiple tunnel (WireGuard, OpenVPN, IPSec) and transport
-(HTTP, gRPC, WebSocket) providers.
+Refactor IoT service to a clean, device-agnostic architecture following
+vm-gateway patterns. Extract components into dedicated packages, implement
+DeviceRegistry with persistence, and establish unified service façade.
 
 Key changes:
-- Reorganize structure: extract transport-service and tunnel-client-service
-  abstractions with factory pattern
-- Consolidate types: move all VM API types to vm-gateway/types package
-- Promote TunnelConfig: make tunnel configuration top-level in VMGatewayConfig
-- Generalize state machine: use generic tunnel/transport state terminology
-- Remove interface{} assertions: use typed interfaces from types package
-- Standardize error handling: add sentinel errors and consistent wrapping
-- Fix lifecycle issues: ensure contexts flow from callers, fix reconnection
-- Enhance observability: add HealthSnapshot() method for debugging
-- Update naming: replace provider-specific method names with generic ones
-- Add comprehensive tests: factory selection, config validation, state transitions
-- Add package documentation: doc.go with architecture diagrams and examples
+- Extract types: Move all interfaces and types to types/ package for clean
+  separation of concerns
+- Implement DeviceRegistry: Create complete device registry implementation
+  with device storage, type/capability indexes, and lifecycle management
+- Add persistence: Integrate meta-storage for device persistence with
+  optional in-memory fallback
+- Extract plugin-registry: Move plugin registry to dedicated package with
+  plugin management and discovery coordination
+- Reorganize structure: Create device-registry/ package with registry,
+  persistence, and comprehensive tests
+- Update CCTV integration: Refactor CCTV to use DevicePlugin interface,
+  integrate with new registry system
+- Remove old implementations: Delete device_state_machine.go,
+  device_state_configs.go, and data_pipeline.go in favor of new structure
+- Add comprehensive documentation: Create doc.go with architecture overview,
+  package structure, and usage examples
+- Enhance test coverage: Add registry tests, examples, and integration
+  verification tests
 
-This refactoring removes all provider-specific coupling, making it easy
-to add new tunnel/transport providers without changing application code.
+Architecture improvements:
+- Device-agnostic design: Service works with any device type (cameras,
+  sensors, audio) through unified DevicePlugin interface
+- Clean package structure: Top-level façade with subpackages for
+  implementations (plugin-registry, device-registry)
+- Persistence abstraction: DeviceStorageBackend interface enables
+  pluggable storage backends
+- Lifecycle management: Unified lifecycle coordination across all components
+- Observability: HealthSnapshot() method provides service status visibility
 
-
+This refactoring establishes a foundation for supporting multiple device
+types while maintaining clean separation of concerns and testability.
