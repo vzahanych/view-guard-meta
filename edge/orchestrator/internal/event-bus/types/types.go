@@ -42,8 +42,14 @@ const (
 	EventTypeRawDeviceDataClipRecorded  EventType = "raw_device_data.clip_recorded"
 
 	// Storage events
-	EventTypeStorageFull    EventType = "storage.full"
-	EventTypeStorageWarning EventType = "storage.warning"
+	EventTypeStorageFull                EventType = "storage.full"
+	EventTypeStorageWarning             EventType = "storage.warning"
+	EventTypeStorageQuotaExceeded       EventType = "storage.quota_exceeded"
+	EventTypeStorageCleanupStarted      EventType = "storage.cleanup_started"
+	EventTypeStorageCleanupCompleted    EventType = "storage.cleanup_completed"
+	EventTypeStorageCorruptionDetected  EventType = "storage.corruption_detected"
+	EventTypeStorageSchemaMigrationStarted  EventType = "storage.schema_migration_started"
+	EventTypeStorageSchemaMigrationCompleted EventType = "storage.schema_migration_completed"
 
 	// Security events
 	EventTypeSecurityEventCreated EventType = "security.event.created"
@@ -61,7 +67,7 @@ func (e EventType) String() string {
 // EventData is a type set (interface constraint) for all event data types.
 // This ensures type safety while allowing different event payload types.
 type EventData interface {
-	ModelDeployedEventData | ModelDeploymentStatusEventData | SnapshotRequestedEventData | CapabilitiesReceivedEventData | NetworkEventData | DeviceEventData | DeviceFrameReceivedEventData | DeviceDiscoveredEventData | DeviceRegisteredEventData | DataUnitSavedEventData | DataUnitUpdatedEventData | DataUnitDeletedEventData
+	ModelDeployedEventData | ModelDeploymentStatusEventData | SnapshotRequestedEventData | CapabilitiesReceivedEventData | NetworkEventData | DeviceEventData | DeviceFrameReceivedEventData | DeviceDiscoveredEventData | DeviceRegisteredEventData | DataUnitSavedEventData | DataUnitUpdatedEventData | DataUnitDeletedEventData | StorageEventData
 }
 
 // Event represents an application-level event flowing through the bus.
@@ -252,4 +258,32 @@ type DataUnitUpdatedEventData struct {
 type DataUnitDeletedEventData struct {
 	DataUnitID string `json:"data_unit_id"` // Data unit ID (e.g., screenshot_id)
 	DeviceID   string `json:"device_id"`    // Device ID (device-agnostic)
+}
+
+// StorageEventData contains data for storage-related events.
+// Used for storage.warning, storage.full, storage.quota_exceeded, storage.cleanup_started,
+// storage.cleanup_completed, storage.corruption_detected, storage.schema_migration_started,
+// and storage.schema_migration_completed events.
+type StorageEventData struct {
+	// For quota events (warning, full, quota_exceeded)
+	UsedBytes      *int64   `json:"used_bytes,omitempty"`      // Current storage usage in bytes
+	LimitBytes     *int64   `json:"limit_bytes,omitempty"`      // Storage limit in bytes
+	UsagePercent   *float64 `json:"usage_percent,omitempty"`   // Usage percentage (0-100)
+	
+	// For cleanup events (cleanup_started, cleanup_completed)
+	RecordsDeleted   *int64         `json:"records_deleted,omitempty"`   // Number of records deleted
+	SpaceFreedBytes  *int64         `json:"space_freed_bytes,omitempty"`  // Space freed in bytes
+	BucketsProcessed *int           `json:"buckets_processed,omitempty"`  // Number of buckets processed
+	Duration         *string        `json:"duration,omitempty"`           // Cleanup duration (e.g., "5s")
+	
+	// For corruption events (corruption_detected)
+	ErrorCount       *int           `json:"error_count,omitempty"`         // Number of integrity errors
+	ErrorDetails     *string        `json:"error_details,omitempty"`      // Error details
+	
+	// For schema migration events (schema_migration_started, schema_migration_completed)
+	SchemaVersion    *int           `json:"schema_version,omitempty"`    // Schema version
+	Description      *string        `json:"description,omitempty"`       // Migration description
+	
+	// Additional metadata
+	Metadata         map[string]interface{} `json:"metadata,omitempty"`    // Additional event metadata
 }

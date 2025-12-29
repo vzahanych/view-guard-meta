@@ -2,6 +2,14 @@ package types
 
 import "time"
 
+// This file maintains backward compatibility by keeping existing type definitions.
+// New types have been added to their respective files:
+//   - config.go: MetaStorageConfig (moved from here)
+//   - storage.go: RecordMetadata, StorageQuota, BucketInfo, HealthStatus (new types)
+//   - schema.go: SchemaVersion, SchemaMigration (new types)
+//   - provider.go: MetaStorageProvider, KeyValue, BoltDBConfig, SQLiteConfig, PostgreSQLConfig (new types)
+//   - errors.go: (reserved for future error types)
+
 // StorageEntryMetadata represents metadata for a stored file (clip or snapshot)
 type StorageEntryMetadata struct {
 	Path      string
@@ -39,11 +47,29 @@ type StorageStats struct {
 	AvailableBytes   int64
 }
 
-// ModelFilters contains filters for listing models
+// ModelFilters contains filters for listing model deployments.
+// Updated to use DeviceID instead of CameraID for device-agnostic support.
 type ModelFilters struct {
-	EdgeID   *string
+	// EdgeID filters by edge device ID
+	EdgeID *string
+
+	// DeviceID filters by device ID (replaces CameraID)
+	DeviceID *string
+
+	// DeviceType filters by device type (e.g., "camera", "sensor", "audio_device")
+	DeviceType *string
+
+	// Status filters by deployment status
+	Status *string
+
+	// ModelType filters by model type
+	ModelType *string
+
+	// Framework filters by ML framework
+	Framework *string
+
+	// CameraID is kept for backward compatibility (deprecated: use DeviceID instead)
 	CameraID *string
-	Status   *string
 }
 
 // CameraMetadata represents metadata for a CCTV camera
@@ -102,14 +128,4 @@ type ClipMetadata struct {
 	SizeBytes int64
 	CreatedAt time.Time
 	Metadata  map[string]interface{}
-}
-
-// MetaStorageConfig contains configuration for the meta-storage service
-type MetaStorageConfig struct {
-	Provider  string `yaml:"provider"`
-	Endpoint  string `yaml:"endpoint"`
-	AccessKey string `yaml:"access_key"`
-	SecretKey string `yaml:"secret_key"`
-	Region    string `yaml:"region"`
-	DataDir   string `yaml:"data_dir"` // Data directory for local storage (used by bbolt)
 }

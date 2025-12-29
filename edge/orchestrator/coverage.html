@@ -1,0 +1,2883 @@
+
+<!DOCTYPE html>
+<html>
+	<head>
+		<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+		<title>bbolt: Go Coverage Report</title>
+		<style>
+			body {
+				background: black;
+				color: rgb(80, 80, 80);
+			}
+			body, pre, #legend span {
+				font-family: Menlo, monospace;
+				font-weight: bold;
+			}
+			#topbar {
+				background: black;
+				position: fixed;
+				top: 0; left: 0; right: 0;
+				height: 42px;
+				border-bottom: 1px solid rgb(80, 80, 80);
+			}
+			#content {
+				margin-top: 50px;
+			}
+			#nav, #legend {
+				float: left;
+				margin-left: 10px;
+			}
+			#legend {
+				margin-top: 12px;
+			}
+			#nav {
+				margin-top: 10px;
+			}
+			#legend span {
+				margin: 0 5px;
+			}
+			.cov0 { color: rgb(192, 0, 0) }
+.cov1 { color: rgb(128, 128, 128) }
+.cov2 { color: rgb(116, 140, 131) }
+.cov3 { color: rgb(104, 152, 134) }
+.cov4 { color: rgb(92, 164, 137) }
+.cov5 { color: rgb(80, 176, 140) }
+.cov6 { color: rgb(68, 188, 143) }
+.cov7 { color: rgb(56, 200, 146) }
+.cov8 { color: rgb(44, 212, 149) }
+.cov9 { color: rgb(32, 224, 152) }
+.cov10 { color: rgb(20, 236, 155) }
+
+		</style>
+	</head>
+	<body>
+		<div id="topbar">
+			<div id="nav">
+				<select id="files">
+				
+				<option value="file0">github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/meta-storage/impl/bbolt/bbolt_provider.go (0.0%)</option>
+				
+				<option value="file1">github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/meta-storage/meta_storage.go (0.0%)</option>
+				
+				<option value="file2">github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/meta-storage/mocks/mock_meta_storage.go (0.0%)</option>
+				
+				<option value="file3">github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/meta-storage/types/config.go (0.0%)</option>
+				
+				<option value="file4">github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/meta-storage/types/ml_lifecycle.go (0.0%)</option>
+				
+				<option value="file5">github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/meta-storage/types/storage.go (0.0%)</option>
+				
+				</select>
+			</div>
+			<div id="legend">
+				<span>not tracked</span>
+			
+				<span class="cov0">not covered</span>
+				<span class="cov8">covered</span>
+			
+			</div>
+		</div>
+		<div id="content">
+		
+		<pre class="file" id="file0" style="display: none">package bbolt
+
+import (
+        "context"
+        "fmt"
+        "os"
+        "path/filepath"
+        "time"
+
+        "go.etcd.io/bbolt"
+        "go.uber.org/zap"
+
+        "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/meta-storage/types"
+)
+
+// BoltDBProvider implements the MetaStorageProvider interface using BoltDB.
+// This provider is thread-safe and manages a single BoltDB database connection.
+type BoltDBProvider struct {
+        db       *bbolt.DB
+        dbPath   string // Store database path for size calculation
+        logger   *zap.Logger
+}
+
+// NewBoltDBProvider creates a new BoltDB provider instance.
+// The provider opens the database file and initializes it.
+func NewBoltDBProvider(ctx context.Context, cfg *types.BoltDBConfig, logger *zap.Logger) (*BoltDBProvider, error) <span class="cov0" title="0">{
+        // Set defaults
+        dbFile := cfg.DatabaseFile
+        if dbFile == "" </span><span class="cov0" title="0">{
+                dbFile = "meta.db"
+        }</span>
+        <span class="cov0" title="0">dbPath := filepath.Join(cfg.DataDir, "db", dbFile)
+
+        // Ensure parent directories exist (bbolt.Open does not create them)
+        dbDir := filepath.Dir(dbPath)
+        if err := os.MkdirAll(dbDir, 0755); err != nil </span><span class="cov0" title="0">{
+                return nil, fmt.Errorf("failed to create database directory %s: %w", dbDir, err)
+        }</span>
+
+        // Set file mode default
+        <span class="cov0" title="0">fileMode := os.FileMode(cfg.FileMode)
+        if fileMode == 0 </span><span class="cov0" title="0">{
+                fileMode = 0600
+        }</span>
+
+        // Set timeout default
+        <span class="cov0" title="0">timeout := time.Duration(cfg.Timeout) * time.Second
+        if timeout == 0 </span><span class="cov0" title="0">{
+                timeout = 1 * time.Second
+        }</span>
+
+        <span class="cov0" title="0">opts := &amp;bbolt.Options{
+                Timeout: timeout,
+                NoSync:  cfg.NoSync,
+        }
+
+        db, err := bbolt.Open(dbPath, fileMode, opts)
+        if err != nil </span><span class="cov0" title="0">{
+                return nil, fmt.Errorf("failed to open BoltDB database: %w", err)
+        }</span>
+
+        <span class="cov0" title="0">return &amp;BoltDBProvider{
+                db:     db,
+                dbPath: dbPath,
+                logger: logger,
+        }, nil</span>
+}
+
+// GetDatabasePath returns the path to the database file.
+// This is used for health monitoring to calculate database size.
+func (p *BoltDBProvider) GetDatabasePath() string <span class="cov0" title="0">{
+        return p.dbPath
+}</span>
+
+// CreateBucket creates a new bucket/namespace in storage.
+// If the bucket already exists, this is a no-op (idempotent).
+func (p *BoltDBProvider) CreateBucket(ctx context.Context, name string) error <span class="cov0" title="0">{
+        return p.db.Update(func(tx *bbolt.Tx) error </span><span class="cov0" title="0">{
+                _, err := tx.CreateBucketIfNotExists([]byte(name))
+                if err != nil </span><span class="cov0" title="0">{
+                        return fmt.Errorf("failed to create bucket %s: %w", name, err)
+                }</span>
+                <span class="cov0" title="0">return nil</span>
+        })
+}
+
+// DeleteBucket deletes a bucket/namespace from storage.
+// If the bucket does not exist, this returns an error.
+func (p *BoltDBProvider) DeleteBucket(ctx context.Context, name string) error <span class="cov0" title="0">{
+        return p.db.Update(func(tx *bbolt.Tx) error </span><span class="cov0" title="0">{
+                bucket := tx.Bucket([]byte(name))
+                if bucket == nil </span><span class="cov0" title="0">{
+                        return fmt.Errorf("bucket %s does not exist", name)
+                }</span>
+                <span class="cov0" title="0">return tx.DeleteBucket([]byte(name))</span>
+        })
+}
+
+// BucketExists checks if a bucket/namespace exists in storage.
+func (p *BoltDBProvider) BucketExists(ctx context.Context, name string) bool <span class="cov0" title="0">{
+        var exists bool
+        _ = p.db.View(func(tx *bbolt.Tx) error </span><span class="cov0" title="0">{
+                bucket := tx.Bucket([]byte(name))
+                exists = bucket != nil
+                return nil
+        }</span>)
+        <span class="cov0" title="0">return exists</span>
+}
+
+// Put stores a key-value pair in the specified bucket.
+// If the key already exists, it is overwritten.
+func (p *BoltDBProvider) Put(ctx context.Context, bucket string, key []byte, value []byte) error <span class="cov0" title="0">{
+        return p.db.Update(func(tx *bbolt.Tx) error </span><span class="cov0" title="0">{
+                b := tx.Bucket([]byte(bucket))
+                if b == nil </span><span class="cov0" title="0">{
+                        return fmt.Errorf("bucket %s does not exist", bucket)
+                }</span>
+                <span class="cov0" title="0">return b.Put(key, value)</span>
+        })
+}
+
+// Get retrieves a value by key from the specified bucket.
+// Returns an error if the key does not exist.
+func (p *BoltDBProvider) Get(ctx context.Context, bucket string, key []byte) ([]byte, error) <span class="cov0" title="0">{
+        var value []byte
+        err := p.db.View(func(tx *bbolt.Tx) error </span><span class="cov0" title="0">{
+                b := tx.Bucket([]byte(bucket))
+                if b == nil </span><span class="cov0" title="0">{
+                        return fmt.Errorf("bucket %s does not exist", bucket)
+                }</span>
+                <span class="cov0" title="0">v := b.Get(key)
+                if v == nil </span><span class="cov0" title="0">{
+                        return fmt.Errorf("key not found in bucket %s", bucket)
+                }</span>
+                // Copy the value since BoltDB returns a slice that may be reused
+                <span class="cov0" title="0">value = make([]byte, len(v))
+                copy(value, v)
+                return nil</span>
+        })
+        <span class="cov0" title="0">return value, err</span>
+}
+
+// Delete removes a key-value pair from the specified bucket.
+// If the key does not exist, this is a no-op (idempotent).
+func (p *BoltDBProvider) Delete(ctx context.Context, bucket string, key []byte) error <span class="cov0" title="0">{
+        return p.db.Update(func(tx *bbolt.Tx) error </span><span class="cov0" title="0">{
+                b := tx.Bucket([]byte(bucket))
+                if b == nil </span><span class="cov0" title="0">{
+                        return fmt.Errorf("bucket %s does not exist", bucket)
+                }</span>
+                <span class="cov0" title="0">return b.Delete(key)</span>
+        })
+}
+
+// List lists all key-value pairs in the specified bucket with the given prefix.
+// If prefix is empty, all keys are returned.
+// The results are returned in key order (lexicographically sorted).
+func (p *BoltDBProvider) List(ctx context.Context, bucket string, prefix []byte) ([]types.KeyValue, error) <span class="cov0" title="0">{
+        var results []types.KeyValue
+        err := p.db.View(func(tx *bbolt.Tx) error </span><span class="cov0" title="0">{
+                b := tx.Bucket([]byte(bucket))
+                if b == nil </span><span class="cov0" title="0">{
+                        return fmt.Errorf("bucket %s does not exist", bucket)
+                }</span>
+
+                <span class="cov0" title="0">c := b.Cursor()
+                for k, v := c.Seek(prefix); k != nil &amp;&amp; (len(prefix) == 0 || len(k) &gt;= len(prefix) &amp;&amp; string(k[:len(prefix)]) == string(prefix)); k, v = c.Next() </span><span class="cov0" title="0">{
+                        // Copy key and value since BoltDB returns slices that may be reused
+                        keyCopy := make([]byte, len(k))
+                        copy(keyCopy, k)
+                        valueCopy := make([]byte, len(v))
+                        copy(valueCopy, v)
+                        results = append(results, types.KeyValue{
+                                Key:   keyCopy,
+                                Value: valueCopy,
+                        })
+                }</span>
+                <span class="cov0" title="0">return nil</span>
+        })
+        <span class="cov0" title="0">return results, err</span>
+}
+
+// HealthCheck performs a health check on the storage provider.
+// Returns an error if the provider is unhealthy.
+func (p *BoltDBProvider) HealthCheck(ctx context.Context) error <span class="cov0" title="0">{
+        // Check if database is accessible
+        if p.db == nil </span><span class="cov0" title="0">{
+                return fmt.Errorf("database is not initialized")
+        }</span>
+
+        // Perform a simple read operation to verify database is accessible
+        <span class="cov0" title="0">err := p.db.View(func(tx *bbolt.Tx) error </span><span class="cov0" title="0">{
+                // Try to access a system bucket or perform a simple operation
+                // Just verify the transaction can be created
+                return nil
+        }</span>)
+        <span class="cov0" title="0">if err != nil </span><span class="cov0" title="0">{
+                return fmt.Errorf("database health check failed: %w", err)
+        }</span>
+
+        <span class="cov0" title="0">return nil</span>
+}
+
+// Close closes the database connection and releases all resources.
+func (p *BoltDBProvider) Close() error <span class="cov0" title="0">{
+        if p.db == nil </span><span class="cov0" title="0">{
+                return nil
+        }</span>
+        <span class="cov0" title="0">return p.db.Close()</span>
+}
+
+</pre>
+		
+		<pre class="file" id="file1" style="display: none">package metastorage
+
+import (
+        "context"
+        "fmt"
+        "time"
+
+        "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/meta-storage/impl"
+        implbbolt "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/meta-storage/impl/bbolt"
+        "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/meta-storage/types"
+        "go.uber.org/fx"
+        "go.uber.org/zap"
+)
+
+// Re-export errors from types package for convenience
+var (
+        ErrNotInitialized       = types.ErrNotInitialized
+        ErrAlreadyStarted       = types.ErrAlreadyStarted
+        ErrQuotaExceeded        = types.ErrQuotaExceeded
+        ErrRecordNotFound       = types.ErrRecordNotFound
+        ErrCorruptionDetected   = types.ErrCorruptionDetected
+        ErrInvalidSchemaVersion = types.ErrInvalidSchemaVersion
+)
+
+// Re-export types for convenience
+// These types are defined in the types package but re-exported here for easier access
+type StorageEntryMetadata = types.StorageEntryMetadata
+type StorageStats = types.StorageStats
+type ModelFilters = types.ModelFilters
+
+// Model deployment types
+type ModelDeploymentMetadata = types.ModelDeploymentMetadata
+
+// Event bus types (new)
+type EventBusEventMetadata = types.EventBusEventMetadata
+type EventBusFilters = types.EventBusFilters
+
+// Pending data unit request type (new)
+type PendingDataUnitRequest = types.PendingDataUnitRequest
+
+// Device-agnostic types (new)
+type DeviceID = types.DeviceID
+type DeviceType = types.DeviceType
+type DeviceMetadata = types.DeviceMetadata
+type DeviceFilters = types.DeviceFilters
+type DataUnitMetadata = types.DataUnitMetadata
+type VideoClipMetadata = types.VideoClipMetadata
+
+// ML lifecycle types
+type MLLifecycleState = types.MLLifecycleState
+type MLLifecycleStateInfo = types.MLLifecycleStateInfo
+type MLLifecycleFilters = types.MLLifecycleFilters
+type PendingModelDeployment = types.PendingModelDeployment
+
+// Health monitoring types
+type HealthStatus = types.HealthStatus
+type StorageHealth = types.StorageHealth
+type StorageQuota = types.StorageQuota
+
+// MetaDataStore defines operations for managing metadata about stored objects.
+// It provides a unified interface for all metadata storage operations, abstracting away
+// the details of the underlying storage provider (BoltDB, SQLite, PostgreSQL, etc.).
+//
+//go:generate go run go.uber.org/mock/mockgen -source=$GOFILE -destination=mocks/mock_meta_storage.go -package=mocks
+type MetaDataStore interface {
+        // Storage entry metadata (clips and snapshots)
+
+        // SaveStorageEntry saves metadata about a storage entry (clip or snapshot).
+        // The entry must have a valid Path field that uniquely identifies the storage entry.
+        //
+        // Returns an error if:
+        //   - The entry is invalid (missing required fields)
+        //   - Storage quota is exceeded (ErrQuotaExceeded)
+        //   - The provider operation fails
+        SaveStorageEntry(ctx context.Context, entry StorageEntryMetadata) error
+
+        // DeleteStorageEntry deletes metadata for a storage entry by path.
+        // If the entry does not exist, this is a no-op and returns no error.
+        //
+        // Returns an error if:
+        //   - The provider operation fails
+        DeleteStorageEntry(ctx context.Context, path string) error
+
+        // ListStorageEntries lists all storage entries of the specified file type.
+        // If fileType is empty, all entries are returned.
+        //
+        // Returns:
+        //   - A slice of StorageEntryMetadata entries, sorted by path
+        //   - An error if the provider operation fails
+        ListStorageEntries(ctx context.Context, fileType string) ([]StorageEntryMetadata, error)
+
+        // GetStorageStats returns statistics about stored entries.
+        //
+        // Returns:
+        //   - StorageStats containing total size, entry counts, etc.
+        //   - An error if the provider operation fails
+        GetStorageStats(ctx context.Context) (*StorageStats, error)
+
+        // Model deployment metadata (device-agnostic, replaces deployed model methods)
+
+        // SaveModelDeployment saves metadata about a deployed ML model.
+        // The deployment must have a valid ModelID that uniquely identifies the model.
+        //
+        // Returns an error if:
+        //   - The deployment is invalid (missing required fields)
+        //   - Storage quota is exceeded (ErrQuotaExceeded)
+        //   - The provider operation fails
+        SaveModelDeployment(ctx context.Context, deployment types.ModelDeploymentMetadata) error
+
+        // UpdateModelDeployment updates an existing model deployment using the provided update function.
+        // The update function receives the current deployment and returns the updated deployment.
+        //
+        // Note: This method is not thread-safe for concurrent updates. For concurrent-safe updates,
+        // use a version-based locking mechanism or ensure external synchronization.
+        //
+        // Returns:
+        //   - The updated ModelDeploymentMetadata
+        //   - An error if:
+        //     - The model deployment does not exist (ErrRecordNotFound)
+        //     - Storage quota is exceeded (ErrQuotaExceeded)
+        //     - The provider operation fails
+        UpdateModelDeployment(ctx context.Context, modelID string, updateFn func(types.ModelDeploymentMetadata) types.ModelDeploymentMetadata) (types.ModelDeploymentMetadata, error)
+
+        // GetModelDeployment retrieves a model deployment by model ID.
+        //
+        // Returns:
+        //   - The ModelDeploymentMetadata if found
+        //   - false if the model deployment does not exist
+        GetModelDeployment(ctx context.Context, modelID string) (types.ModelDeploymentMetadata, bool)
+
+        // ListModelDeployments lists model deployments matching the provided filters.
+        // If filters is nil, all deployments are returned.
+        //
+        // Filter fields:
+        //   - DeviceID: Filter by device ID
+        //   - DeviceType: Filter by device type
+        //   - ModelType: Filter by model type
+        //   - Framework: Filter by ML framework
+        //
+        // Returns:
+        //   - A slice of ModelDeploymentMetadata entries, sorted by deployment time
+        //   - An error if the provider operation fails
+        ListModelDeployments(ctx context.Context, filters *types.ModelFilters) ([]types.ModelDeploymentMetadata, error)
+
+        // DeleteModelDeployment deletes a model deployment by model ID.
+        // If the deployment does not exist, this is a no-op and returns no error.
+        //
+        // Returns an error if:
+        //   - The provider operation fails
+        DeleteModelDeployment(ctx context.Context, modelID string) error
+
+        // ListModelVersions lists all model versions deployed for a specific device.
+        //
+        // Returns:
+        //   - A slice of ModelDeploymentMetadata entries for the device, sorted by version
+        //   - An error if the provider operation fails
+        ListModelVersions(ctx context.Context, deviceID string) ([]types.ModelDeploymentMetadata, error)
+
+        // GetLatestModelVersion retrieves the latest model version for a specific device.
+        //
+        // Returns:
+        //   - The latest ModelDeploymentMetadata if found
+        //   - false if no model is deployed for the device
+        GetLatestModelVersion(ctx context.Context, deviceID string) (*types.ModelDeploymentMetadata, bool)
+
+        // Device metadata (device-agnostic)
+
+        // SaveDevice saves metadata about a device (camera, sensor, audio device, etc.).
+        // The device must have a valid DeviceID that uniquely identifies the device.
+        //
+        // Returns an error if:
+        //   - The device is invalid (missing required fields)
+        //   - Storage quota is exceeded (ErrQuotaExceeded)
+        //   - The provider operation fails
+        SaveDevice(ctx context.Context, device types.DeviceMetadata) error
+
+        // UpdateDevice updates an existing device using the provided update function.
+        // The update function receives the current device and returns the updated device.
+        //
+        // Returns:
+        //   - The updated DeviceMetadata
+        //   - An error if:
+        //     - The device does not exist (ErrRecordNotFound)
+        //     - Storage quota is exceeded (ErrQuotaExceeded)
+        //     - The provider operation fails
+        UpdateDevice(ctx context.Context, deviceID string, updateFn func(types.DeviceMetadata) types.DeviceMetadata) (types.DeviceMetadata, error)
+
+        // GetDevice retrieves a device by device ID.
+        //
+        // Returns:
+        //   - The DeviceMetadata if found
+        //   - false if the device does not exist
+        GetDevice(ctx context.Context, deviceID string) (types.DeviceMetadata, bool)
+
+        // ListDevices lists devices matching the provided filters.
+        // If filters is nil, all devices are returned.
+        //
+        // Filter fields:
+        //   - DeviceType: Filter by device type (camera, sensor, audio, etc.)
+        //   - Location: Filter by location
+        //
+        // Returns:
+        //   - A slice of DeviceMetadata entries, sorted by device ID
+        //   - An error if the provider operation fails
+        ListDevices(ctx context.Context, filters *types.DeviceFilters) ([]types.DeviceMetadata, error)
+
+        // DeleteDevice deletes a device by device ID.
+        // If the device does not exist, this is a no-op and returns no error.
+        //
+        // Returns an error if:
+        //   - The provider operation fails
+        DeleteDevice(ctx context.Context, deviceID string) error
+
+        // Data unit metadata (device-agnostic, replaces screenshot-specific methods)
+
+        // SaveDataUnit saves metadata about a data unit (screenshot, sensor reading, audio sample, etc.).
+        // The data unit must have a valid ID that uniquely identifies the data unit.
+        //
+        // Returns an error if:
+        //   - The data unit is invalid (missing required fields)
+        //   - Storage quota is exceeded (ErrQuotaExceeded)
+        //   - The provider operation fails
+        SaveDataUnit(ctx context.Context, dataUnit types.DataUnitMetadata) error
+
+        // UpdateDataUnit updates an existing data unit using the provided update function.
+        // The update function receives the current data unit and returns the updated data unit.
+        //
+        // Returns:
+        //   - The updated DataUnitMetadata
+        //   - An error if:
+        //     - The data unit does not exist (ErrRecordNotFound)
+        //     - Storage quota is exceeded (ErrQuotaExceeded)
+        //     - The provider operation fails
+        UpdateDataUnit(ctx context.Context, dataUnitID string, updateFn func(types.DataUnitMetadata) types.DataUnitMetadata) (types.DataUnitMetadata, error)
+
+        // GetDataUnit retrieves a data unit by data unit ID.
+        //
+        // Returns:
+        //   - The DataUnitMetadata if found
+        //   - false if the data unit does not exist
+        GetDataUnit(ctx context.Context, dataUnitID string) (types.DataUnitMetadata, bool)
+
+        // ListDataUnits lists data units matching the provided filters.
+        // If filters is nil, all data units are returned.
+        //
+        // Filter fields:
+        //   - DeviceID: Filter by device ID
+        //   - DeviceType: Filter by device type
+        //   - DataType: Filter by data type (image, sensor, audio, etc.)
+        //   - Label: Filter by label (motion, person, etc.)
+        //   - StartTime: Filter by start time (inclusive)
+        //   - EndTime: Filter by end time (inclusive)
+        //
+        // Returns:
+        //   - A slice of DataUnitMetadata entries, sorted by creation time (newest first)
+        //   - An error if the provider operation fails
+        ListDataUnits(ctx context.Context, filters *types.DataUnitFilters) ([]types.DataUnitMetadata, error)
+
+        // DeleteDataUnit deletes a data unit by data unit ID.
+        // If the data unit does not exist, this is a no-op and returns no error.
+        //
+        // Returns an error if:
+        //   - The provider operation fails
+        DeleteDataUnit(ctx context.Context, dataUnitID string) error
+
+        // Video clip metadata (device-agnostic)
+        SaveVideoClip(ctx context.Context, clip types.VideoClipMetadata) error
+        GetVideoClip(ctx context.Context, clipID string) (types.VideoClipMetadata, bool)
+        ListVideoClips(ctx context.Context, filters map[string]interface{}) ([]types.VideoClipMetadata, error)
+        DeleteVideoClip(ctx context.Context, clipID string) error
+
+        // Security event metadata (structured, device-agnostic)
+
+        // SaveSecurityEvent saves metadata about a security event.
+        // The event must have a valid EventID that uniquely identifies the event.
+        //
+        // Returns an error if:
+        //   - The event is invalid (missing required fields)
+        //   - Storage quota is exceeded (ErrQuotaExceeded)
+        //   - The provider operation fails
+        SaveSecurityEvent(ctx context.Context, event types.SecurityEventMetadata) error
+
+        // GetSecurityEvent retrieves a security event by event ID.
+        //
+        // Returns:
+        //   - A pointer to SecurityEventMetadata if found
+        //   - false if the event does not exist
+        GetSecurityEvent(ctx context.Context, eventID string) (*types.SecurityEventMetadata, bool)
+
+        // ListSecurityEvents lists security events matching the provided filters.
+        // If filters is nil, all events are returned.
+        //
+        // Filter fields:
+        //   - DeviceID: Filter by device ID
+        //   - EventType: Filter by event type
+        //   - Status: Filter by status (pending, acknowledged, etc.)
+        //   - StartTime: Filter by start time (inclusive)
+        //   - EndTime: Filter by end time (inclusive)
+        //
+        // Returns:
+        //   - A slice of SecurityEventMetadata entries, sorted by event time (newest first)
+        //   - An error if the provider operation fails
+        ListSecurityEvents(ctx context.Context, filters *types.SecurityEventFilters) ([]types.SecurityEventMetadata, error)
+
+        // DeleteSecurityEvent deletes a security event by event ID.
+        // If the event does not exist, this is a no-op and returns no error.
+        //
+        // Returns an error if:
+        //   - The provider operation fails
+        DeleteSecurityEvent(ctx context.Context, eventID string) error
+
+        // UpdateSecurityEventStatus updates the status and VM acknowledgment time of a security event.
+        // This is typically called when the VM acknowledges an event.
+        //
+        // Parameters:
+        //   - eventID: The unique identifier of the event
+        //   - status: The new status (e.g., "acknowledged", "resolved")
+        //   - vmACKTime: The time when the VM acknowledged the event (nil if not acknowledged)
+        //
+        // Returns an error if:
+        //   - The event does not exist (ErrRecordNotFound)
+        //   - The provider operation fails
+        UpdateSecurityEventStatus(ctx context.Context, eventID string, status string, vmACKTime *time.Time) error
+
+        // GetPendingSecurityEvents retrieves security events that are pending acknowledgment.
+        // Events are returned sorted by event time (oldest first) up to the specified limit.
+        //
+        // Returns:
+        //   - A slice of SecurityEventMetadata entries with status "pending"
+        //   - An error if the provider operation fails
+        GetPendingSecurityEvents(ctx context.Context, limit int) ([]types.SecurityEventMetadata, error)
+
+        // Pending data unit request metadata (device-agnostic)
+        SavePendingDataUnitRequest(ctx context.Context, deviceID string, request types.PendingDataUnitRequest) error
+        GetPendingDataUnitRequest(ctx context.Context, deviceID string) (*types.PendingDataUnitRequest, bool)
+        ListPendingDataUnitRequests(ctx context.Context) ([]types.PendingDataUnitRequest, error)
+        DeletePendingDataUnitRequest(ctx context.Context, deviceID string) error
+
+        // Edge state metadata (current state and history)
+        SaveEdgeState(ctx context.Context, state map[string]interface{}) error
+        GetCurrentEdgeState(ctx context.Context) (map[string]interface{}, bool)
+        GetEdgeStateHistory(ctx context.Context, limit int) ([]map[string]interface{}, error)
+
+        // Edge capabilities metadata (capabilities sent by VM)
+        SaveEdgeCapabilities(ctx context.Context, capabilities map[string]interface{}) error
+        GetEdgeCapabilities(ctx context.Context) (map[string]interface{}, bool)
+
+        // Event bus metadata (for event bus persistence) - structured types
+
+        // SaveEvent saves metadata about an event bus event.
+        // The event must have a valid EventID that uniquely identifies the event.
+        //
+        // Returns an error if:
+        //   - The event is invalid (missing required fields)
+        //   - Storage quota is exceeded (ErrQuotaExceeded)
+        //   - The provider operation fails
+        SaveEvent(ctx context.Context, event types.EventBusEventMetadata) error
+
+        // GetEvent retrieves an event bus event by event ID.
+        //
+        // Returns:
+        //   - A pointer to EventBusEventMetadata if found
+        //   - false if the event does not exist
+        GetEvent(ctx context.Context, eventID string) (*types.EventBusEventMetadata, bool)
+
+        // ListEvents lists event bus events matching the provided filters.
+        // If filters is nil, all events are returned.
+        //
+        // Filter fields:
+        //   - EventType: Filter by event type
+        //   - Status: Filter by processing status (pending, processing, failed, etc.)
+        //   - StartTime: Filter by start time (inclusive)
+        //   - EndTime: Filter by end time (inclusive)
+        //
+        // Returns:
+        //   - A slice of EventBusEventMetadata entries, sorted by event time (newest first)
+        //   - An error if the provider operation fails
+        ListEvents(ctx context.Context, filters *types.EventBusFilters) ([]types.EventBusEventMetadata, error)
+
+        // DeleteEvent deletes an event bus event by event ID.
+        // If the event does not exist, this is a no-op and returns no error.
+        //
+        // Returns an error if:
+        //   - The provider operation fails
+        DeleteEvent(ctx context.Context, eventID string) error
+
+        // GetEventCount returns the total number of events in the event bus.
+        //
+        // Returns:
+        //   - The total count of events
+        //   - An error if the provider operation fails
+        GetEventCount(ctx context.Context) (int, error)
+
+        // Event processing status and retry tracking
+
+        // UpdateEventProcessingStatus updates the processing status, retry count, and error information for an event.
+        // This is typically called by the event processor to track event processing state.
+        //
+        // Parameters:
+        //   - eventID: The unique identifier of the event
+        //   - status: The new processing status (pending, processing, completed, failed, etc.)
+        //   - retryCount: The number of retry attempts
+        //   - lastError: The last error message (empty string if no error)
+        //   - nextRetryTime: The time when the event should be retried (nil if no retry scheduled)
+        //
+        // Returns an error if:
+        //   - The event does not exist (ErrRecordNotFound)
+        //   - The provider operation fails
+        UpdateEventProcessingStatus(ctx context.Context, eventID string, status string, retryCount int, lastError string, nextRetryTime *time.Time) error
+
+        // GetFailedEvents retrieves events that have failed processing before the specified time.
+        // This is used to identify events that need retry or manual intervention.
+        //
+        // Parameters:
+        //   - beforeTime: Only return events that failed before this time
+        //
+        // Returns:
+        //   - A slice of EventBusEventMetadata entries with status "failed", sorted by failure time
+        //   - An error if the provider operation fails
+        GetFailedEvents(ctx context.Context, beforeTime time.Time) ([]types.EventBusEventMetadata, error)
+
+        // GetDeadLetterEvents retrieves events that have been moved to the dead letter queue.
+        // Events are returned sorted by event time (oldest first) up to the specified limit.
+        //
+        // Parameters:
+        //   - limit: Maximum number of events to return
+        //
+        // Returns:
+        //   - A slice of EventBusEventMetadata entries from the dead letter queue
+        //   - An error if the provider operation fails
+        GetDeadLetterEvents(ctx context.Context, limit int) ([]types.EventBusEventMetadata, error)
+
+        // MoveEventToDeadLetter moves an event to the dead letter queue.
+        // This is typically called when an event has failed processing multiple times and should not be retried.
+        //
+        // Returns an error if:
+        //   - The event does not exist (ErrRecordNotFound)
+        //   - The provider operation fails
+        MoveEventToDeadLetter(ctx context.Context, eventID string) error
+
+        // ML lifecycle state operations
+
+        // SaveMLLifecycleState saves or updates the ML lifecycle state for a device.
+        // The state must have a valid DeviceID that uniquely identifies the device.
+        // If a state already exists for the device, it will be overwritten.
+        //
+        // Note: For concurrent-safe updates, use UpdateMLLifecycleStateCAS instead.
+        //
+        // Returns an error if:
+        //   - The state is invalid (missing required fields)
+        //   - Storage quota is exceeded (ErrQuotaExceeded)
+        //   - The provider operation fails
+        SaveMLLifecycleState(ctx context.Context, deviceID string, stateInfo types.MLLifecycleStateInfo) error
+
+        // GetMLLifecycleState retrieves the ML lifecycle state for a device.
+        //
+        // Returns:
+        //   - A pointer to MLLifecycleStateInfo if found
+        //   - false if no state exists for the device
+        GetMLLifecycleState(ctx context.Context, deviceID string) (*types.MLLifecycleStateInfo, bool)
+
+        // UpdateMLLifecycleState updates the ML lifecycle state for a device using the provided update function.
+        // The update function receives the current state and returns the updated state.
+        //
+        // Note: This method is not thread-safe for concurrent updates. For concurrent-safe updates,
+        // use UpdateMLLifecycleStateCAS instead.
+        //
+        // Returns:
+        //   - A pointer to the updated MLLifecycleStateInfo
+        //   - An error if:
+        //     - The state does not exist for the device (ErrRecordNotFound)
+        //     - Storage quota is exceeded (ErrQuotaExceeded)
+        //     - The provider operation fails
+        UpdateMLLifecycleState(ctx context.Context, deviceID string, updateFn func(types.MLLifecycleStateInfo) types.MLLifecycleStateInfo) (*types.MLLifecycleStateInfo, error)
+
+        // UpdateMLLifecycleStateCAS performs a Compare-And-Swap (CAS) update on the ML lifecycle state.
+        // This method is thread-safe and ensures atomic state transitions in concurrent environments.
+        //
+        // CAS Operation:
+        //   1. Reads the current state for the device
+        //   2. Verifies that the current version matches expectedVersion
+        //   3. If version matches, applies the update function and increments the version
+        //   4. If version does not match, returns an error (indicating concurrent modification)
+        //
+        // This is critical for atomic state transitions in ML lifecycle management.
+        // All state transitions should use this method to prevent race conditions.
+        //
+        // Parameters:
+        //   - deviceID: The unique identifier of the device
+        //   - expectedVersion: The version number that must match the current state version
+        //   - updateFn: Function that receives the current state and returns the updated state
+        //
+        // Returns:
+        //   - A pointer to the updated MLLifecycleStateInfo (with incremented version)
+        //   - An error if:
+        //     - The state does not exist for the device (ErrRecordNotFound)
+        //     - The version does not match expectedVersion (concurrent modification detected)
+        //     - Storage quota is exceeded (ErrQuotaExceeded)
+        //     - The provider operation fails
+        //
+        // Example usage:
+        //   state, found := store.GetMLLifecycleState(ctx, "device-001")
+        //   if !found {
+        //       // Handle not found
+        //   }
+        //   updated, err := store.UpdateMLLifecycleStateCAS(ctx, "device-001", state.Version, func(s types.MLLifecycleStateInfo) types.MLLifecycleStateInfo {
+        //       s.State = types.MLLifecycleStateDeploying
+        //       s.UpdatedAt = time.Now()
+        //       return s
+        //   })
+        //   if err != nil {
+        //       // Handle error (may be version conflict - retry with new version)
+        //   }
+        UpdateMLLifecycleStateCAS(ctx context.Context, deviceID string, expectedVersion int, updateFn func(types.MLLifecycleStateInfo) types.MLLifecycleStateInfo) (*types.MLLifecycleStateInfo, error)
+
+        // ListMLLifecycleStates lists ML lifecycle states matching the provided filters.
+        // If filters is nil, all states are returned.
+        //
+        // Filter fields:
+        //   - DeviceID: Filter by device ID
+        //   - DeviceType: Filter by device type
+        //   - State: Filter by lifecycle state (unassigned, active, deploying, etc.)
+        //   - ModelID: Filter by model ID
+        //
+        // Returns:
+        //   - A slice of MLLifecycleStateInfo entries, sorted by device ID
+        //   - An error if the provider operation fails
+        ListMLLifecycleStates(ctx context.Context, filters *types.MLLifecycleFilters) ([]types.MLLifecycleStateInfo, error)
+
+        // DeleteMLLifecycleState deletes the ML lifecycle state for a device.
+        // If the state does not exist, this is a no-op and returns no error.
+        //
+        // Returns an error if:
+        //   - The provider operation fails
+        DeleteMLLifecycleState(ctx context.Context, deviceID string) error
+
+        // Pending model deployment operations
+        SavePendingModelDeployment(ctx context.Context, deviceID string, deployment types.PendingModelDeployment) error
+        GetPendingModelDeployment(ctx context.Context, deviceID string) (*types.PendingModelDeployment, bool)
+        ListPendingModelDeployments(ctx context.Context) ([]types.PendingModelDeployment, error)
+        DeletePendingModelDeployment(ctx context.Context, deviceID string) error
+
+        // Health monitoring
+
+        // HealthSnapshot returns the current health status of the storage service.
+        // This follows the vm-gateway pattern for health snapshots.
+        //
+        // The snapshot includes:
+        //   - Overall status: healthy, warning, full, corrupted
+        //   - Quota information: usage, limits, thresholds
+        //   - Integrity errors: count of detected errors
+        //   - Provider health: provider-specific status
+        //   - Bucket counts: record counts per bucket
+        //   - Total records: total number of records
+        //   - Database size: database file size in MB
+        //   - Last cleanup time: when retention cleanup last ran
+        //   - Cleanup statistics: records deleted, space freed
+        //   - Schema version: current schema version
+        //
+        // This method is safe to call frequently and does not perform expensive operations.
+        // It aggregates data from quota, retention, integrity managers, and the provider.
+        //
+        // Returns:
+        //   - StorageHealth containing comprehensive health information
+        HealthSnapshot(ctx context.Context) types.StorageHealth
+
+        // Lifecycle methods
+
+        // Start starts the metadata store service.
+        // This method performs the following operations:
+        //   1. Initializes the storage provider (opens database connections)
+        //   2. Creates required buckets/namespaces
+        //   3. Runs schema migrations (if any pending)
+        //   4. Starts background tasks (quota monitoring, retention cleanup, integrity checks)
+        //
+        // This method should be called after all dependencies are configured (e.g., event emitter).
+        // If called multiple times, returns ErrAlreadyStarted.
+        //
+        // Returns an error if:
+        //   - The service is already started (ErrAlreadyStarted)
+        //   - Provider initialization fails
+        //   - Bucket creation fails
+        //   - Schema migration fails
+        //   - Background task startup fails
+        Start(ctx context.Context) error
+
+        // Stop gracefully shuts down the metadata store service.
+        // This method performs the following operations:
+        //   1. Stops background tasks (quota monitoring, retention cleanup, integrity checks)
+        //   2. Flushes pending operations
+        //   3. Closes provider connections
+        //   4. Closes database connections
+        //
+        // This method should be called during service shutdown.
+        // It is safe to call multiple times (idempotent).
+        //
+        // Returns an error if:
+        //   - Background task shutdown fails
+        //   - Provider shutdown fails
+        Stop(ctx context.Context) error
+
+        // Close closes the metadata store and releases all resources (e.g., database connections).
+        // This is a legacy method for backward compatibility. Prefer using Stop() instead.
+        //
+        // After Close, all methods should return errors.
+        // It is safe to call multiple times (idempotent).
+        //
+        // Returns an error if:
+        //   - Resource cleanup fails
+        Close() error
+}
+
+// NewMetaDataStore creates a new metadata store instance.
+// This factory function should typically not be called directly;
+// use MetaStorageProvider instead for proper dependency injection.
+//
+// The store uses provider-specific implementations (BoltDB, SQLite, PostgreSQL, etc.)
+// based on the configuration. This allows switching between storage providers
+// without changing application code.
+func NewMetaDataStore(ctx context.Context, config *types.MetaStorageConfig, logger *zap.Logger) (MetaDataStore, error) <span class="cov0" title="0">{
+        switch config.Provider </span>{
+        case "bbolt":<span class="cov0" title="0">
+                // Create BoltDB provider
+                bboltConfig := &amp;types.BoltDBConfig{
+                        DataDir:      config.DataDir,
+                        DatabaseFile: "meta.db",
+                        FileMode:     0600,
+                        Timeout:      1, // 1 second
+                        NoSync:       false,
+                }
+                // Override with BoltDB-specific config if provided
+                if config.BoltDB != nil </span><span class="cov0" title="0">{
+                        if config.BoltDB.DataDir != "" </span><span class="cov0" title="0">{
+                                bboltConfig.DataDir = config.BoltDB.DataDir
+                        }</span>
+                        <span class="cov0" title="0">if config.BoltDB.DatabaseFile != "" </span><span class="cov0" title="0">{
+                                bboltConfig.DatabaseFile = config.BoltDB.DatabaseFile
+                        }</span>
+                        <span class="cov0" title="0">if config.BoltDB.FileMode != 0 </span><span class="cov0" title="0">{
+                                bboltConfig.FileMode = config.BoltDB.FileMode
+                        }</span>
+                        <span class="cov0" title="0">if config.BoltDB.Timeout != 0 </span><span class="cov0" title="0">{
+                                bboltConfig.Timeout = config.BoltDB.Timeout
+                        }</span>
+                        <span class="cov0" title="0">bboltConfig.NoSync = config.BoltDB.NoSync</span>
+                }
+
+                <span class="cov0" title="0">provider, err := implbbolt.NewBoltDBProvider(ctx, bboltConfig, logger)
+                if err != nil </span><span class="cov0" title="0">{
+                        return nil, fmt.Errorf("failed to create BoltDB provider: %w", err)
+                }</span>
+
+                // Create main implementation
+                <span class="cov0" title="0">storeImpl := impl.NewMetaStorageImpl(provider, logger)
+
+                // Initialize quota manager if quota config is provided
+                if config.Quota != nil </span><span class="cov0" title="0">{
+                        // Get database path for quota tracking
+                        databasePath := ""
+                        if config.DataDir != "" </span><span class="cov0" title="0">{
+                                databasePath = fmt.Sprintf("%s/%s", config.DataDir, bboltConfig.DatabaseFile)
+                        }</span>
+                        <span class="cov0" title="0">quotaManager := impl.NewQuotaManager(provider, config.Quota, logger, databasePath)
+                        storeImpl.SetQuotaManager(quotaManager)</span>
+                }
+
+                // Initialize retention manager if retention config is provided
+                <span class="cov0" title="0">if config.Retention != nil </span><span class="cov0" title="0">{
+                        retentionManager := impl.NewRetentionManager(provider, config.Retention, logger)
+                        storeImpl.SetRetentionManager(retentionManager)
+                }</span>
+
+                // Initialize integrity manager (always enabled for production reliability)
+                <span class="cov0" title="0">integrityManager := impl.NewIntegrityManager(provider, logger)
+                storeImpl.SetIntegrityManager(integrityManager)
+
+                // Initialize buckets
+                if err := storeImpl.InitializeBuckets(ctx); err != nil </span><span class="cov0" title="0">{
+                        _ = provider.Close()
+                        return nil, fmt.Errorf("failed to initialize buckets: %w", err)
+                }</span>
+
+                <span class="cov0" title="0">return storeImpl, nil</span>
+        default:<span class="cov0" title="0">
+                return nil, fmt.Errorf("unsupported meta-storage provider: %s", config.Provider)</span>
+        }
+}
+
+// MetaStorageProvider creates the meta storage service with fx lifecycle management.
+//
+// The storage service manages metadata about stored objects, devices, models, events, and system state.
+// It provides a unified interface for all metadata storage operations, abstracting away
+// the details of the underlying storage provider.
+//
+// Architecture decision (Section 1.0): Service-owned lifecycle.
+//   - Fx manages only the storage service lifecycle.
+//   - Service Start/Stop is the single place that initializes/closes storage providers.
+//   - Storage providers do not register their own fx.Lifecycle hooks.
+//
+// Fail-fast behavior: This provider will return an error (not nil) if:
+//   - Configuration is invalid or unsupported
+//   - Storage service creation fails
+//   - Required dependencies are missing
+//
+// The application will not start if storage service creation fails, ensuring production reliability.
+func MetaStorageProvider(lc fx.Lifecycle, cfg *types.MetaStorageConfig, logger *zap.Logger) (MetaDataStore, error) <span class="cov0" title="0">{
+        store, err := NewMetaDataStore(context.Background(), cfg, logger)
+        if err != nil </span><span class="cov0" title="0">{
+                return nil, err
+        }</span>
+
+        <span class="cov0" title="0">lc.Append(fx.Hook{
+                OnStart: func(ctx context.Context) error </span><span class="cov0" title="0">{
+                        // Start the storage service
+                        if err := store.Start(ctx); err != nil </span><span class="cov0" title="0">{
+                                logger.Error("Failed to start meta storage", zap.Error(err))
+                                return err
+                        }</span>
+                        <span class="cov0" title="0">return nil</span>
+                },
+                OnStop: func(ctx context.Context) error <span class="cov0" title="0">{
+                        // Stop the storage service gracefully
+                        if err := store.Stop(ctx); err != nil </span><span class="cov0" title="0">{
+                                logger.Error("Failed to stop meta storage", zap.Error(err))
+                                return err
+                        }</span>
+                        <span class="cov0" title="0">return nil</span>
+                },
+        })
+
+        <span class="cov0" title="0">return store, nil</span>
+}
+</pre>
+		
+		<pre class="file" id="file2" style="display: none">// Code generated by MockGen. DO NOT EDIT.
+// Source: meta_storage.go
+//
+// Generated by this command:
+//
+//        mockgen -source=meta_storage.go -destination=mocks/mock_meta_storage.go -package=mocks
+//
+
+// Package mocks is a generated GoMock package.
+package mocks
+
+import (
+        context "context"
+        reflect "reflect"
+        time "time"
+
+        metastorage "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/meta-storage"
+        types "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/meta-storage/types"
+        gomock "go.uber.org/mock/gomock"
+)
+
+// MockMetaDataStore is a mock of MetaDataStore interface.
+type MockMetaDataStore struct {
+        ctrl     *gomock.Controller
+        recorder *MockMetaDataStoreMockRecorder
+        isgomock struct{}
+}
+
+// MockMetaDataStoreMockRecorder is the mock recorder for MockMetaDataStore.
+type MockMetaDataStoreMockRecorder struct {
+        mock *MockMetaDataStore
+}
+
+// NewMockMetaDataStore creates a new mock instance.
+func NewMockMetaDataStore(ctrl *gomock.Controller) *MockMetaDataStore <span class="cov0" title="0">{
+        mock := &amp;MockMetaDataStore{ctrl: ctrl}
+        mock.recorder = &amp;MockMetaDataStoreMockRecorder{mock}
+        return mock
+}</span>
+
+// EXPECT returns an object that allows the caller to indicate expected use.
+func (m *MockMetaDataStore) EXPECT() *MockMetaDataStoreMockRecorder <span class="cov0" title="0">{
+        return m.recorder
+}</span>
+
+// Close mocks base method.
+func (m *MockMetaDataStore) Close() error <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "Close")
+        ret0, _ := ret[0].(error)
+        return ret0
+}</span>
+
+// Close indicates an expected call of Close.
+func (mr *MockMetaDataStoreMockRecorder) Close() *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Close", reflect.TypeOf((*MockMetaDataStore)(nil).Close))
+}</span>
+
+// DeleteDataUnit mocks base method.
+func (m *MockMetaDataStore) DeleteDataUnit(ctx context.Context, dataUnitID string) error <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "DeleteDataUnit", ctx, dataUnitID)
+        ret0, _ := ret[0].(error)
+        return ret0
+}</span>
+
+// DeleteDataUnit indicates an expected call of DeleteDataUnit.
+func (mr *MockMetaDataStoreMockRecorder) DeleteDataUnit(ctx, dataUnitID any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeleteDataUnit", reflect.TypeOf((*MockMetaDataStore)(nil).DeleteDataUnit), ctx, dataUnitID)
+}</span>
+
+// DeleteDevice mocks base method.
+func (m *MockMetaDataStore) DeleteDevice(ctx context.Context, deviceID string) error <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "DeleteDevice", ctx, deviceID)
+        ret0, _ := ret[0].(error)
+        return ret0
+}</span>
+
+// DeleteDevice indicates an expected call of DeleteDevice.
+func (mr *MockMetaDataStoreMockRecorder) DeleteDevice(ctx, deviceID any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeleteDevice", reflect.TypeOf((*MockMetaDataStore)(nil).DeleteDevice), ctx, deviceID)
+}</span>
+
+// DeleteEvent mocks base method.
+func (m *MockMetaDataStore) DeleteEvent(ctx context.Context, eventID string) error <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "DeleteEvent", ctx, eventID)
+        ret0, _ := ret[0].(error)
+        return ret0
+}</span>
+
+// DeleteEvent indicates an expected call of DeleteEvent.
+func (mr *MockMetaDataStoreMockRecorder) DeleteEvent(ctx, eventID any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeleteEvent", reflect.TypeOf((*MockMetaDataStore)(nil).DeleteEvent), ctx, eventID)
+}</span>
+
+// DeleteMLLifecycleState mocks base method.
+func (m *MockMetaDataStore) DeleteMLLifecycleState(ctx context.Context, deviceID string) error <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "DeleteMLLifecycleState", ctx, deviceID)
+        ret0, _ := ret[0].(error)
+        return ret0
+}</span>
+
+// DeleteMLLifecycleState indicates an expected call of DeleteMLLifecycleState.
+func (mr *MockMetaDataStoreMockRecorder) DeleteMLLifecycleState(ctx, deviceID any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeleteMLLifecycleState", reflect.TypeOf((*MockMetaDataStore)(nil).DeleteMLLifecycleState), ctx, deviceID)
+}</span>
+
+// DeleteModelDeployment mocks base method.
+func (m *MockMetaDataStore) DeleteModelDeployment(ctx context.Context, modelID string) error <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "DeleteModelDeployment", ctx, modelID)
+        ret0, _ := ret[0].(error)
+        return ret0
+}</span>
+
+// DeleteModelDeployment indicates an expected call of DeleteModelDeployment.
+func (mr *MockMetaDataStoreMockRecorder) DeleteModelDeployment(ctx, modelID any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeleteModelDeployment", reflect.TypeOf((*MockMetaDataStore)(nil).DeleteModelDeployment), ctx, modelID)
+}</span>
+
+// DeletePendingDataUnitRequest mocks base method.
+func (m *MockMetaDataStore) DeletePendingDataUnitRequest(ctx context.Context, deviceID string) error <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "DeletePendingDataUnitRequest", ctx, deviceID)
+        ret0, _ := ret[0].(error)
+        return ret0
+}</span>
+
+// DeletePendingDataUnitRequest indicates an expected call of DeletePendingDataUnitRequest.
+func (mr *MockMetaDataStoreMockRecorder) DeletePendingDataUnitRequest(ctx, deviceID any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeletePendingDataUnitRequest", reflect.TypeOf((*MockMetaDataStore)(nil).DeletePendingDataUnitRequest), ctx, deviceID)
+}</span>
+
+// DeletePendingModelDeployment mocks base method.
+func (m *MockMetaDataStore) DeletePendingModelDeployment(ctx context.Context, deviceID string) error <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "DeletePendingModelDeployment", ctx, deviceID)
+        ret0, _ := ret[0].(error)
+        return ret0
+}</span>
+
+// DeletePendingModelDeployment indicates an expected call of DeletePendingModelDeployment.
+func (mr *MockMetaDataStoreMockRecorder) DeletePendingModelDeployment(ctx, deviceID any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeletePendingModelDeployment", reflect.TypeOf((*MockMetaDataStore)(nil).DeletePendingModelDeployment), ctx, deviceID)
+}</span>
+
+// DeleteSecurityEvent mocks base method.
+func (m *MockMetaDataStore) DeleteSecurityEvent(ctx context.Context, eventID string) error <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "DeleteSecurityEvent", ctx, eventID)
+        ret0, _ := ret[0].(error)
+        return ret0
+}</span>
+
+// DeleteSecurityEvent indicates an expected call of DeleteSecurityEvent.
+func (mr *MockMetaDataStoreMockRecorder) DeleteSecurityEvent(ctx, eventID any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeleteSecurityEvent", reflect.TypeOf((*MockMetaDataStore)(nil).DeleteSecurityEvent), ctx, eventID)
+}</span>
+
+// DeleteStorageEntry mocks base method.
+func (m *MockMetaDataStore) DeleteStorageEntry(ctx context.Context, path string) error <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "DeleteStorageEntry", ctx, path)
+        ret0, _ := ret[0].(error)
+        return ret0
+}</span>
+
+// DeleteStorageEntry indicates an expected call of DeleteStorageEntry.
+func (mr *MockMetaDataStoreMockRecorder) DeleteStorageEntry(ctx, path any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeleteStorageEntry", reflect.TypeOf((*MockMetaDataStore)(nil).DeleteStorageEntry), ctx, path)
+}</span>
+
+// DeleteVideoClip mocks base method.
+func (m *MockMetaDataStore) DeleteVideoClip(ctx context.Context, clipID string) error <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "DeleteVideoClip", ctx, clipID)
+        ret0, _ := ret[0].(error)
+        return ret0
+}</span>
+
+// DeleteVideoClip indicates an expected call of DeleteVideoClip.
+func (mr *MockMetaDataStoreMockRecorder) DeleteVideoClip(ctx, clipID any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeleteVideoClip", reflect.TypeOf((*MockMetaDataStore)(nil).DeleteVideoClip), ctx, clipID)
+}</span>
+
+// GetCurrentEdgeState mocks base method.
+func (m *MockMetaDataStore) GetCurrentEdgeState(ctx context.Context) (map[string]any, bool) <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "GetCurrentEdgeState", ctx)
+        ret0, _ := ret[0].(map[string]any)
+        ret1, _ := ret[1].(bool)
+        return ret0, ret1
+}</span>
+
+// GetCurrentEdgeState indicates an expected call of GetCurrentEdgeState.
+func (mr *MockMetaDataStoreMockRecorder) GetCurrentEdgeState(ctx any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetCurrentEdgeState", reflect.TypeOf((*MockMetaDataStore)(nil).GetCurrentEdgeState), ctx)
+}</span>
+
+// GetDataUnit mocks base method.
+func (m *MockMetaDataStore) GetDataUnit(ctx context.Context, dataUnitID string) (types.DataUnitMetadata, bool) <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "GetDataUnit", ctx, dataUnitID)
+        ret0, _ := ret[0].(types.DataUnitMetadata)
+        ret1, _ := ret[1].(bool)
+        return ret0, ret1
+}</span>
+
+// GetDataUnit indicates an expected call of GetDataUnit.
+func (mr *MockMetaDataStoreMockRecorder) GetDataUnit(ctx, dataUnitID any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetDataUnit", reflect.TypeOf((*MockMetaDataStore)(nil).GetDataUnit), ctx, dataUnitID)
+}</span>
+
+// GetDeadLetterEvents mocks base method.
+func (m *MockMetaDataStore) GetDeadLetterEvents(ctx context.Context, limit int) ([]types.EventBusEventMetadata, error) <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "GetDeadLetterEvents", ctx, limit)
+        ret0, _ := ret[0].([]types.EventBusEventMetadata)
+        ret1, _ := ret[1].(error)
+        return ret0, ret1
+}</span>
+
+// GetDeadLetterEvents indicates an expected call of GetDeadLetterEvents.
+func (mr *MockMetaDataStoreMockRecorder) GetDeadLetterEvents(ctx, limit any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetDeadLetterEvents", reflect.TypeOf((*MockMetaDataStore)(nil).GetDeadLetterEvents), ctx, limit)
+}</span>
+
+// GetDevice mocks base method.
+func (m *MockMetaDataStore) GetDevice(ctx context.Context, deviceID string) (types.DeviceMetadata, bool) <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "GetDevice", ctx, deviceID)
+        ret0, _ := ret[0].(types.DeviceMetadata)
+        ret1, _ := ret[1].(bool)
+        return ret0, ret1
+}</span>
+
+// GetDevice indicates an expected call of GetDevice.
+func (mr *MockMetaDataStoreMockRecorder) GetDevice(ctx, deviceID any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetDevice", reflect.TypeOf((*MockMetaDataStore)(nil).GetDevice), ctx, deviceID)
+}</span>
+
+// GetEdgeCapabilities mocks base method.
+func (m *MockMetaDataStore) GetEdgeCapabilities(ctx context.Context) (map[string]any, bool) <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "GetEdgeCapabilities", ctx)
+        ret0, _ := ret[0].(map[string]any)
+        ret1, _ := ret[1].(bool)
+        return ret0, ret1
+}</span>
+
+// GetEdgeCapabilities indicates an expected call of GetEdgeCapabilities.
+func (mr *MockMetaDataStoreMockRecorder) GetEdgeCapabilities(ctx any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetEdgeCapabilities", reflect.TypeOf((*MockMetaDataStore)(nil).GetEdgeCapabilities), ctx)
+}</span>
+
+// GetEdgeStateHistory mocks base method.
+func (m *MockMetaDataStore) GetEdgeStateHistory(ctx context.Context, limit int) ([]map[string]any, error) <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "GetEdgeStateHistory", ctx, limit)
+        ret0, _ := ret[0].([]map[string]any)
+        ret1, _ := ret[1].(error)
+        return ret0, ret1
+}</span>
+
+// GetEdgeStateHistory indicates an expected call of GetEdgeStateHistory.
+func (mr *MockMetaDataStoreMockRecorder) GetEdgeStateHistory(ctx, limit any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetEdgeStateHistory", reflect.TypeOf((*MockMetaDataStore)(nil).GetEdgeStateHistory), ctx, limit)
+}</span>
+
+// GetEvent mocks base method.
+func (m *MockMetaDataStore) GetEvent(ctx context.Context, eventID string) (*types.EventBusEventMetadata, bool) <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "GetEvent", ctx, eventID)
+        ret0, _ := ret[0].(*types.EventBusEventMetadata)
+        ret1, _ := ret[1].(bool)
+        return ret0, ret1
+}</span>
+
+// GetEvent indicates an expected call of GetEvent.
+func (mr *MockMetaDataStoreMockRecorder) GetEvent(ctx, eventID any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetEvent", reflect.TypeOf((*MockMetaDataStore)(nil).GetEvent), ctx, eventID)
+}</span>
+
+// GetEventCount mocks base method.
+func (m *MockMetaDataStore) GetEventCount(ctx context.Context) (int, error) <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "GetEventCount", ctx)
+        ret0, _ := ret[0].(int)
+        ret1, _ := ret[1].(error)
+        return ret0, ret1
+}</span>
+
+// GetEventCount indicates an expected call of GetEventCount.
+func (mr *MockMetaDataStoreMockRecorder) GetEventCount(ctx any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetEventCount", reflect.TypeOf((*MockMetaDataStore)(nil).GetEventCount), ctx)
+}</span>
+
+// GetFailedEvents mocks base method.
+func (m *MockMetaDataStore) GetFailedEvents(ctx context.Context, beforeTime time.Time) ([]types.EventBusEventMetadata, error) <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "GetFailedEvents", ctx, beforeTime)
+        ret0, _ := ret[0].([]types.EventBusEventMetadata)
+        ret1, _ := ret[1].(error)
+        return ret0, ret1
+}</span>
+
+// GetFailedEvents indicates an expected call of GetFailedEvents.
+func (mr *MockMetaDataStoreMockRecorder) GetFailedEvents(ctx, beforeTime any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetFailedEvents", reflect.TypeOf((*MockMetaDataStore)(nil).GetFailedEvents), ctx, beforeTime)
+}</span>
+
+// GetLatestModelVersion mocks base method.
+func (m *MockMetaDataStore) GetLatestModelVersion(ctx context.Context, deviceID string) (*types.ModelDeploymentMetadata, bool) <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "GetLatestModelVersion", ctx, deviceID)
+        ret0, _ := ret[0].(*types.ModelDeploymentMetadata)
+        ret1, _ := ret[1].(bool)
+        return ret0, ret1
+}</span>
+
+// GetLatestModelVersion indicates an expected call of GetLatestModelVersion.
+func (mr *MockMetaDataStoreMockRecorder) GetLatestModelVersion(ctx, deviceID any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetLatestModelVersion", reflect.TypeOf((*MockMetaDataStore)(nil).GetLatestModelVersion), ctx, deviceID)
+}</span>
+
+// GetMLLifecycleState mocks base method.
+func (m *MockMetaDataStore) GetMLLifecycleState(ctx context.Context, deviceID string) (*types.MLLifecycleStateInfo, bool) <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "GetMLLifecycleState", ctx, deviceID)
+        ret0, _ := ret[0].(*types.MLLifecycleStateInfo)
+        ret1, _ := ret[1].(bool)
+        return ret0, ret1
+}</span>
+
+// GetMLLifecycleState indicates an expected call of GetMLLifecycleState.
+func (mr *MockMetaDataStoreMockRecorder) GetMLLifecycleState(ctx, deviceID any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetMLLifecycleState", reflect.TypeOf((*MockMetaDataStore)(nil).GetMLLifecycleState), ctx, deviceID)
+}</span>
+
+// GetModelDeployment mocks base method.
+func (m *MockMetaDataStore) GetModelDeployment(ctx context.Context, modelID string) (types.ModelDeploymentMetadata, bool) <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "GetModelDeployment", ctx, modelID)
+        ret0, _ := ret[0].(types.ModelDeploymentMetadata)
+        ret1, _ := ret[1].(bool)
+        return ret0, ret1
+}</span>
+
+// GetModelDeployment indicates an expected call of GetModelDeployment.
+func (mr *MockMetaDataStoreMockRecorder) GetModelDeployment(ctx, modelID any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetModelDeployment", reflect.TypeOf((*MockMetaDataStore)(nil).GetModelDeployment), ctx, modelID)
+}</span>
+
+// GetPendingDataUnitRequest mocks base method.
+func (m *MockMetaDataStore) GetPendingDataUnitRequest(ctx context.Context, deviceID string) (*types.PendingDataUnitRequest, bool) <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "GetPendingDataUnitRequest", ctx, deviceID)
+        ret0, _ := ret[0].(*types.PendingDataUnitRequest)
+        ret1, _ := ret[1].(bool)
+        return ret0, ret1
+}</span>
+
+// GetPendingDataUnitRequest indicates an expected call of GetPendingDataUnitRequest.
+func (mr *MockMetaDataStoreMockRecorder) GetPendingDataUnitRequest(ctx, deviceID any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetPendingDataUnitRequest", reflect.TypeOf((*MockMetaDataStore)(nil).GetPendingDataUnitRequest), ctx, deviceID)
+}</span>
+
+// GetPendingModelDeployment mocks base method.
+func (m *MockMetaDataStore) GetPendingModelDeployment(ctx context.Context, deviceID string) (*types.PendingModelDeployment, bool) <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "GetPendingModelDeployment", ctx, deviceID)
+        ret0, _ := ret[0].(*types.PendingModelDeployment)
+        ret1, _ := ret[1].(bool)
+        return ret0, ret1
+}</span>
+
+// GetPendingModelDeployment indicates an expected call of GetPendingModelDeployment.
+func (mr *MockMetaDataStoreMockRecorder) GetPendingModelDeployment(ctx, deviceID any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetPendingModelDeployment", reflect.TypeOf((*MockMetaDataStore)(nil).GetPendingModelDeployment), ctx, deviceID)
+}</span>
+
+// GetPendingSecurityEvents mocks base method.
+func (m *MockMetaDataStore) GetPendingSecurityEvents(ctx context.Context, limit int) ([]types.SecurityEventMetadata, error) <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "GetPendingSecurityEvents", ctx, limit)
+        ret0, _ := ret[0].([]types.SecurityEventMetadata)
+        ret1, _ := ret[1].(error)
+        return ret0, ret1
+}</span>
+
+// GetPendingSecurityEvents indicates an expected call of GetPendingSecurityEvents.
+func (mr *MockMetaDataStoreMockRecorder) GetPendingSecurityEvents(ctx, limit any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetPendingSecurityEvents", reflect.TypeOf((*MockMetaDataStore)(nil).GetPendingSecurityEvents), ctx, limit)
+}</span>
+
+// GetSecurityEvent mocks base method.
+func (m *MockMetaDataStore) GetSecurityEvent(ctx context.Context, eventID string) (*types.SecurityEventMetadata, bool) <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "GetSecurityEvent", ctx, eventID)
+        ret0, _ := ret[0].(*types.SecurityEventMetadata)
+        ret1, _ := ret[1].(bool)
+        return ret0, ret1
+}</span>
+
+// GetSecurityEvent indicates an expected call of GetSecurityEvent.
+func (mr *MockMetaDataStoreMockRecorder) GetSecurityEvent(ctx, eventID any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetSecurityEvent", reflect.TypeOf((*MockMetaDataStore)(nil).GetSecurityEvent), ctx, eventID)
+}</span>
+
+// GetStorageStats mocks base method.
+func (m *MockMetaDataStore) GetStorageStats(ctx context.Context) (*metastorage.StorageStats, error) <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "GetStorageStats", ctx)
+        ret0, _ := ret[0].(*metastorage.StorageStats)
+        ret1, _ := ret[1].(error)
+        return ret0, ret1
+}</span>
+
+// GetStorageStats indicates an expected call of GetStorageStats.
+func (mr *MockMetaDataStoreMockRecorder) GetStorageStats(ctx any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetStorageStats", reflect.TypeOf((*MockMetaDataStore)(nil).GetStorageStats), ctx)
+}</span>
+
+// GetVideoClip mocks base method.
+func (m *MockMetaDataStore) GetVideoClip(ctx context.Context, clipID string) (types.VideoClipMetadata, bool) <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "GetVideoClip", ctx, clipID)
+        ret0, _ := ret[0].(types.VideoClipMetadata)
+        ret1, _ := ret[1].(bool)
+        return ret0, ret1
+}</span>
+
+// GetVideoClip indicates an expected call of GetVideoClip.
+func (mr *MockMetaDataStoreMockRecorder) GetVideoClip(ctx, clipID any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetVideoClip", reflect.TypeOf((*MockMetaDataStore)(nil).GetVideoClip), ctx, clipID)
+}</span>
+
+// HealthSnapshot mocks base method.
+func (m *MockMetaDataStore) HealthSnapshot(ctx context.Context) types.StorageHealth <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "HealthSnapshot", ctx)
+        ret0, _ := ret[0].(types.StorageHealth)
+        return ret0
+}</span>
+
+// HealthSnapshot indicates an expected call of HealthSnapshot.
+func (mr *MockMetaDataStoreMockRecorder) HealthSnapshot(ctx any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "HealthSnapshot", reflect.TypeOf((*MockMetaDataStore)(nil).HealthSnapshot), ctx)
+}</span>
+
+// ListDataUnits mocks base method.
+func (m *MockMetaDataStore) ListDataUnits(ctx context.Context, filters *types.DataUnitFilters) ([]types.DataUnitMetadata, error) <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "ListDataUnits", ctx, filters)
+        ret0, _ := ret[0].([]types.DataUnitMetadata)
+        ret1, _ := ret[1].(error)
+        return ret0, ret1
+}</span>
+
+// ListDataUnits indicates an expected call of ListDataUnits.
+func (mr *MockMetaDataStoreMockRecorder) ListDataUnits(ctx, filters any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListDataUnits", reflect.TypeOf((*MockMetaDataStore)(nil).ListDataUnits), ctx, filters)
+}</span>
+
+// ListDevices mocks base method.
+func (m *MockMetaDataStore) ListDevices(ctx context.Context, filters *types.DeviceFilters) ([]types.DeviceMetadata, error) <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "ListDevices", ctx, filters)
+        ret0, _ := ret[0].([]types.DeviceMetadata)
+        ret1, _ := ret[1].(error)
+        return ret0, ret1
+}</span>
+
+// ListDevices indicates an expected call of ListDevices.
+func (mr *MockMetaDataStoreMockRecorder) ListDevices(ctx, filters any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListDevices", reflect.TypeOf((*MockMetaDataStore)(nil).ListDevices), ctx, filters)
+}</span>
+
+// ListEvents mocks base method.
+func (m *MockMetaDataStore) ListEvents(ctx context.Context, filters *types.EventBusFilters) ([]types.EventBusEventMetadata, error) <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "ListEvents", ctx, filters)
+        ret0, _ := ret[0].([]types.EventBusEventMetadata)
+        ret1, _ := ret[1].(error)
+        return ret0, ret1
+}</span>
+
+// ListEvents indicates an expected call of ListEvents.
+func (mr *MockMetaDataStoreMockRecorder) ListEvents(ctx, filters any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListEvents", reflect.TypeOf((*MockMetaDataStore)(nil).ListEvents), ctx, filters)
+}</span>
+
+// ListMLLifecycleStates mocks base method.
+func (m *MockMetaDataStore) ListMLLifecycleStates(ctx context.Context, filters *types.MLLifecycleFilters) ([]types.MLLifecycleStateInfo, error) <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "ListMLLifecycleStates", ctx, filters)
+        ret0, _ := ret[0].([]types.MLLifecycleStateInfo)
+        ret1, _ := ret[1].(error)
+        return ret0, ret1
+}</span>
+
+// ListMLLifecycleStates indicates an expected call of ListMLLifecycleStates.
+func (mr *MockMetaDataStoreMockRecorder) ListMLLifecycleStates(ctx, filters any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListMLLifecycleStates", reflect.TypeOf((*MockMetaDataStore)(nil).ListMLLifecycleStates), ctx, filters)
+}</span>
+
+// ListModelDeployments mocks base method.
+func (m *MockMetaDataStore) ListModelDeployments(ctx context.Context, filters *types.ModelFilters) ([]types.ModelDeploymentMetadata, error) <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "ListModelDeployments", ctx, filters)
+        ret0, _ := ret[0].([]types.ModelDeploymentMetadata)
+        ret1, _ := ret[1].(error)
+        return ret0, ret1
+}</span>
+
+// ListModelDeployments indicates an expected call of ListModelDeployments.
+func (mr *MockMetaDataStoreMockRecorder) ListModelDeployments(ctx, filters any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListModelDeployments", reflect.TypeOf((*MockMetaDataStore)(nil).ListModelDeployments), ctx, filters)
+}</span>
+
+// ListModelVersions mocks base method.
+func (m *MockMetaDataStore) ListModelVersions(ctx context.Context, deviceID string) ([]types.ModelDeploymentMetadata, error) <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "ListModelVersions", ctx, deviceID)
+        ret0, _ := ret[0].([]types.ModelDeploymentMetadata)
+        ret1, _ := ret[1].(error)
+        return ret0, ret1
+}</span>
+
+// ListModelVersions indicates an expected call of ListModelVersions.
+func (mr *MockMetaDataStoreMockRecorder) ListModelVersions(ctx, deviceID any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListModelVersions", reflect.TypeOf((*MockMetaDataStore)(nil).ListModelVersions), ctx, deviceID)
+}</span>
+
+// ListPendingDataUnitRequests mocks base method.
+func (m *MockMetaDataStore) ListPendingDataUnitRequests(ctx context.Context) ([]types.PendingDataUnitRequest, error) <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "ListPendingDataUnitRequests", ctx)
+        ret0, _ := ret[0].([]types.PendingDataUnitRequest)
+        ret1, _ := ret[1].(error)
+        return ret0, ret1
+}</span>
+
+// ListPendingDataUnitRequests indicates an expected call of ListPendingDataUnitRequests.
+func (mr *MockMetaDataStoreMockRecorder) ListPendingDataUnitRequests(ctx any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListPendingDataUnitRequests", reflect.TypeOf((*MockMetaDataStore)(nil).ListPendingDataUnitRequests), ctx)
+}</span>
+
+// ListPendingModelDeployments mocks base method.
+func (m *MockMetaDataStore) ListPendingModelDeployments(ctx context.Context) ([]types.PendingModelDeployment, error) <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "ListPendingModelDeployments", ctx)
+        ret0, _ := ret[0].([]types.PendingModelDeployment)
+        ret1, _ := ret[1].(error)
+        return ret0, ret1
+}</span>
+
+// ListPendingModelDeployments indicates an expected call of ListPendingModelDeployments.
+func (mr *MockMetaDataStoreMockRecorder) ListPendingModelDeployments(ctx any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListPendingModelDeployments", reflect.TypeOf((*MockMetaDataStore)(nil).ListPendingModelDeployments), ctx)
+}</span>
+
+// ListSecurityEvents mocks base method.
+func (m *MockMetaDataStore) ListSecurityEvents(ctx context.Context, filters *types.SecurityEventFilters) ([]types.SecurityEventMetadata, error) <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "ListSecurityEvents", ctx, filters)
+        ret0, _ := ret[0].([]types.SecurityEventMetadata)
+        ret1, _ := ret[1].(error)
+        return ret0, ret1
+}</span>
+
+// ListSecurityEvents indicates an expected call of ListSecurityEvents.
+func (mr *MockMetaDataStoreMockRecorder) ListSecurityEvents(ctx, filters any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListSecurityEvents", reflect.TypeOf((*MockMetaDataStore)(nil).ListSecurityEvents), ctx, filters)
+}</span>
+
+// ListStorageEntries mocks base method.
+func (m *MockMetaDataStore) ListStorageEntries(ctx context.Context, fileType string) ([]metastorage.StorageEntryMetadata, error) <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "ListStorageEntries", ctx, fileType)
+        ret0, _ := ret[0].([]metastorage.StorageEntryMetadata)
+        ret1, _ := ret[1].(error)
+        return ret0, ret1
+}</span>
+
+// ListStorageEntries indicates an expected call of ListStorageEntries.
+func (mr *MockMetaDataStoreMockRecorder) ListStorageEntries(ctx, fileType any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListStorageEntries", reflect.TypeOf((*MockMetaDataStore)(nil).ListStorageEntries), ctx, fileType)
+}</span>
+
+// ListVideoClips mocks base method.
+func (m *MockMetaDataStore) ListVideoClips(ctx context.Context, filters map[string]any) ([]types.VideoClipMetadata, error) <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "ListVideoClips", ctx, filters)
+        ret0, _ := ret[0].([]types.VideoClipMetadata)
+        ret1, _ := ret[1].(error)
+        return ret0, ret1
+}</span>
+
+// ListVideoClips indicates an expected call of ListVideoClips.
+func (mr *MockMetaDataStoreMockRecorder) ListVideoClips(ctx, filters any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListVideoClips", reflect.TypeOf((*MockMetaDataStore)(nil).ListVideoClips), ctx, filters)
+}</span>
+
+// MoveEventToDeadLetter mocks base method.
+func (m *MockMetaDataStore) MoveEventToDeadLetter(ctx context.Context, eventID string) error <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "MoveEventToDeadLetter", ctx, eventID)
+        ret0, _ := ret[0].(error)
+        return ret0
+}</span>
+
+// MoveEventToDeadLetter indicates an expected call of MoveEventToDeadLetter.
+func (mr *MockMetaDataStoreMockRecorder) MoveEventToDeadLetter(ctx, eventID any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "MoveEventToDeadLetter", reflect.TypeOf((*MockMetaDataStore)(nil).MoveEventToDeadLetter), ctx, eventID)
+}</span>
+
+// SaveDataUnit mocks base method.
+func (m *MockMetaDataStore) SaveDataUnit(ctx context.Context, dataUnit types.DataUnitMetadata) error <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "SaveDataUnit", ctx, dataUnit)
+        ret0, _ := ret[0].(error)
+        return ret0
+}</span>
+
+// SaveDataUnit indicates an expected call of SaveDataUnit.
+func (mr *MockMetaDataStoreMockRecorder) SaveDataUnit(ctx, dataUnit any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SaveDataUnit", reflect.TypeOf((*MockMetaDataStore)(nil).SaveDataUnit), ctx, dataUnit)
+}</span>
+
+// SaveDevice mocks base method.
+func (m *MockMetaDataStore) SaveDevice(ctx context.Context, device types.DeviceMetadata) error <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "SaveDevice", ctx, device)
+        ret0, _ := ret[0].(error)
+        return ret0
+}</span>
+
+// SaveDevice indicates an expected call of SaveDevice.
+func (mr *MockMetaDataStoreMockRecorder) SaveDevice(ctx, device any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SaveDevice", reflect.TypeOf((*MockMetaDataStore)(nil).SaveDevice), ctx, device)
+}</span>
+
+// SaveEdgeCapabilities mocks base method.
+func (m *MockMetaDataStore) SaveEdgeCapabilities(ctx context.Context, capabilities map[string]any) error <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "SaveEdgeCapabilities", ctx, capabilities)
+        ret0, _ := ret[0].(error)
+        return ret0
+}</span>
+
+// SaveEdgeCapabilities indicates an expected call of SaveEdgeCapabilities.
+func (mr *MockMetaDataStoreMockRecorder) SaveEdgeCapabilities(ctx, capabilities any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SaveEdgeCapabilities", reflect.TypeOf((*MockMetaDataStore)(nil).SaveEdgeCapabilities), ctx, capabilities)
+}</span>
+
+// SaveEdgeState mocks base method.
+func (m *MockMetaDataStore) SaveEdgeState(ctx context.Context, state map[string]any) error <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "SaveEdgeState", ctx, state)
+        ret0, _ := ret[0].(error)
+        return ret0
+}</span>
+
+// SaveEdgeState indicates an expected call of SaveEdgeState.
+func (mr *MockMetaDataStoreMockRecorder) SaveEdgeState(ctx, state any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SaveEdgeState", reflect.TypeOf((*MockMetaDataStore)(nil).SaveEdgeState), ctx, state)
+}</span>
+
+// SaveEvent mocks base method.
+func (m *MockMetaDataStore) SaveEvent(ctx context.Context, event types.EventBusEventMetadata) error <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "SaveEvent", ctx, event)
+        ret0, _ := ret[0].(error)
+        return ret0
+}</span>
+
+// SaveEvent indicates an expected call of SaveEvent.
+func (mr *MockMetaDataStoreMockRecorder) SaveEvent(ctx, event any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SaveEvent", reflect.TypeOf((*MockMetaDataStore)(nil).SaveEvent), ctx, event)
+}</span>
+
+// SaveMLLifecycleState mocks base method.
+func (m *MockMetaDataStore) SaveMLLifecycleState(ctx context.Context, deviceID string, stateInfo types.MLLifecycleStateInfo) error <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "SaveMLLifecycleState", ctx, deviceID, stateInfo)
+        ret0, _ := ret[0].(error)
+        return ret0
+}</span>
+
+// SaveMLLifecycleState indicates an expected call of SaveMLLifecycleState.
+func (mr *MockMetaDataStoreMockRecorder) SaveMLLifecycleState(ctx, deviceID, stateInfo any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SaveMLLifecycleState", reflect.TypeOf((*MockMetaDataStore)(nil).SaveMLLifecycleState), ctx, deviceID, stateInfo)
+}</span>
+
+// SaveModelDeployment mocks base method.
+func (m *MockMetaDataStore) SaveModelDeployment(ctx context.Context, deployment types.ModelDeploymentMetadata) error <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "SaveModelDeployment", ctx, deployment)
+        ret0, _ := ret[0].(error)
+        return ret0
+}</span>
+
+// SaveModelDeployment indicates an expected call of SaveModelDeployment.
+func (mr *MockMetaDataStoreMockRecorder) SaveModelDeployment(ctx, deployment any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SaveModelDeployment", reflect.TypeOf((*MockMetaDataStore)(nil).SaveModelDeployment), ctx, deployment)
+}</span>
+
+// SavePendingDataUnitRequest mocks base method.
+func (m *MockMetaDataStore) SavePendingDataUnitRequest(ctx context.Context, deviceID string, request types.PendingDataUnitRequest) error <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "SavePendingDataUnitRequest", ctx, deviceID, request)
+        ret0, _ := ret[0].(error)
+        return ret0
+}</span>
+
+// SavePendingDataUnitRequest indicates an expected call of SavePendingDataUnitRequest.
+func (mr *MockMetaDataStoreMockRecorder) SavePendingDataUnitRequest(ctx, deviceID, request any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SavePendingDataUnitRequest", reflect.TypeOf((*MockMetaDataStore)(nil).SavePendingDataUnitRequest), ctx, deviceID, request)
+}</span>
+
+// SavePendingModelDeployment mocks base method.
+func (m *MockMetaDataStore) SavePendingModelDeployment(ctx context.Context, deviceID string, deployment types.PendingModelDeployment) error <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "SavePendingModelDeployment", ctx, deviceID, deployment)
+        ret0, _ := ret[0].(error)
+        return ret0
+}</span>
+
+// SavePendingModelDeployment indicates an expected call of SavePendingModelDeployment.
+func (mr *MockMetaDataStoreMockRecorder) SavePendingModelDeployment(ctx, deviceID, deployment any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SavePendingModelDeployment", reflect.TypeOf((*MockMetaDataStore)(nil).SavePendingModelDeployment), ctx, deviceID, deployment)
+}</span>
+
+// SaveSecurityEvent mocks base method.
+func (m *MockMetaDataStore) SaveSecurityEvent(ctx context.Context, event types.SecurityEventMetadata) error <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "SaveSecurityEvent", ctx, event)
+        ret0, _ := ret[0].(error)
+        return ret0
+}</span>
+
+// SaveSecurityEvent indicates an expected call of SaveSecurityEvent.
+func (mr *MockMetaDataStoreMockRecorder) SaveSecurityEvent(ctx, event any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SaveSecurityEvent", reflect.TypeOf((*MockMetaDataStore)(nil).SaveSecurityEvent), ctx, event)
+}</span>
+
+// SaveStorageEntry mocks base method.
+func (m *MockMetaDataStore) SaveStorageEntry(ctx context.Context, entry metastorage.StorageEntryMetadata) error <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "SaveStorageEntry", ctx, entry)
+        ret0, _ := ret[0].(error)
+        return ret0
+}</span>
+
+// SaveStorageEntry indicates an expected call of SaveStorageEntry.
+func (mr *MockMetaDataStoreMockRecorder) SaveStorageEntry(ctx, entry any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SaveStorageEntry", reflect.TypeOf((*MockMetaDataStore)(nil).SaveStorageEntry), ctx, entry)
+}</span>
+
+// SaveVideoClip mocks base method.
+func (m *MockMetaDataStore) SaveVideoClip(ctx context.Context, clip types.VideoClipMetadata) error <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "SaveVideoClip", ctx, clip)
+        ret0, _ := ret[0].(error)
+        return ret0
+}</span>
+
+// SaveVideoClip indicates an expected call of SaveVideoClip.
+func (mr *MockMetaDataStoreMockRecorder) SaveVideoClip(ctx, clip any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SaveVideoClip", reflect.TypeOf((*MockMetaDataStore)(nil).SaveVideoClip), ctx, clip)
+}</span>
+
+// Start mocks base method.
+func (m *MockMetaDataStore) Start(ctx context.Context) error <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "Start", ctx)
+        ret0, _ := ret[0].(error)
+        return ret0
+}</span>
+
+// Start indicates an expected call of Start.
+func (mr *MockMetaDataStoreMockRecorder) Start(ctx any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Start", reflect.TypeOf((*MockMetaDataStore)(nil).Start), ctx)
+}</span>
+
+// Stop mocks base method.
+func (m *MockMetaDataStore) Stop(ctx context.Context) error <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "Stop", ctx)
+        ret0, _ := ret[0].(error)
+        return ret0
+}</span>
+
+// Stop indicates an expected call of Stop.
+func (mr *MockMetaDataStoreMockRecorder) Stop(ctx any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Stop", reflect.TypeOf((*MockMetaDataStore)(nil).Stop), ctx)
+}</span>
+
+// UpdateDataUnit mocks base method.
+func (m *MockMetaDataStore) UpdateDataUnit(ctx context.Context, dataUnitID string, updateFn func(types.DataUnitMetadata) types.DataUnitMetadata) (types.DataUnitMetadata, error) <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "UpdateDataUnit", ctx, dataUnitID, updateFn)
+        ret0, _ := ret[0].(types.DataUnitMetadata)
+        ret1, _ := ret[1].(error)
+        return ret0, ret1
+}</span>
+
+// UpdateDataUnit indicates an expected call of UpdateDataUnit.
+func (mr *MockMetaDataStoreMockRecorder) UpdateDataUnit(ctx, dataUnitID, updateFn any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateDataUnit", reflect.TypeOf((*MockMetaDataStore)(nil).UpdateDataUnit), ctx, dataUnitID, updateFn)
+}</span>
+
+// UpdateDevice mocks base method.
+func (m *MockMetaDataStore) UpdateDevice(ctx context.Context, deviceID string, updateFn func(types.DeviceMetadata) types.DeviceMetadata) (types.DeviceMetadata, error) <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "UpdateDevice", ctx, deviceID, updateFn)
+        ret0, _ := ret[0].(types.DeviceMetadata)
+        ret1, _ := ret[1].(error)
+        return ret0, ret1
+}</span>
+
+// UpdateDevice indicates an expected call of UpdateDevice.
+func (mr *MockMetaDataStoreMockRecorder) UpdateDevice(ctx, deviceID, updateFn any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateDevice", reflect.TypeOf((*MockMetaDataStore)(nil).UpdateDevice), ctx, deviceID, updateFn)
+}</span>
+
+// UpdateEventProcessingStatus mocks base method.
+func (m *MockMetaDataStore) UpdateEventProcessingStatus(ctx context.Context, eventID, status string, retryCount int, lastError string, nextRetryTime *time.Time) error <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "UpdateEventProcessingStatus", ctx, eventID, status, retryCount, lastError, nextRetryTime)
+        ret0, _ := ret[0].(error)
+        return ret0
+}</span>
+
+// UpdateEventProcessingStatus indicates an expected call of UpdateEventProcessingStatus.
+func (mr *MockMetaDataStoreMockRecorder) UpdateEventProcessingStatus(ctx, eventID, status, retryCount, lastError, nextRetryTime any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateEventProcessingStatus", reflect.TypeOf((*MockMetaDataStore)(nil).UpdateEventProcessingStatus), ctx, eventID, status, retryCount, lastError, nextRetryTime)
+}</span>
+
+// UpdateMLLifecycleState mocks base method.
+func (m *MockMetaDataStore) UpdateMLLifecycleState(ctx context.Context, deviceID string, updateFn func(types.MLLifecycleStateInfo) types.MLLifecycleStateInfo) (*types.MLLifecycleStateInfo, error) <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "UpdateMLLifecycleState", ctx, deviceID, updateFn)
+        ret0, _ := ret[0].(*types.MLLifecycleStateInfo)
+        ret1, _ := ret[1].(error)
+        return ret0, ret1
+}</span>
+
+// UpdateMLLifecycleState indicates an expected call of UpdateMLLifecycleState.
+func (mr *MockMetaDataStoreMockRecorder) UpdateMLLifecycleState(ctx, deviceID, updateFn any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateMLLifecycleState", reflect.TypeOf((*MockMetaDataStore)(nil).UpdateMLLifecycleState), ctx, deviceID, updateFn)
+}</span>
+
+// UpdateMLLifecycleStateCAS mocks base method.
+func (m *MockMetaDataStore) UpdateMLLifecycleStateCAS(ctx context.Context, deviceID string, expectedVersion int, updateFn func(types.MLLifecycleStateInfo) types.MLLifecycleStateInfo) (*types.MLLifecycleStateInfo, error) <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "UpdateMLLifecycleStateCAS", ctx, deviceID, expectedVersion, updateFn)
+        ret0, _ := ret[0].(*types.MLLifecycleStateInfo)
+        ret1, _ := ret[1].(error)
+        return ret0, ret1
+}</span>
+
+// UpdateMLLifecycleStateCAS indicates an expected call of UpdateMLLifecycleStateCAS.
+func (mr *MockMetaDataStoreMockRecorder) UpdateMLLifecycleStateCAS(ctx, deviceID, expectedVersion, updateFn any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateMLLifecycleStateCAS", reflect.TypeOf((*MockMetaDataStore)(nil).UpdateMLLifecycleStateCAS), ctx, deviceID, expectedVersion, updateFn)
+}</span>
+
+// UpdateModelDeployment mocks base method.
+func (m *MockMetaDataStore) UpdateModelDeployment(ctx context.Context, modelID string, updateFn func(types.ModelDeploymentMetadata) types.ModelDeploymentMetadata) (types.ModelDeploymentMetadata, error) <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "UpdateModelDeployment", ctx, modelID, updateFn)
+        ret0, _ := ret[0].(types.ModelDeploymentMetadata)
+        ret1, _ := ret[1].(error)
+        return ret0, ret1
+}</span>
+
+// UpdateModelDeployment indicates an expected call of UpdateModelDeployment.
+func (mr *MockMetaDataStoreMockRecorder) UpdateModelDeployment(ctx, modelID, updateFn any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateModelDeployment", reflect.TypeOf((*MockMetaDataStore)(nil).UpdateModelDeployment), ctx, modelID, updateFn)
+}</span>
+
+// UpdateSecurityEventStatus mocks base method.
+func (m *MockMetaDataStore) UpdateSecurityEventStatus(ctx context.Context, eventID, status string, vmACKTime *time.Time) error <span class="cov0" title="0">{
+        m.ctrl.T.Helper()
+        ret := m.ctrl.Call(m, "UpdateSecurityEventStatus", ctx, eventID, status, vmACKTime)
+        ret0, _ := ret[0].(error)
+        return ret0
+}</span>
+
+// UpdateSecurityEventStatus indicates an expected call of UpdateSecurityEventStatus.
+func (mr *MockMetaDataStoreMockRecorder) UpdateSecurityEventStatus(ctx, eventID, status, vmACKTime any) *gomock.Call <span class="cov0" title="0">{
+        mr.mock.ctrl.T.Helper()
+        return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateSecurityEventStatus", reflect.TypeOf((*MockMetaDataStore)(nil).UpdateSecurityEventStatus), ctx, eventID, status, vmACKTime)
+}</span>
+</pre>
+		
+		<pre class="file" id="file3" style="display: none">package types
+
+// QuotaConfig contains configuration for storage quota management.
+type QuotaConfig struct {
+        // MaxSizeMB is the maximum storage size in megabytes (default: 1,000 MB)
+        MaxSizeMB int `yaml:"max_size_mb"`
+
+        // WarningThresholdPercent is the warning threshold percentage (default: 80)
+        // When storage usage exceeds this threshold, warnings are emitted
+        WarningThresholdPercent int `yaml:"warning_threshold_percent"`
+
+        // FullThresholdPercent is the full threshold percentage (default: 95)
+        // When storage usage exceeds this threshold, write operations are rejected
+        FullThresholdPercent int `yaml:"full_threshold_percent"`
+
+        // MaxRecordsPerBucket is the maximum number of records per bucket (default: 1,000,000)
+        // This can be overridden per bucket if needed
+        MaxRecordsPerBucket int `yaml:"max_records_per_bucket"`
+
+        // PerBucketLimits allows per-bucket record limits (optional)
+        // If not specified, MaxRecordsPerBucket is used for all buckets
+        PerBucketLimits map[string]int `yaml:"per_bucket_limits"`
+}
+
+// Validate validates the quota configuration and sets defaults.
+func (c *QuotaConfig) Validate() <span class="cov0" title="0">{
+        if c.MaxSizeMB &lt;= 0 </span><span class="cov0" title="0">{
+                c.MaxSizeMB = 1000 // Default: 1,000 MB
+        }</span>
+        <span class="cov0" title="0">if c.WarningThresholdPercent &lt;= 0 || c.WarningThresholdPercent &gt;= 100 </span><span class="cov0" title="0">{
+                c.WarningThresholdPercent = 80 // Default: 80%
+        }</span>
+        <span class="cov0" title="0">if c.FullThresholdPercent &lt;= 0 || c.FullThresholdPercent &gt;= 100 </span><span class="cov0" title="0">{
+                c.FullThresholdPercent = 95 // Default: 95%
+        }</span>
+        <span class="cov0" title="0">if c.WarningThresholdPercent &gt;= c.FullThresholdPercent </span><span class="cov0" title="0">{
+                // Ensure warning threshold is less than full threshold
+                c.WarningThresholdPercent = c.FullThresholdPercent - 10
+                if c.WarningThresholdPercent &lt; 50 </span><span class="cov0" title="0">{
+                        c.WarningThresholdPercent = 80
+                }</span>
+        }
+        <span class="cov0" title="0">if c.MaxRecordsPerBucket &lt;= 0 </span><span class="cov0" title="0">{
+                c.MaxRecordsPerBucket = 1000000 // Default: 1,000,000 records
+        }</span>
+}
+
+// GetBucketLimit returns the record limit for a specific bucket.
+// If a per-bucket limit is configured, it returns that; otherwise returns MaxRecordsPerBucket.
+func (c *QuotaConfig) GetBucketLimit(bucketName string) int <span class="cov0" title="0">{
+        if c.PerBucketLimits != nil </span><span class="cov0" title="0">{
+                if limit, ok := c.PerBucketLimits[bucketName]; ok </span><span class="cov0" title="0">{
+                        return limit
+                }</span>
+        }
+        <span class="cov0" title="0">return c.MaxRecordsPerBucket</span>
+}
+
+// MetaStorageConfig contains configuration for the meta-storage service.
+// This is a provider-agnostic configuration structure that supports multiple storage backends.
+type MetaStorageConfig struct {
+        // Provider specifies the storage provider to use (e.g., "bbolt", "sqlite", "postgres").
+        Provider string `yaml:"provider"`
+
+        // Endpoint is the storage endpoint URL (used for remote storage providers like PostgreSQL).
+        // For local providers like BoltDB, this is empty.
+        Endpoint string `yaml:"endpoint"`
+
+        // AccessKey is the access key for authentication (used for remote storage providers).
+        // For local providers like BoltDB, this is empty.
+        AccessKey string `yaml:"access_key"`
+
+        // SecretKey is the secret key for authentication (used for remote storage providers).
+        // For local providers like BoltDB, this is empty.
+        SecretKey string `yaml:"secret_key"`
+
+        // Region is the storage region (used for remote storage providers).
+        // For local providers like BoltDB, this is empty.
+        Region string `yaml:"region"`
+
+        // DataDir is the data directory for local storage providers (used by BoltDB, SQLite).
+        // This is where the database file(s) will be stored.
+        DataDir string `yaml:"data_dir"`
+
+        // BoltDB contains BoltDB-specific configuration (used when provider is "bbolt").
+        // If not specified, defaults are used.
+        BoltDB *BoltDBConfig `yaml:"bbolt"`
+
+        // Quota contains quota configuration for storage management
+        Quota *QuotaConfig `yaml:"quota"`
+
+        // Retention contains retention policy configuration
+        Retention *RetentionConfig `yaml:"retention"`
+}
+
+// RetentionConfig contains configuration for retention policies.
+type RetentionConfig struct {
+        // EventBusRetentionHours is the retention period for event bus events in hours (default: 24 hours)
+        EventBusRetentionHours int `yaml:"event_bus_retention_hours"`
+
+        // DeadLetterRetentionDays is the retention period for dead letter events in days (default: 90 days)
+        DeadLetterRetentionDays int `yaml:"dead_letter_retention_days"`
+
+        // EdgeStateHistoryRetentionDays is the retention period for edge state history in days (default: 30 days)
+        EdgeStateHistoryRetentionDays int `yaml:"edge_state_history_retention_days"`
+
+        // CleanupIntervalHours is the interval between cleanup runs in hours (default: 6 hours)
+        CleanupIntervalHours int `yaml:"cleanup_interval_hours"`
+
+        // PerBucketRetention allows per-bucket retention policies (optional)
+        // Format: bucket_name -&gt; retention_hours
+        // If not specified, default retention policies are used
+        PerBucketRetention map[string]int `yaml:"per_bucket_retention"`
+}
+
+// Validate validates the retention configuration and sets defaults.
+func (c *RetentionConfig) Validate() <span class="cov0" title="0">{
+        if c.EventBusRetentionHours &lt;= 0 </span><span class="cov0" title="0">{
+                c.EventBusRetentionHours = 24 // Default: 24 hours
+        }</span>
+        <span class="cov0" title="0">if c.DeadLetterRetentionDays &lt;= 0 </span><span class="cov0" title="0">{
+                c.DeadLetterRetentionDays = 90 // Default: 90 days
+        }</span>
+        <span class="cov0" title="0">if c.EdgeStateHistoryRetentionDays &lt;= 0 </span><span class="cov0" title="0">{
+                c.EdgeStateHistoryRetentionDays = 30 // Default: 30 days
+        }</span>
+        <span class="cov0" title="0">if c.CleanupIntervalHours &lt;= 0 </span><span class="cov0" title="0">{
+                c.CleanupIntervalHours = 6 // Default: 6 hours
+        }</span>
+}
+
+// GetBucketRetentionHours returns the retention period in hours for a specific bucket.
+// If a per-bucket retention is configured, it returns that; otherwise returns the default for that bucket type.
+func (c *RetentionConfig) GetBucketRetentionHours(bucketName string) int <span class="cov0" title="0">{
+        // Check per-bucket retention first
+        if c.PerBucketRetention != nil </span><span class="cov0" title="0">{
+                if retention, ok := c.PerBucketRetention[bucketName]; ok </span><span class="cov0" title="0">{
+                        return retention
+                }</span>
+        }
+
+        // Return default retention based on bucket type
+        <span class="cov0" title="0">switch bucketName </span>{
+        case "event_bus", "event_queue":<span class="cov0" title="0">
+                return c.EventBusRetentionHours</span>
+        case "dead_letter_events":<span class="cov0" title="0">
+                return c.DeadLetterRetentionDays * 24</span> // Convert days to hours
+        case "edge_state_history":<span class="cov0" title="0">
+                return c.EdgeStateHistoryRetentionDays * 24</span> // Convert days to hours
+        default:<span class="cov0" title="0">
+                // No retention for other buckets (infinite retention)
+                return 0</span>
+        }
+}
+
+</pre>
+		
+		<pre class="file" id="file4" style="display: none">package types
+
+import "time"
+
+// MLLifecycleState represents the ML lifecycle state of a device.
+// This enum defines all possible states in the ML lifecycle workflow.
+type MLLifecycleState string
+
+const (
+        // MLLifecycleStateUnassigned indicates the device exists locally but VM has not assigned it to this Edge
+        MLLifecycleStateUnassigned MLLifecycleState = "Unassigned"
+
+        // MLLifecycleStateAssigned indicates VM assigned device to Edge; Edge must fulfill dataset/model workflow
+        MLLifecycleStateAssigned MLLifecycleState = "Assigned"
+
+        // MLLifecycleStateAwaitingDataset indicates VM requested dataset; Edge is collecting labeled units
+        MLLifecycleStateAwaitingDataset MLLifecycleState = "AwaitingDataset"
+
+        // MLLifecycleStateDatasetReadyLocal indicates dataset exists locally and passed validation
+        MLLifecycleStateDatasetReadyLocal MLLifecycleState = "DatasetReadyLocal"
+
+        // MLLifecycleStateDatasetUploadInProgress indicates dataset upload is in progress
+        MLLifecycleStateDatasetUploadInProgress MLLifecycleState = "DatasetUploadInProgress"
+
+        // MLLifecycleStateDatasetUploaded indicates dataset has been uploaded to VM
+        MLLifecycleStateDatasetUploaded MLLifecycleState = "DatasetUploaded"
+
+        // MLLifecycleStateTrainingPending indicates VM acknowledged dataset and queued training (optional if VM is async)
+        MLLifecycleStateTrainingPending MLLifecycleState = "TrainingPending"
+
+        // MLLifecycleStateModelAvailable indicates VM produced a model and signaled availability; Edge may need to fetch
+        MLLifecycleStateModelAvailable MLLifecycleState = "ModelAvailable"
+
+        // MLLifecycleStateModelStored indicates model is stored in object/meta storage and verified
+        MLLifecycleStateModelStored MLLifecycleState = "ModelStored"
+
+        // MLLifecycleStateInferenceActive indicates inference loop is running for this device
+        MLLifecycleStateInferenceActive MLLifecycleState = "InferenceActive"
+
+        // MLLifecycleStateDegradedNoModel indicates device is active but no valid model is available (Edge cannot detect)
+        MLLifecycleStateDegradedNoModel MLLifecycleState = "DegradedNoModel"
+
+        // MLLifecycleStateRecoveryRequired indicates local storage integrity prevents safe operation; VM-assisted resync required
+        MLLifecycleStateRecoveryRequired MLLifecycleState = "RecoveryRequired"
+)
+
+// String returns the string representation of MLLifecycleState
+func (s MLLifecycleState) String() string <span class="cov0" title="0">{
+        return string(s)
+}</span>
+
+// IsValid checks if the state is a valid ML lifecycle state
+func (s MLLifecycleState) IsValid() bool <span class="cov0" title="0">{
+        switch s </span>{
+        case MLLifecycleStateUnassigned,
+                MLLifecycleStateAssigned,
+                MLLifecycleStateAwaitingDataset,
+                MLLifecycleStateDatasetReadyLocal,
+                MLLifecycleStateDatasetUploadInProgress,
+                MLLifecycleStateDatasetUploaded,
+                MLLifecycleStateTrainingPending,
+                MLLifecycleStateModelAvailable,
+                MLLifecycleStateModelStored,
+                MLLifecycleStateInferenceActive,
+                MLLifecycleStateDegradedNoModel,
+                MLLifecycleStateRecoveryRequired:<span class="cov0" title="0">
+                return true</span>
+        default:<span class="cov0" title="0">
+                return false</span>
+        }
+}
+
+// MLLifecycleStateInfo represents the complete ML lifecycle state information for a device.
+// This struct is persisted in meta storage and includes all state metadata required for
+// workflow orchestration, recovery, and CAS (Compare-And-Swap) operations.
+type MLLifecycleStateInfo struct {
+        // DeviceID is the device identifier
+        DeviceID DeviceID
+
+        // State is the current ML lifecycle state
+        State MLLifecycleState
+
+        // LastUpdated is when the state was last updated
+        LastUpdated time.Time
+
+        // Error contains any error message associated with the current state
+        Error string
+
+        // ModelID is the identifier of the model associated with this device (if any)
+        ModelID string
+
+        // ModelVersion is the version of the model (if any)
+        ModelVersion string
+
+        // DatasetID is the identifier of the dataset associated with this device (if any)
+        DatasetID string
+
+        // OfflineInferenceAllowed is a policy flag indicating whether offline inference is allowed
+        // This is set by VM in assignment response and controls whether inference continues
+        // when VM connection is lost
+        OfflineInferenceAllowed bool
+
+        // LastKnownGoodState is the last known good state before entering error/recovery states
+        // This is used for recovery and rollback operations
+        LastKnownGoodState MLLifecycleState
+
+        // Version is the version number for CAS (Compare-And-Swap) operations
+        // This must be incremented on every update to enable atomic state transitions
+        Version int
+
+        // CreatedAt is when this ML lifecycle state record was created
+        CreatedAt time.Time
+}
+
+// MLLifecycleFilters contains filters for querying ML lifecycle states
+type MLLifecycleFilters struct {
+        // DeviceID filters by specific device ID
+        DeviceID *DeviceID
+
+        // State filters by specific ML lifecycle state
+        State *MLLifecycleState
+
+        // States filters by multiple ML lifecycle states (OR condition)
+        States []MLLifecycleState
+
+        // HasModel filters for devices that have a model (ModelID != "")
+        HasModel *bool
+
+        // HasDataset filters for devices that have a dataset (DatasetID != "")
+        HasDataset *bool
+
+        // OfflineInferenceAllowed filters by offline inference policy
+        OfflineInferenceAllowed *bool
+}
+
+// PendingModelDeployment represents a pending model deployment request.
+// This is stored temporarily in the pending_model_deployments bucket and cleaned up after TTL expires.
+type PendingModelDeployment struct {
+        // DeviceID is the device identifier for this deployment
+        DeviceID DeviceID
+
+        // ModelID is the model identifier to deploy
+        ModelID string
+
+        // EventData contains the deployment event data (from VM)
+        EventData map[string]interface{}
+
+        // ReceivedAt is when the deployment request was received
+        ReceivedAt time.Time
+
+        // TTL is the time-to-live for this deployment request (default: 24 hours)
+        TTL time.Duration
+}
+
+</pre>
+		
+		<pre class="file" id="file5" style="display: none">package types
+
+import "time"
+
+// RecordMetadata represents metadata about a stored record.
+// This is used for tracking record lifecycle and versioning.
+type RecordMetadata struct {
+        // Key is the unique key for the record
+        Key string
+
+        // Bucket is the bucket/namespace where the record is stored
+        Bucket string
+
+        // CreatedAt is when the record was created
+        CreatedAt time.Time
+
+        // UpdatedAt is when the record was last updated
+        UpdatedAt time.Time
+
+        // Version is the record version (for CAS operations)
+        Version int
+}
+
+// StorageQuota represents storage quota information.
+// This is used for quota tracking and enforcement.
+type StorageQuota struct {
+        // Used is the current storage usage in bytes
+        Used int64
+
+        // Limit is the maximum storage limit in bytes
+        Limit int64
+
+        // WarningThreshold is the warning threshold percentage (e.g., 80)
+        WarningThreshold int
+
+        // FullThreshold is the full threshold percentage (e.g., 95)
+        FullThreshold int
+}
+
+// BucketInfo represents information about a storage bucket.
+type BucketInfo struct {
+        // Name is the bucket name
+        Name string
+
+        // RecordCount is the number of records in the bucket
+        RecordCount int64
+
+        // SizeBytes is the total size of records in the bucket in bytes
+        SizeBytes int64
+}
+
+// HealthStatus represents the health status of the storage service.
+type HealthStatus int
+
+const (
+        // HealthStatusHealthy indicates the storage service is healthy
+        HealthStatusHealthy HealthStatus = iota
+
+        // HealthStatusWarning indicates the storage service is in a warning state (e.g., quota 80-90%)
+        HealthStatusWarning
+
+        // HealthStatusFull indicates the storage service is full (quota &gt;95%)
+        HealthStatusFull
+
+        // HealthStatusCorrupted indicates the storage service has detected corruption
+        HealthStatusCorrupted
+)
+
+// String returns the string representation of HealthStatus
+func (s HealthStatus) String() string <span class="cov0" title="0">{
+        switch s </span>{
+        case HealthStatusHealthy:<span class="cov0" title="0">
+                return "healthy"</span>
+        case HealthStatusWarning:<span class="cov0" title="0">
+                return "warning"</span>
+        case HealthStatusFull:<span class="cov0" title="0">
+                return "full"</span>
+        case HealthStatusCorrupted:<span class="cov0" title="0">
+                return "corrupted"</span>
+        default:<span class="cov0" title="0">
+                return "unknown"</span>
+        }
+}
+
+// CleanupStats contains statistics about cleanup operations.
+// This is used in StorageHealth to report cleanup statistics.
+type CleanupStats struct {
+        // RecordsDeleted is the number of records deleted in the last cleanup
+        RecordsDeleted int64
+
+        // SpaceFreedBytes is the approximate space freed in bytes
+        SpaceFreedBytes int64
+
+        // BucketsProcessed is the number of buckets processed
+        BucketsProcessed int
+
+        // Duration is how long the cleanup took
+        Duration time.Duration
+}
+
+// StorageHealth represents the health status of the storage service.
+// This follows the vm-gateway pattern for health snapshots.
+type StorageHealth struct {
+        // Status is the overall health status
+        Status HealthStatus
+
+        // Quota is the current quota status (nil if quota management is disabled)
+        Quota *StorageQuota
+
+        // IntegrityErrors is the count of integrity failures detected
+        IntegrityErrors int
+
+        // LastHealthCheck is when the last health check was performed
+        LastHealthCheck time.Time
+
+        // ProviderHealth is the provider-specific health status string
+        // Values: "healthy", "degraded", "unhealthy"
+        ProviderHealth string
+
+        // BucketCounts is a map of bucket names to record counts
+        BucketCounts map[string]int
+
+        // TotalRecords is the total number of records across all buckets
+        TotalRecords int64
+
+        // DatabaseSizeMB is the size of the database file in megabytes
+        DatabaseSizeMB float64
+
+        // LastCleanupTime is when the last retention cleanup was performed
+        LastCleanupTime time.Time
+
+        // CleanupStats contains statistics from the last cleanup operation (nil if no cleanup has been performed)
+        CleanupStats *CleanupStats
+
+        // SchemaVersion is the current schema version
+        SchemaVersion int
+
+        // ProviderStatus contains provider-specific status details (e.g., connection count, transaction stats)
+        ProviderStatus map[string]interface{}
+}
+
+// DeviceID is a type alias for device identifiers.
+// This replaces CameraID to support device-agnostic architecture.
+type DeviceID string
+
+// DeviceType represents the type of device.
+type DeviceType string
+
+const (
+        // DeviceTypeCamera represents a camera device
+        DeviceTypeCamera DeviceType = "camera"
+        // DeviceTypeSensor represents a sensor device
+        DeviceTypeSensor DeviceType = "sensor"
+        // DeviceTypeAudioDevice represents an audio device
+        DeviceTypeAudioDevice DeviceType = "audio_device"
+        // DeviceTypeOther represents other types of IoT devices
+        DeviceTypeOther DeviceType = "other"
+)
+
+// String returns the string representation of DeviceType
+func (dt DeviceType) String() string <span class="cov0" title="0">{
+        return string(dt)
+}</span>
+
+// DeviceMetadata represents metadata for a device (replaces CameraMetadata).
+// This is device-agnostic and supports cameras, sensors, audio devices, and other IoT devices.
+type DeviceMetadata struct {
+        // ID is the unique device identifier
+        ID DeviceID
+
+        // Name is the human-readable device name
+        Name string
+
+        // DeviceType is the type of device (camera, sensor, audio_device, etc.)
+        DeviceType DeviceType
+
+        // Manufacturer is the device manufacturer
+        Manufacturer string
+
+        // Model is the device model
+        Model string
+
+        // Enabled indicates whether the device is enabled
+        Enabled bool
+
+        // Status is the current device status (unknown, online, offline, connecting, error)
+        Status string
+
+        // LastSeen is when the device was last seen/contacted
+        LastSeen *time.Time
+
+        // DiscoveredAt is when the device was discovered
+        DiscoveredAt time.Time
+
+        // Device-specific fields (for cameras: IPAddress, ONVIFEndpoint, RTSPURLs, etc.)
+        IPAddress     string
+        ONVIFEndpoint string
+        RTSPURLs      []string
+        DevicePath    string
+
+        // Config contains device-specific configuration
+        Config map[string]interface{}
+
+        // Capabilities contains device capabilities
+        Capabilities map[string]interface{}
+
+        // SyncedWithVM indicates whether the device has been synced with VM
+        SyncedWithVM bool
+
+        // SyncedAt is the timestamp of last sync with VM
+        SyncedAt *time.Time
+
+        // VMDeviceID is the device ID on VM side (if different from Edge ID)
+        VMDeviceID string
+
+        // CreatedAt is when the device metadata was created
+        CreatedAt time.Time
+
+        // UpdatedAt is when the device metadata was last updated
+        UpdatedAt time.Time
+}
+
+// DeviceFilters contains filters for listing devices (replaces CameraFilters).
+type DeviceFilters struct {
+        // EnabledOnly filters by enabled status
+        EnabledOnly *bool
+
+        // Status filters by device status (e.g., "online", "offline", "discovered")
+        Status *string
+
+        // SyncedWithVM filters by VM sync status
+        SyncedWithVM *bool
+
+        // DeviceType filters by device type (e.g., "camera", "sensor", "audio_device")
+        DeviceType *DeviceType
+}
+
+// DataUnitMetadata represents metadata for a data unit (replaces ScreenshotMetadata).
+// This is device-agnostic and supports images, sensor readings, audio samples, etc.
+type DataUnitMetadata struct {
+        // ID is the unique data unit identifier
+        ID string
+
+        // DeviceID is the device that generated this data unit
+        DeviceID DeviceID
+
+        // DeviceType is the type of device that generated this data unit
+        DeviceType DeviceType
+
+        // DataType is the type of data (image, sensor_reading, audio_sample, etc.)
+        DataType string
+
+        // ObjectKey is the object storage key for the data unit
+        ObjectKey string
+
+        // ThumbnailKey is the object storage key for the thumbnail (if applicable)
+        ThumbnailKey string
+
+        // Label is the data unit label
+        Label string
+
+        // CustomLabel is a custom label for the data unit
+        CustomLabel string
+
+        // Description is a description of the data unit
+        Description string
+
+        // Metadata contains additional metadata
+        Metadata map[string]interface{}
+
+        // CreatedAt is when the data unit was created
+        CreatedAt time.Time
+
+        // UpdatedAt is when the data unit was last updated
+        UpdatedAt time.Time
+}
+
+// DataUnitFilters contains filters for querying data units.
+type DataUnitFilters struct {
+        // DeviceID filters by device ID
+        DeviceID *DeviceID
+
+        // DeviceType filters by device type (e.g., "camera", "sensor", "audio_device")
+        DeviceType *DeviceType
+
+        // DataType filters by data type (e.g., "image", "sensor_reading", "audio_sample")
+        DataType *string
+
+        // Label filters by label
+        Label *string
+
+        // CustomLabel filters by custom label
+        CustomLabel *string
+
+        // CreatedAfter filters by creation time (after this time)
+        CreatedAfter *time.Time
+
+        // CreatedBefore filters by creation time (before this time)
+        CreatedBefore *time.Time
+
+        // Limit limits the number of results
+        Limit *int
+}
+
+// VideoClipMetadata represents metadata for a video clip (replaces ClipMetadata).
+// This is device-agnostic and part of the data units system.
+type VideoClipMetadata struct {
+        // ID is the unique clip identifier
+        ID string
+
+        // DeviceID is the device that generated this clip
+        DeviceID DeviceID
+
+        // EventID is the associated event ID
+        EventID string
+
+        // ObjectKey is the object storage key for the clip
+        ObjectKey string
+
+        // Duration is the clip duration
+        Duration time.Duration
+
+        // SizeBytes is the clip size in bytes
+        SizeBytes int64
+
+        // CreatedAt is when the clip was created
+        CreatedAt time.Time
+
+        // Metadata contains additional metadata
+        Metadata map[string]interface{}
+}
+
+// ModelDeploymentMetadata represents metadata for a deployed model (replaces DeployedModelMetadata).
+// This is device-agnostic and supports models deployed to any device type.
+type ModelDeploymentMetadata struct {
+        // ModelID is the unique model identifier
+        ModelID string
+
+        // DeploymentID is the unique deployment identifier
+        DeploymentID string
+
+        // DeviceID is the device where the model is deployed (replaces CameraID)
+        DeviceID DeviceID
+
+        // DeviceType is the type of device (camera, sensor, etc.)
+        DeviceType DeviceType
+
+        // ModelPath is the path to the model file
+        ModelPath string
+
+        // MetadataPath is the path to the model metadata file
+        MetadataPath string
+
+        // ManifestPath is the path to the model manifest file (new field)
+        ManifestPath string
+
+        // DeployedAt is when the model was deployed
+        DeployedAt time.Time
+
+        // Status is the deployment status (active, inactive, failed)
+        Status string
+
+        // EdgeID is the edge device identifier
+        EdgeID string
+
+        // Version is the model version
+        Version string
+
+        // ModelType is the type of model (e.g., "yolo", "classification")
+        ModelType string
+
+        // Framework is the ML framework (e.g., "openvino", "tensorflow")
+        Framework string
+
+        // VerificationResults contains verification results (signature, hash, compatibility checks)
+        VerificationResults map[string]interface{}
+
+        // CreatedAt is when the deployment record was created
+        CreatedAt time.Time
+
+        // UpdatedAt is when the deployment record was last updated
+        UpdatedAt time.Time
+}
+
+// Note: ModelFilters is defined in types.go and updated there to use DeviceID instead of CameraID.
+// ModelDeploymentMetadata is the new device-agnostic type that replaces DeployedModelMetadata.
+
+// Note: Existing types (StorageEntryMetadata, DeployedModelMetadata, StorageStats, ModelFilters,
+// CameraMetadata, CameraFilters, ScreenshotMetadata, ClipMetadata) are kept in types.go
+// for backward compatibility. New device-agnostic types are defined above.
+
+// SecurityEventMetadata represents structured metadata for a security event.
+// This replaces the previous use of map[string]interface{} for security events.
+type SecurityEventMetadata struct {
+        // EventID is the unique security event identifier
+        EventID string
+
+        // DeviceID is the device where the event occurred
+        DeviceID DeviceID
+
+        // DeviceType is the type of device (camera, sensor, etc.)
+        DeviceType DeviceType
+
+        // EventType is the type of event (e.g., "intrusion", "motion", "line_crossing")
+        EventType string
+
+        // Timestamp is when the event occurred
+        Timestamp time.Time
+
+        // Confidence is the model's confidence in the event (0.0 - 1.0)
+        Confidence float64
+
+        // ModelID is the ID of the model that detected the event
+        ModelID string
+
+        // ModelVersion is the version of the model that detected the event
+        ModelVersion string
+
+        // Status is the delivery status (pending_delivery, delivery_failed, delivered)
+        Status string
+
+        // DeliveryAttempts is the number of delivery attempts made
+        DeliveryAttempts int
+
+        // LastDeliveryAttempt is when the last delivery attempt was made
+        LastDeliveryAttempt time.Time
+
+        // VMACKTimestamp is when the VM acknowledged the event
+        VMACKTimestamp time.Time
+
+        // AttachmentRefs are object storage keys for any attachments (images, clips, etc.)
+        AttachmentRefs []string
+
+        // Metadata contains additional metadata about the event
+        Metadata map[string]interface{}
+}
+
+// SecurityEventFilters contains filters for querying security events.
+type SecurityEventFilters struct {
+        // DeviceID filters by device ID
+        DeviceID *DeviceID
+
+        // DeviceType filters by device type
+        DeviceType *DeviceType
+
+        // EventType filters by event type
+        EventType *string
+
+        // Status filters by delivery status
+        Status *string
+
+        // ModelID filters by model ID
+        ModelID *string
+
+        // ModelVersion filters by model version
+        ModelVersion *string
+
+        // From filters by events occurring at or after this time
+        From *time.Time
+
+        // To filters by events occurring at or before this time
+        To *time.Time
+
+        // Limit limits the number of results
+        Limit *int
+}
+
+// EventBusEventMetadata represents metadata for an event bus event.
+// This replaces the map[string]interface{} type with a structured type.
+type EventBusEventMetadata struct {
+        // EventID is the unique event identifier
+        EventID string
+
+        // EventType is the type of event
+        EventType string
+
+        // Timestamp is when the event occurred
+        Timestamp time.Time
+
+        // Data contains the event payload
+        Data map[string]interface{}
+
+        // ProcessingStatus is the current processing status
+        // Values: pending, processing, completed, failed, dead_letter
+        ProcessingStatus string
+
+        // RetryCount is the number of retry attempts
+        RetryCount int
+
+        // LastError is the last error message (if any)
+        LastError string
+
+        // NextRetryTime is when the event should be retried (if applicable)
+        NextRetryTime *time.Time
+
+        // CreatedAt is when the event was created
+        CreatedAt time.Time
+
+        // UpdatedAt is when the event was last updated
+        UpdatedAt time.Time
+}
+
+// EventBusFilters contains filters for querying event bus events.
+type EventBusFilters struct {
+        // EventType filters by event type
+        EventType *string
+
+        // ProcessingStatus filters by processing status
+        ProcessingStatus *string
+
+        // From filters by events occurring at or after this time
+        From *time.Time
+
+        // To filters by events occurring at or before this time
+        To *time.Time
+
+        // Limit limits the number of results
+        Limit *int
+}
+
+// PendingDataUnitRequest represents a pending data unit capture request (replaces pending snapshot request).
+// This is device-agnostic and supports images, sensor readings, audio samples, etc.
+type PendingDataUnitRequest struct {
+        // DeviceID is the device that should generate the data unit (replaces CameraID)
+        DeviceID DeviceID
+
+        // DeviceType is the type of device (camera, sensor, audio_device, etc.)
+        DeviceType DeviceType
+
+        // DataType is the type of data to capture (image, sensor_reading, audio_sample, etc.)
+        DataType string
+
+        // Label is the label for the data unit
+        Label string
+
+        // CustomLabel is a custom label for the data unit
+        CustomLabel string
+
+        // Count is the number of data units to capture
+        Count int32
+
+        // RequestedAt is when the request was made
+        RequestedAt time.Time
+
+        // Status is the request status (pending, in_progress, completed, failed)
+        Status string
+}
+
+</pre>
+		
+		</div>
+	</body>
+	<script>
+	(function() {
+		var files = document.getElementById('files');
+		var visible;
+		files.addEventListener('change', onChange, false);
+		function select(part) {
+			if (visible)
+				visible.style.display = 'none';
+			visible = document.getElementById(part);
+			if (!visible)
+				return;
+			files.value = part;
+			visible.style.display = 'block';
+			location.hash = part;
+		}
+		function onChange() {
+			select(files.value);
+			window.scrollTo(0, 0);
+		}
+		if (location.hash != "") {
+			select(location.hash.substr(1));
+		}
+		if (!visible) {
+			select("file0");
+		}
+	})();
+	</script>
+</html>
