@@ -7,6 +7,19 @@ import (
 
 // EventType represents the type of an event.
 // This is a custom type with enum constants for all possible event types.
+//
+// Event types follow a hierarchical naming convention:
+//   - Category: subcategory: action (e.g., "device.discovered")
+//   - Category: action (e.g., "storage.full")
+//
+// Event types are used for:
+//   - Event categorization (drop policy)
+//   - Event filtering (queries)
+//   - Event subscription (Subscribe method)
+//
+// Example:
+//   eventType := EventTypeDeviceDiscovered
+//   category := dropPolicy.GetCategory(eventType)
 type EventType string
 
 // Event type constants - organized by category
@@ -66,32 +79,119 @@ func (e EventType) String() string {
 
 // EventData is a type set (interface constraint) for all event data types.
 // This ensures type safety while allowing different event payload types.
+//
+// All event data types must be included in this type set to be used with Event[T].
+// This provides compile-time type safety when working with typed events.
+//
+// Example:
+//   event := Event[DeviceDiscoveredEventData]{
+//       Type: EventTypeDeviceDiscovered,
+//       Data: DeviceDiscoveredEventData{...},
+//   }
 type EventData interface {
 	ModelDeployedEventData | ModelDeploymentStatusEventData | SnapshotRequestedEventData | CapabilitiesReceivedEventData | NetworkEventData | DeviceEventData | DeviceFrameReceivedEventData | DeviceDiscoveredEventData | DeviceRegisteredEventData | DataUnitSavedEventData | DataUnitUpdatedEventData | DataUnitDeletedEventData | StorageEventData
 }
 
 // Event represents an application-level event flowing through the bus.
 // T must be one of the types in the EventData type set.
+//
+// This is the typed event structure that provides compile-time type safety.
+// Use ToEventAny() to convert to EventAny for bus operations.
+//
+// Fields:
+//   - Type: The event type (e.g., EventTypeDeviceDiscovered)
+//   - Source: The component that emitted the event (e.g., "device-manager")
+//   - Timestamp: When the event was created (should be set to time.Now() at creation)
+//   - Data: Type-safe event-specific payload (must match EventType)
+//   - SequenceNumber: Sequence number per source for ordering (0 if not set)
+//
+// Example:
+//   event := Event[DeviceDiscoveredEventData]{
+//       Type:      EventTypeDeviceDiscovered,
+//       Source:    "device-manager",
+//       Timestamp: time.Now(),
+//       Data: DeviceDiscoveredEventData{
+//           DeviceID: "camera-001",
+//           Name:     "Front Door Camera",
+//       },
+//       SequenceNumber: 1,
+//   }
 type Event[T EventData] struct {
-	Type           EventType
-	Source         string    // Component that emitted the event
-	Timestamp      time.Time // When the event was created
-	Data           T         // Type-safe event-specific payload
-	SequenceNumber int64     // Sequence number per source (0 if not set)
+	// Type is the event type identifier (e.g., "device.discovered").
+	// Must match one of the EventType constants.
+	Type EventType
+
+	// Source is the component that emitted the event (e.g., "device-manager", "ai-service").
+	// Used for event ordering per-source and debugging.
+	Source string
+
+	// Timestamp is when the event was created.
+	// Should be set to time.Now() at event creation time.
+	// Used for retention cleanup and event ordering.
+	Timestamp time.Time
+
+	// Data is the type-safe event-specific payload.
+	// The type T must match the EventType (e.g., DeviceDiscoveredEventData for EventTypeDeviceDiscovered).
+	Data T
+
+	// SequenceNumber is the sequence number per source for ordering guarantees.
+	// Set to 0 if ordering is not required.
+	// Events from the same source with sequence numbers are ordered.
+	SequenceNumber int64
 }
 
 // EventAny is a type-erased event for use in EventBus interface.
 // It stores data as JSON bytes to maintain type safety while allowing
 // the bus to handle all event types uniformly.
+//
+// This is the runtime event structure used by the EventBus interface.
+// Use FromEventAny() to convert back to typed Event[T].
+//
+// Fields:
+//   - Type: The event type (e.g., EventTypeDeviceDiscovered)
+//   - Source: The component that emitted the event
+//   - Timestamp: When the event was created
+//   - Data: Type-erased data as JSON bytes (use FromEventAny to convert back)
+//   - SequenceNumber: Sequence number per source for ordering
+//
+// Example:
+//   eventAny := EventAny{
+//       Type:      EventTypeDeviceDiscovered,
+//       Source:    "device-manager",
+//       Timestamp: time.Now(),
+//       Data:      json.RawMessage(`{"device_id":"camera-001"}`),
+//   }
+//   bus.Publish(eventAny)
 type EventAny struct {
-	Type           EventType
-	Source         string
-	Timestamp      time.Time
-	Data           json.RawMessage // Type-erased data as JSON
+	// Type is the event type identifier (e.g., "device.discovered").
+	Type EventType
+
+	// Source is the component that emitted the event.
+	Source string
+
+	// Timestamp is when the event was created.
+	Timestamp time.Time
+
+	// Data is the type-erased event data as JSON bytes.
+	// Use FromEventAny[T]() to convert back to typed Event[T].
+	Data json.RawMessage
+
+	// SequenceNumber is the sequence number per source for ordering guarantees.
 	SequenceNumber int64
 }
 
 // ToEventAny converts a typed Event[T] to EventAny for bus operations.
+// This is used to convert typed events to the type-erased format required by EventBus.Publish().
+//
+// The event data is marshaled to JSON bytes. If marshaling fails, an error is returned.
+//
+// Example:
+//   typedEvent := Event[DeviceDiscoveredEventData]{...}
+//   eventAny, err := ToEventAny(typedEvent)
+//   if err != nil {
+//       // Handle error
+//   }
+//   bus.Publish(eventAny)
 func ToEventAny[T EventData](e Event[T]) (EventAny, error) {
 	dataBytes, err := json.Marshal(e.Data)
 	if err != nil {
@@ -107,6 +207,18 @@ func ToEventAny[T EventData](e Event[T]) (EventAny, error) {
 }
 
 // FromEventAny converts EventAny back to typed Event[T].
+// This is used to convert type-erased events back to typed events for type-safe access.
+//
+// The event data is unmarshaled from JSON bytes. If unmarshaling fails or the type
+// doesn't match, an error is returned.
+//
+// Example:
+//   eventAny := <-ch // Received from Subscribe()
+//   typedEvent, err := FromEventAny[DeviceDiscoveredEventData](eventAny)
+//   if err != nil {
+//       // Handle error (wrong type or invalid JSON)
+//   }
+//   deviceID := typedEvent.Data.DeviceID // Type-safe access
 func FromEventAny[T EventData](e EventAny) (Event[T], error) {
 	var data T
 	if err := json.Unmarshal(e.Data, &data); err != nil {
@@ -121,40 +233,58 @@ func FromEventAny[T EventData](e EventAny) (Event[T], error) {
 	}, nil
 }
 
-// EventProcessingStatus represents the processing status of an event
+// EventProcessingStatus represents the processing status of an event.
+// This is used for retry logic and dead letter queue management.
+//
+// Event processing flow:
+//   pending → processing → succeeded (or failed → retry → succeeded/dead_letter)
 type EventProcessingStatus string
 
 const (
-	EventStatusPending    EventProcessingStatus = "pending"     // Event is pending processing
-	EventStatusProcessing EventProcessingStatus = "processing"  // Event is currently being processed
-	EventStatusSucceeded  EventProcessingStatus = "succeeded"   // Event was successfully processed
-	EventStatusFailed     EventProcessingStatus = "failed"      // Event processing failed (will be retried)
-	EventStatusDeadLetter EventProcessingStatus = "dead_letter" // Event moved to dead letter queue after max retries
+	// EventStatusPending indicates the event is pending processing.
+	// This is the initial status for newly persisted events.
+	EventStatusPending EventProcessingStatus = "pending"
+
+	// EventStatusProcessing indicates the event is currently being processed.
+	// This status is set when a subscriber starts processing the event.
+	EventStatusProcessing EventProcessingStatus = "processing"
+
+	// EventStatusSucceeded indicates the event was successfully processed.
+	// This status is set when processing completes successfully.
+	EventStatusSucceeded EventProcessingStatus = "succeeded"
+
+	// EventStatusFailed indicates event processing failed (will be retried).
+	// This status is set when processing fails but retries are still available.
+	EventStatusFailed EventProcessingStatus = "failed"
+
+	// EventStatusDeadLetter indicates the event was moved to dead letter queue after max retries.
+	// This status is set when the event has exceeded the maximum retry attempts.
+	EventStatusDeadLetter EventProcessingStatus = "dead_letter"
 )
 
-// OrderingMode defines how events are ordered
+// OrderingMode defines how events are ordered during delivery.
+// Ordering is applied per-source (events from the same source are ordered).
 type OrderingMode string
 
 const (
-	OrderingModeNone       OrderingMode = "none"        // No ordering guarantees
-	OrderingModeBestEffort OrderingMode = "best_effort" // Best-effort ordering (reorder if possible)
-	OrderingModeStrict     OrderingMode = "strict"      // Strict ordering (buffer and wait for missing sequences)
+	// OrderingModeNone provides no ordering guarantees (fastest).
+	// Events are delivered as soon as they are available, in any order.
+	// Use this for events where order doesn't matter.
+	OrderingModeNone OrderingMode = "none"
+
+	// OrderingModeBestEffort provides best-effort ordering (balanced).
+	// Events are reordered if possible, but missing sequences don't block delivery.
+	// Use this for events where order is preferred but not critical.
+	OrderingModeBestEffort OrderingMode = "best_effort"
+
+	// OrderingModeStrict provides strict ordering guarantees (slowest, strongest guarantee).
+	// Events are buffered and delivery waits for missing sequences up to a timeout.
+	// Use this for events where strict ordering is critical.
+	OrderingModeStrict OrderingMode = "strict"
 )
 
-// EventBusConfig contains event bus configuration
-type EventBusConfig struct {
-	Provider           string        `yaml:"provider"`             // Event bus provider (must be "metastorage")
-	BufferSize         int           `yaml:"buffer_size"`          // Buffer size for event channels
-	DataDir            string        `yaml:"data_dir"`             // Data directory (deprecated, no longer used)
-	MaxRetries         int           `yaml:"max_retries"`          // Maximum number of retry attempts for failed events
-	InitialBackoff     time.Duration `yaml:"initial_backoff"`      // Initial backoff duration for retries
-	MaxBackoff         time.Duration `yaml:"max_backoff"`          // Maximum backoff duration (caps exponential backoff)
-	BackoffMultiplier  float64       `yaml:"backoff_multiplier"`   // Multiplier for exponential backoff (e.g., 2.0)
-	RetryInterval      time.Duration `yaml:"retry_interval"`       // Interval between retry worker runs
-	OrderingMode       string        `yaml:"ordering_mode"`        // Event ordering mode: "none", "best_effort", "strict"
-	OrderingBufferSize int           `yaml:"ordering_buffer_size"` // Buffer size for out-of-order event buffering
-	OrderingTimeout    time.Duration `yaml:"ordering_timeout"`     // Timeout for waiting for missing sequences in strict mode
-}
+// EventBusConfig is now defined in types/config.go.
+// This file no longer contains the EventBusConfig definition.
 
 // Event data types for standardized event payloads.
 // These types provide type safety and discoverability for event data.
