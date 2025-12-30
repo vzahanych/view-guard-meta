@@ -49,12 +49,20 @@ func CreateHTTPTransportService(
 		httpsClientCfg,
 		tunnelService,
 		cfg.EdgeID,
+		eventBus,
 		logger,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create HTTPS client: %w", err)
 	}
 
-	return NewHTTPTransportService(httpsServerSvc, httpsClientSvc, logger), nil
+	// Pass retry config to HTTPS client service if it supports it
+	if clientWithRetry, ok := httpsClientSvc.(interface {
+		SetRetryConfig(types.RetryConfig)
+	}); ok {
+		clientWithRetry.SetRetryConfig(cfg.Retry)
+	}
+
+	return NewHTTPTransportService(httpsServerSvc, httpsClientSvc, &cfg.Timeouts, logger), nil
 }
 

@@ -31,6 +31,10 @@ type HTTPSServerService interface {
 
 	// Name returns the service name for identification and logging.
 	Name() string
+
+	// IsServerReady checks if the HTTPS server is ready to accept connections.
+	// Returns true if the server is listening and ready.
+	IsServerReady() bool
 }
 
 // NewHTTPSServerService constructs the Edge HTTPS server implementation.

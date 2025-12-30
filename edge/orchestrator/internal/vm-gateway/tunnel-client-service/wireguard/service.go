@@ -95,9 +95,44 @@ func (s *service) Start(ctx context.Context) error {
 		return err
 	}
 
+	// Emit tunnel.connecting event
+	if s.eventBus != nil {
+		event := evtbusstypes.Event[evtbusstypes.TunnelConnectingEventData]{
+			Type:      evtbusstypes.EventTypeNetworkTunnelConnecting,
+			Source:    s.Name(),
+			Timestamp: time.Now(),
+			Data: evtbusstypes.TunnelConnectingEventData{
+				Interface: s.interfaceName,
+				Endpoint:  s.config.KVMEndpoint,
+				Provider:  "wireguard",
+			},
+		}
+		if err := eventbus.PublishTyped(s.eventBus, event); err != nil {
+			s.logger.Warn("Failed to publish tunnel connecting event", zap.Error(err))
+		}
+	}
+
 	// Start tunnel
 	if err := s.startTunnel(); err != nil {
 		s.logger.Error("Failed to start tunnel", zap.Error(err))
+		// Emit tunnel.connection_error event
+		if s.eventBus != nil {
+			event := evtbusstypes.Event[evtbusstypes.TunnelConnectionErrorEventData]{
+				Type:      evtbusstypes.EventTypeNetworkTunnelConnectionError,
+				Source:    s.Name(),
+				Timestamp: time.Now(),
+				Data: evtbusstypes.TunnelConnectionErrorEventData{
+					Interface: s.interfaceName,
+					Endpoint:  s.config.KVMEndpoint,
+					Provider:  "wireguard",
+					Error:     err.Error(),
+					Retryable: true,
+				},
+			}
+			if pubErr := eventbus.PublishTyped(s.eventBus, event); pubErr != nil {
+				s.logger.Warn("Failed to publish tunnel connection error event", zap.Error(pubErr))
+			}
+		}
 		return err
 	}
 
@@ -108,13 +143,14 @@ func (s *service) Start(ctx context.Context) error {
 
 	s.logger.Info("WireGuard client started", zap.String("interface", s.interfaceName), zap.String("endpoint", s.config.KVMEndpoint))
 	if s.eventBus != nil {
-		event := evtbusstypes.Event[evtbusstypes.NetworkEventData]{
+		event := evtbusstypes.Event[evtbusstypes.TunnelConnectedEventData]{
 			Type:      evtbusstypes.EventTypeNetworkTunnelConnected,
 			Source:    s.Name(),
 			Timestamp: time.Now(),
-			Data: evtbusstypes.NetworkEventData{
+			Data: evtbusstypes.TunnelConnectedEventData{
 				Interface: s.interfaceName,
 				Endpoint:  s.config.KVMEndpoint,
+				Provider:  "wireguard",
 			},
 		}
 		if err := eventbus.PublishTyped(s.eventBus, event); err != nil {
@@ -165,12 +201,14 @@ func (s *service) Stop(ctx context.Context) error {
 
 	s.logger.Info("WireGuard client stopped")
 	if s.eventBus != nil {
-		event := evtbusstypes.Event[evtbusstypes.NetworkEventData]{
+		event := evtbusstypes.Event[evtbusstypes.TunnelDisconnectedEventData]{
 			Type:      evtbusstypes.EventTypeNetworkTunnelDisconnected,
 			Source:    s.Name(),
 			Timestamp: time.Now(),
-			Data: evtbusstypes.NetworkEventData{
+			Data: evtbusstypes.TunnelDisconnectedEventData{
 				Interface: s.interfaceName,
+				Endpoint:  s.config.KVMEndpoint,
+				Provider:  "wireguard",
 			},
 		}
 		if err := eventbus.PublishTyped(s.eventBus, event); err != nil {
@@ -511,12 +549,14 @@ func (s *service) checkHealth() {
 			s.logger.Error("Tunnel is down", zap.Error(fmt.Errorf("interface %s is not up", s.interfaceName)))
 			s.connected = false
 			if s.eventBus != nil {
-				event := evtbusstypes.Event[evtbusstypes.NetworkEventData]{
+				event := evtbusstypes.Event[evtbusstypes.TunnelDisconnectedEventData]{
 					Type:      evtbusstypes.EventTypeNetworkTunnelDisconnected,
 					Source:    s.Name(),
 					Timestamp: time.Now(),
-					Data: evtbusstypes.NetworkEventData{
+					Data: evtbusstypes.TunnelDisconnectedEventData{
 						Interface: s.interfaceName,
+						Endpoint:  s.config.KVMEndpoint,
+						Provider:  "wireguard",
 						Reason:    "tunnel_down",
 					},
 				}
@@ -544,13 +584,15 @@ func (s *service) checkHealth() {
 	if !s.connected && s.isTunnelUp() {
 		s.connected = true
 		if s.eventBus != nil {
-			event := evtbusstypes.Event[evtbusstypes.NetworkEventData]{
+			event := evtbusstypes.Event[evtbusstypes.TunnelConnectedEventData]{
 				Type:      evtbusstypes.EventTypeNetworkTunnelConnected,
 				Source:    s.Name(),
 				Timestamp: time.Now(),
-				Data: evtbusstypes.NetworkEventData{
+				Data: evtbusstypes.TunnelConnectedEventData{
 					Interface: s.interfaceName,
 					Endpoint:  s.config.KVMEndpoint,
+					Provider:  "wireguard",
+					Reconnected: true,
 				},
 			}
 			if err := eventbus.PublishTyped(s.eventBus, event); err != nil {
@@ -642,13 +684,14 @@ func (s *service) reconnect() {
 
 	s.logger.Info("Tunnel reconnected", zap.String("interface", s.interfaceName))
 	if s.eventBus != nil {
-		event := evtbusstypes.Event[evtbusstypes.NetworkEventData]{
+		event := evtbusstypes.Event[evtbusstypes.TunnelConnectedEventData]{
 			Type:      evtbusstypes.EventTypeNetworkTunnelConnected,
 			Source:    s.Name(),
 			Timestamp: time.Now(),
-			Data: evtbusstypes.NetworkEventData{
+			Data: evtbusstypes.TunnelConnectedEventData{
 				Interface:   s.interfaceName,
 				Endpoint:    s.config.KVMEndpoint,
+				Provider:    "wireguard",
 				Reconnected: true,
 			},
 		}

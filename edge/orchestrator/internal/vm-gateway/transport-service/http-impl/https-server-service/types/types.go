@@ -1,6 +1,10 @@
 package types
 
-import "time"
+import (
+	"time"
+
+	vmgatewaytypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/vm-gateway/types"
+)
 
 // ModelDeploymentMetadata represents the metadata for a model deployment request.
 // This is a typed structure that replaces the previous map[string]interface{} approach.
@@ -53,4 +57,16 @@ type HTTPServerConfig struct {
 
 	// MultipartFormMaxMemory is the maximum memory size for multipart form parsing (used for model deployment).
 	MultipartFormMaxMemory int64 `yaml:"multipart_form_max_memory"`
+
+	// CertificatePinning contains certificate pinning configuration for server-side verification.
+	CertificatePinning vmgatewaytypes.CertificatePinningConfig `yaml:"certificate_pinning"`
+
+	// CertificateRevocation contains certificate revocation checking configuration.
+	CertificateRevocation vmgatewaytypes.CertificateRevocationConfig `yaml:"certificate_revocation"`
+
+	// RateLimit contains rate limiting configuration for inbound VM commands.
+	RateLimit vmgatewaytypes.RateLimitConfig `yaml:"rate_limit"`
+
+	// Timeouts contains timeout configuration for VM Gateway operations.
+	Timeouts vmgatewaytypes.TimeoutConfig `yaml:"timeouts"`
 }

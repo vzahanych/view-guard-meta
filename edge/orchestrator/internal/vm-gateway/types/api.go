@@ -1,6 +1,24 @@
 package types
 
-import "context"
+import (
+	"context"
+	"time"
+)
+
+// IdempotencyKey is a string type representing an idempotency key in UUID format.
+// Format: {EdgeID}-{operation}-{UUID}
+// Example: "edge-123-sync-devices-550e8400-e29b-41d4-a716-446655440000"
+//
+// Idempotency keys ensure that repeated requests have the same effect as a single request.
+// If an idempotency key is not provided in a request, one will be auto-generated.
+// When retrying a failed request, use the same idempotency key to prevent duplicate processing.
+//
+// Supported operations:
+//   - sync-capabilities: {EdgeID}-sync-capabilities-{UUID}
+//   - sync-devices: {EdgeID}-sync-devices-{UUID}
+//   - sync-data-units: {EdgeID}-sync-data-units-{UUID}
+//   - sync-audit-logs: {EdgeID}-sync-audit-logs-{UUID}
+type IdempotencyKey string
 
 // Transport-agnostic API types for VM Gateway.
 // These types are used in the public VMGateway interface and are independent
@@ -107,6 +125,11 @@ type DeviceCapability struct {
 }
 
 // SyncCapabilitiesRequest contains the payload for syncing device capabilities to the VM.
+//
+// Timeout: Uses VMAPIRequestTimeout from configuration (default: 30s).
+// Retry: Uses standard retry strategy with exponential backoff.
+// Idempotency: Idempotency key is auto-generated if not provided.
+// Response: May include CertRotationScheduledAt for certificate rotation scheduling.
 type SyncCapabilitiesRequest struct {
 	SyncedAt int64               `json:"synced_at"`
 	Devices  []*DeviceCapability `json:"devices"` // Device-agnostic: supports cameras, sensors, etc.
@@ -114,8 +137,9 @@ type SyncCapabilitiesRequest struct {
 
 // SyncCapabilitiesResponse represents the VM response for capability sync.
 type SyncCapabilitiesResponse struct {
-	Success      bool   `json:"success"`
-	ErrorMessage string `json:"error_message,omitempty"`
+	Success                bool       `json:"success"`
+	ErrorMessage           string     `json:"error_message,omitempty"`
+	CertRotationScheduledAt *time.Time `json:"cert_rotation_scheduled_at,omitempty"` // Optional, signals upcoming certificate rotation
 }
 
 // DeviceInfo represents basic device information for sync.
@@ -130,9 +154,16 @@ type DeviceInfo struct {
 
 // SyncDevicesRequest contains the payload for syncing discovered devices to the VM.
 // VM decides which devices should be enabled based on configuration and policies.
+//
+// Timeout: Uses VMAPIRequestTimeout from configuration (default: 30s).
+// Retry: Uses standard retry strategy with exponential backoff.
+// Idempotency: Idempotency key is auto-generated if not provided.
+// Format: {EdgeID}-sync-devices-{UUID}
+// Errors: Returns error if sync fails after all retries (transient errors are retried).
 type SyncDevicesRequest struct {
-	EdgeID  string        `json:"edge_id"`
-	Devices []*DeviceInfo `json:"devices"` // Device-agnostic: supports cameras, sensors, etc.
+	EdgeID         string        `json:"edge_id"`
+	IdempotencyKey string        `json:"idempotency_key,omitempty"` // Format: {EdgeID}-sync-devices-{UUID}
+	Devices        []*DeviceInfo `json:"devices"`                    // Device-agnostic: supports cameras, sensors, etc.
 }
 
 // EnabledDevice represents a device that VM has decided to enable.
@@ -169,10 +200,18 @@ type DataUnitInfo struct {
 
 // SyncDataUnitsRequest contains the payload for syncing labeled data units to the VM for model training.
 // This is device-agnostic and supports all IoT device types (cameras, sensors, audio devices, etc.).
+//
+// Timeout: Uses VMAPIRequestTimeout from configuration (default: 30s).
+// Retry: Uses standard retry strategy with exponential backoff.
+// Idempotency: Idempotency key is auto-generated if not provided.
+// Format: {EdgeID}-sync-data-units-{UUID}
+// Errors: Returns error if sync fails after all retries (transient errors are retried).
+// Size: Request body size should be reasonable (consider batching large datasets).
 type SyncDataUnitsRequest struct {
-	EdgeID    string          `json:"edge_id"`
-	DeviceID  string          `json:"device_id"`  // Device that produced the data units
-	DataUnits []*DataUnitInfo `json:"data_units"` // Labeled data units for training
+	EdgeID         string          `json:"edge_id"`
+	IdempotencyKey string          `json:"idempotency_key,omitempty"` // Format: {EdgeID}-sync-data-units-{UUID}
+	DeviceID       string          `json:"device_id"`                  // Device that produced the data units
+	DataUnits      []*DataUnitInfo `json:"data_units"`                // Labeled data units for training
 }
 
 // SyncDataUnitsResponse represents the VM response for data unit sync.
@@ -201,13 +240,21 @@ type AuditLogEntry struct {
 }
 
 // SyncAuditLogsRequest contains the payload for syncing audit logs to the VM.
+//
+// Timeout: Uses VMAPIRequestTimeout from configuration (default: 30s).
+// Retry: Uses standard retry strategy with exponential backoff.
+// Idempotency: Idempotency key is auto-generated if not provided.
+// Format: {EdgeID}-sync-audit-logs-{UUID}
+// Errors: Returns error if sync fails after all retries (transient errors are retried).
+// Batching: Logs should be sent in batches for efficiency (recommended: 100-1000 entries per batch).
 type SyncAuditLogsRequest struct {
-	EdgeID     string           `json:"edge_id"`
-	StartTime  int64            `json:"start_time"`  // Unix timestamp of first entry
-	EndTime    int64            `json:"end_time"`    // Unix timestamp of last entry
-	EntryCount int              `json:"entry_count"` // Number of entries in this batch
-	Entries    []*AuditLogEntry `json:"entries"`     // Audit log entries
-	Format     string           `json:"format"`      // "json" or "cef"
+	EdgeID         string           `json:"edge_id"`
+	IdempotencyKey string           `json:"idempotency_key,omitempty"` // Format: {EdgeID}-sync-audit-logs-{UUID}
+	StartTime      int64            `json:"start_time"`               // Unix timestamp of first entry
+	EndTime        int64            `json:"end_time"`                  // Unix timestamp of last entry
+	EntryCount     int              `json:"entry_count"`               // Number of entries in this batch
+	Entries        []*AuditLogEntry `json:"entries"`                  // Audit log entries
+	Format         string           `json:"format"`                   // "json" or "cef"
 }
 
 // SyncAuditLogsResponse represents the VM response for audit log sync.
@@ -218,6 +265,12 @@ type SyncAuditLogsResponse struct {
 }
 
 // HeartbeatRequest contains minimal heartbeat data sent from Edge to VM.
+//
+// Timeout: Uses VMAPIRequestTimeout from configuration (default: 30s).
+// Retry: Uses standard retry strategy with exponential backoff.
+// Errors: Returns error if heartbeat fails after all retries (transient errors are retried).
+// Usage: Should be sent periodically (e.g., every 30s) to maintain connection.
+// Failure: If heartbeat fails repeatedly, connection may be considered lost.
 type HeartbeatRequest struct {
 	// Timestamp is the Unix timestamp when the heartbeat was generated on the Edge.
 	Timestamp int64 `json:"timestamp"`

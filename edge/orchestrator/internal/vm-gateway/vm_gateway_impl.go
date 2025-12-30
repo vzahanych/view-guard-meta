@@ -26,6 +26,25 @@ type vmGatewayImpl struct {
 	logger                 *zap.Logger
 	mu                     sync.RWMutex
 	started                bool
+	
+	// Health metrics tracking
+	retryStats             RetryMetrics
+	eventEmissionStats    EventEmissionMetrics
+	healthMetricsMu       sync.RWMutex
+}
+
+// RetryMetrics tracks retry statistics.
+type RetryMetrics struct {
+	TotalRetries      int64 `json:"total_retries"`
+	TotalRetryFailures int64 `json:"total_retry_failures"`
+}
+
+// EventEmissionMetrics tracks event emission statistics.
+type EventEmissionMetrics struct {
+	TotalEventsEmitted      int64     `json:"total_events_emitted"`
+	TotalEmissionFailures    int64     `json:"total_emission_failures"`
+	LastEmissionTime         *time.Time `json:"last_emission_time,omitempty"`
+	LastEmissionFailureTime  *time.Time `json:"last_emission_failure_time,omitempty"`
 }
 
 // NewVMGatewayImpl creates a new VMGateway implementation that uses transport-service.
@@ -68,6 +87,8 @@ func NewVMGatewayImpl(
 		transportService:       transportSvc,
 		connectionStateMachine:  impl.NewConnectionStateMachine(),
 		logger:                  logger,
+		retryStats:             RetryMetrics{},
+		eventEmissionStats:    EventEmissionMetrics{},
 	}, nil
 }
 
@@ -485,12 +506,107 @@ func (g *vmGatewayImpl) HealthSnapshot() GatewayStatus {
 		}
 	}
 
-	return GatewayStatus{
-		ConnectionState: connectionStateInfo,
-		TunnelStatus:    tunnelStatus,
-		TransportStatus: transportStatus,
-		SubServices:     subServices,
-		Timestamp:       time.Now(),
+	// Get health metrics
+	g.healthMetricsMu.RLock()
+	retryStats := RetryStats{
+		TotalRetries:      g.retryStats.TotalRetries,
+		TotalRetryFailures: g.retryStats.TotalRetryFailures,
 	}
+	eventEmissionStats := EventEmissionStats{
+		TotalEventsEmitted:     g.eventEmissionStats.TotalEventsEmitted,
+		TotalEmissionFailures:   g.eventEmissionStats.TotalEmissionFailures,
+		LastEmissionTime:        g.eventEmissionStats.LastEmissionTime,
+		LastEmissionFailureTime: g.eventEmissionStats.LastEmissionFailureTime,
+	}
+	g.healthMetricsMu.RUnlock()
+
+	// Get transport-specific health metrics (certificate rotation, time sync, rate limiting)
+	// Try to get metrics from HTTP transport service if available
+	var certRotationStatus *CertificateRotationStatus
+	var timeSyncStatus *TimeSyncStatus
+	var rateLimitStats *RateLimitStats
+	
+		// Use type assertion to access HTTP transport service health metrics
+		if httpTransport, ok := transportSvc.(interface {
+			GetHealthMetrics() (interface{}, interface{}, interface{})
+		}); ok {
+			certRot, _, rateLimit := httpTransport.GetHealthMetrics()
+			if certRot != nil {
+				if crMap, ok := certRot.(map[string]interface{}); ok {
+					certRotationStatus = &CertificateRotationStatus{
+						Status: getString(crMap, "status"),
+					}
+					if scheduledAt, ok := crMap["scheduled_at"].(*time.Time); ok && scheduledAt != nil {
+						scheduledAtCopy := *scheduledAt
+						certRotationStatus.ScheduledAt = &scheduledAtCopy
+					}
+					if gracePeriodEnd, ok := crMap["grace_period_end"].(*time.Time); ok && gracePeriodEnd != nil {
+						gracePeriodEndCopy := *gracePeriodEnd
+						certRotationStatus.GracePeriodEnd = &gracePeriodEndCopy
+					}
+					certRotationStatus.OldCAFingerprint = getString(crMap, "old_ca_fingerprint")
+					certRotationStatus.NewCAFingerprint = getString(crMap, "new_ca_fingerprint")
+				}
+			}
+			if rateLimit != nil {
+				if rlMap, ok := rateLimit.(map[string]interface{}); ok {
+					rateLimitStats = &RateLimitStats{
+						Enabled:          getBool(rlMap, "enabled"),
+						RequestsPerMinute: getInt(rlMap, "requests_per_minute"),
+						BurstSize:        getInt(rlMap, "burst_size"),
+						TotalViolations:  getInt64(rlMap, "total_violations"),
+						ActiveBuckets:    getInt(rlMap, "active_buckets"),
+					}
+				}
+			}
+		}
+
+	return GatewayStatus{
+		ConnectionState:          connectionStateInfo,
+		TunnelStatus:             tunnelStatus,
+		TransportStatus:          transportStatus,
+		SubServices:              subServices,
+		CertificateRotationStatus: certRotationStatus,
+		TimeSyncStatus:           timeSyncStatus,
+		RateLimitStats:           rateLimitStats,
+		RetryStats:               &retryStats,
+		EventEmissionStats:       &eventEmissionStats,
+		Timestamp:                time.Now(),
+	}
+}
+
+// Helper functions for extracting values from map[string]interface{}
+func getString(m map[string]interface{}, key string) string {
+	if v, ok := m[key].(string); ok {
+		return v
+	}
+	return ""
+}
+
+func getBool(m map[string]interface{}, key string) bool {
+	if v, ok := m[key].(bool); ok {
+		return v
+	}
+	return false
+}
+
+func getInt(m map[string]interface{}, key string) int {
+	if v, ok := m[key].(int); ok {
+		return v
+	}
+	if v, ok := m[key].(int64); ok {
+		return int(v)
+	}
+	return 0
+}
+
+func getInt64(m map[string]interface{}, key string) int64 {
+	if v, ok := m[key].(int64); ok {
+		return v
+	}
+	if v, ok := m[key].(int); ok {
+		return int64(v)
+	}
+	return 0
 }
 

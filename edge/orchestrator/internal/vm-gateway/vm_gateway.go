@@ -87,38 +87,93 @@ type VMGateway interface {
 
 	// Authenticate authenticates Edge with VM and establishes the connection.
 	// This should be called when Edge orchestrator starts (after tunnel is connected).
+	//
+	// Timeout: Uses AuthenticationTimeout from configuration (default: 30s).
+	// Retry: Uses authentication-specific retry strategy (10s, 20s, 40s, max 5min backoff).
+	// Errors: Returns error if authentication fails after all retries.
+	// Time Sync: Validates time synchronization during authentication (if enabled).
+	// Certificate: Validates certificate pinning and revocation (if enabled).
 	Authenticate(ctx context.Context, edgeID string) error
 
 	// GetConfig retrieves VM configuration.
+	//
+	// Timeout: Uses VMAPIRequestTimeout from configuration (default: 30s).
+	// Retry: Uses standard retry strategy (1s, 2s, 4s, 8s, max 60s backoff).
+	// Errors: Returns error if request fails after all retries.
+	// Response: Returns GetConfigResponse with VM configuration JSON.
 	GetConfig(ctx context.Context) (*types.GetConfigResponse, error)
 
 	// SyncCapabilities syncs device capabilities to the VM.
 	// Supports all device types (cameras, sensors, etc.), not just cameras.
+	//
+	// Idempotency: Idempotency key is auto-generated if not provided in request.
+	// Format: {EdgeID}-sync-capabilities-{UUID}
+	// Timeout: Uses VMAPIRequestTimeout from configuration (default: 30s).
+	// Retry: Uses standard retry strategy (1s, 2s, 4s, 8s, max 60s backoff).
+	// Errors: Returns error if sync fails after all retries.
+	// Response: May include CertRotationScheduledAt for certificate rotation.
 	SyncCapabilities(ctx context.Context, req *types.SyncCapabilitiesRequest) (*types.SyncCapabilitiesResponse, error)
 
 	// SyncDevices syncs discovered devices to the VM. VM decides which devices should be enabled.
 	// Supports all device types (cameras, sensors, etc.), not just cameras.
+	//
+	// Idempotency: Idempotency key is auto-generated if not provided in request.
+	// Format: {EdgeID}-sync-devices-{UUID}
+	// Timeout: Uses VMAPIRequestTimeout from configuration (default: 30s).
+	// Retry: Uses standard retry strategy (1s, 2s, 4s, 8s, max 60s backoff).
+	// Errors: Returns error if sync fails after all retries.
+	// Response: Returns list of devices that VM has enabled.
 	SyncDevices(ctx context.Context, req *types.SyncDevicesRequest) (*types.SyncDevicesResponse, error)
 
 	// SyncDataUnits syncs labeled data units to the VM for model training.
 	// This is device-agnostic and supports all IoT device types (cameras, sensors, audio devices, etc.).
 	// Data units can be screenshots/images, sensor readings, audio samples, or any other labeled data.
+	//
+	// Idempotency: Idempotency key is auto-generated if not provided in request.
+	// Format: {EdgeID}-sync-data-units-{UUID}
+	// Timeout: Uses VMAPIRequestTimeout from configuration (default: 30s).
+	// Retry: Uses standard retry strategy (1s, 2s, 4s, 8s, max 60s backoff).
+	// Errors: Returns error if sync fails after all retries.
+	// Response: Returns success status and optional message.
 	SyncDataUnits(ctx context.Context, req *types.SyncDataUnitsRequest) (*types.SyncDataUnitsResponse, error)
 
 	// ReportDeploymentStatus reports model deployment status to the VM.
+	//
+	// Timeout: Uses VMAPIRequestTimeout from configuration (default: 30s).
+	// Retry: Uses standard retry strategy (1s, 2s, 4s, 8s, max 60s backoff).
+	// Errors: Returns error if report fails after all retries.
+	// Status: Valid values: "deployed", "active", "failed", "removed".
+	// Usage: Called after model deployment completes or fails.
 	ReportDeploymentStatus(ctx context.Context, deploymentID string, status string, errorMessage *string, modelPath *string) error
 
 	// Heartbeat sends a heartbeat to the VM to maintain connection.
+	//
+	// Timeout: Uses VMAPIRequestTimeout from configuration (default: 30s).
+	// Retry: Uses standard retry strategy (1s, 2s, 4s, 8s, max 60s backoff).
+	// Errors: Returns error if heartbeat fails after all retries.
+	// Usage: Should be called periodically to maintain connection (e.g., every 30s).
 	Heartbeat(ctx context.Context, req *types.HeartbeatRequest) error
 
 	// SendTelemetry sends telemetry data to the VM.
 	SendTelemetry(ctx context.Context, data *types.TelemetryData) error
 
 	// SendEvents sends events to the VM.
+	//
+	// Timeout: Uses VMAPIRequestTimeout from configuration (default: 30s).
+	// Retry: Uses standard retry strategy (1s, 2s, 4s, 8s, max 60s backoff).
+	// Errors: Returns error if send fails after all retries.
+	// Events: All events must be typed with proper event data structures.
 	SendEvents(ctx context.Context, events []*types.Event) error
 
 	// SyncAuditLogs syncs audit logs to the VM for long-term storage and analysis.
 	// Audit logs are sent in batches with metadata for efficient transfer.
+	//
+	// Idempotency: Idempotency key is auto-generated if not provided in request.
+	// Format: {EdgeID}-sync-audit-logs-{UUID}
+	// Timeout: Uses VMAPIRequestTimeout from configuration (default: 30s).
+	// Retry: Uses standard retry strategy (1s, 2s, 4s, 8s, max 60s backoff).
+	// Errors: Returns error if sync fails after all retries.
+	// Response: Returns success status and number of logs synced.
 	SyncAuditLogs(ctx context.Context, req *types.SyncAuditLogsRequest) (*types.SyncAuditLogsResponse, error)
 
 	// Connection state machine methods
@@ -162,8 +217,110 @@ type GatewayStatus struct {
 	// Key is service name, value is service status
 	SubServices map[string]ServiceStatus `json:"sub_services"`
 
+	// CertificateRotationStatus contains certificate rotation status
+	CertificateRotationStatus *CertificateRotationStatus `json:"certificate_rotation_status,omitempty"`
+
+	// TimeSyncStatus contains time synchronization status
+	TimeSyncStatus *TimeSyncStatus `json:"time_sync_status,omitempty"`
+
+	// RateLimitStats contains rate limiting statistics
+	RateLimitStats *RateLimitStats `json:"rate_limit_stats,omitempty"`
+
+	// RetryStats contains retry and backoff statistics
+	RetryStats *RetryStats `json:"retry_stats,omitempty"`
+
+	// EventEmissionStats contains event emission statistics
+	EventEmissionStats *EventEmissionStats `json:"event_emission_stats,omitempty"`
+
 	// Timestamp is when this snapshot was taken
 	Timestamp time.Time `json:"timestamp"`
+}
+
+// CertificateRotationStatus represents the status of certificate rotation.
+type CertificateRotationStatus struct {
+	// Status is the current rotation status: "idle", "scheduled", "in_progress", "completed", "failed"
+	Status string `json:"status"`
+
+	// ScheduledAt is when the rotation is scheduled (if scheduled)
+	ScheduledAt *time.Time `json:"scheduled_at,omitempty"`
+
+	// GracePeriodEnd is when the grace period ends (if in progress or completed)
+	GracePeriodEnd *time.Time `json:"grace_period_end,omitempty"`
+
+	// OldCAFingerprint is the fingerprint of the old CA certificate
+	OldCAFingerprint string `json:"old_ca_fingerprint,omitempty"`
+
+	// NewCAFingerprint is the fingerprint of the new CA certificate
+	NewCAFingerprint string `json:"new_ca_fingerprint,omitempty"`
+}
+
+// TimeSyncStatus represents the status of time synchronization.
+type TimeSyncStatus struct {
+	// Status is the current sync status: "synced", "drift_warning", "drift_critical"
+	Status string `json:"status"`
+
+	// LastCheckTime is when the last time sync check was performed
+	LastCheckTime *time.Time `json:"last_check_time,omitempty"`
+
+	// DriftMinutes is the current clock drift in minutes (positive = Edge ahead, negative = Edge behind)
+	DriftMinutes float64 `json:"drift_minutes,omitempty"`
+
+	// ToleranceMinutes is the tolerance threshold in minutes
+	ToleranceMinutes float64 `json:"tolerance_minutes,omitempty"`
+
+	// CriticalDriftMinutes is the critical drift threshold in minutes
+	CriticalDriftMinutes float64 `json:"critical_drift_minutes,omitempty"`
+}
+
+// RateLimitStats represents rate limiting statistics.
+type RateLimitStats struct {
+	// Enabled indicates whether rate limiting is enabled
+	Enabled bool `json:"enabled"`
+
+	// RequestsPerMinute is the configured requests per minute limit
+	RequestsPerMinute int `json:"requests_per_minute,omitempty"`
+
+	// BurstSize is the configured burst size
+	BurstSize int `json:"burst_size,omitempty"`
+
+	// TotalViolations is the total number of rate limit violations
+	TotalViolations int64 `json:"total_violations,omitempty"`
+
+	// ActiveBuckets is the number of active rate limit buckets (per client/endpoint)
+	ActiveBuckets int `json:"active_buckets,omitempty"`
+}
+
+// RetryStats represents retry and backoff statistics.
+type RetryStats struct {
+	// MaxRetries is the configured maximum number of retries
+	MaxRetries int `json:"max_retries,omitempty"`
+
+	// InitialBackoff is the configured initial backoff duration
+	InitialBackoff time.Duration `json:"initial_backoff,omitempty"`
+
+	// MaxBackoff is the configured maximum backoff duration
+	MaxBackoff time.Duration `json:"max_backoff,omitempty"`
+
+	// TotalRetries is the total number of retry attempts made
+	TotalRetries int64 `json:"total_retries,omitempty"`
+
+	// TotalRetryFailures is the total number of operations that failed after all retries
+	TotalRetryFailures int64 `json:"total_retry_failures,omitempty"`
+}
+
+// EventEmissionStats represents event emission statistics.
+type EventEmissionStats struct {
+	// TotalEventsEmitted is the total number of events emitted
+	TotalEventsEmitted int64 `json:"total_events_emitted,omitempty"`
+
+	// TotalEmissionFailures is the total number of event emission failures
+	TotalEmissionFailures int64 `json:"total_emission_failures,omitempty"`
+
+	// LastEmissionTime is when the last event was emitted
+	LastEmissionTime *time.Time `json:"last_emission_time,omitempty"`
+
+	// LastEmissionFailureTime is when the last emission failure occurred
+	LastEmissionFailureTime *time.Time `json:"last_emission_failure_time,omitempty"`
 }
 
 // TunnelStatus represents the status of the tunnel service.

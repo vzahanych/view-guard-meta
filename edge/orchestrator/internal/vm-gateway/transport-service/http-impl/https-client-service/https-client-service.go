@@ -3,6 +3,7 @@ package httpsclient
 import (
 	"context"
 
+	eventbus "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/event-bus"
 	"github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/vm-gateway/transport-service/http-impl/https-client-service/impl"
 	httpsclienttypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/vm-gateway/transport-service/http-impl/https-client-service/types"
 	tunnelclient "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/vm-gateway/tunnel-client-service"
@@ -47,6 +48,6 @@ type HTTPSClientService interface {
 }
 
 // NewHTTPSClientService creates a new HTTPS client service
-func NewHTTPSClientService(clientCfg *httpsclienttypes.HTTPSClientConfig, tunnelClient tunnelclient.TunnelClientService, edgeID string, log *zap.Logger) (HTTPSClientService, error) {
-	return impl.NewHTTPSClient(clientCfg, tunnelClient, edgeID, log)
+func NewHTTPSClientService(clientCfg *httpsclienttypes.HTTPSClientConfig, tunnelClient tunnelclient.TunnelClientService, edgeID string, eventBus eventbus.EventBus, log *zap.Logger) (HTTPSClientService, error) {
+	return impl.NewHTTPSClient(clientCfg, tunnelClient, edgeID, eventBus, log)
 }

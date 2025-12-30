@@ -16,6 +16,8 @@ import (
 
 	"go.uber.org/zap"
 
+	eventbus "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/event-bus"
+	evtbusstypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/event-bus/types"
 	httpsclienttypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/vm-gateway/transport-service/http-impl/https-client-service/types"
 	tunnelclient "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/vm-gateway/tunnel-client-service"
 	vmgatewaytypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/vm-gateway/types"
@@ -40,19 +42,42 @@ type TelemetryClient interface {
 // Replaces gRPC client for Edge → VM communication.
 // HTTPSClient implements TelemetryClient interface directly.
 type HTTPSClient struct {
-	clientCfg     *httpsclienttypes.HTTPSClientConfig
-	tunnelClient  tunnelclient.TunnelClientService
-	logger        *zap.Logger
-	httpClient    *http.Client
-	mu            sync.RWMutex
-	vmEndpoint    string // VM HTTPS endpoint
-	edgeID        string // Edge ID for authentication
-	authenticated bool   // Track if authentication with VM has succeeded
-	lastAuthError error  // Track last authentication error
+	clientCfg            *httpsclienttypes.HTTPSClientConfig
+	tunnelClient          tunnelclient.TunnelClientService
+	logger                *zap.Logger
+	httpClient            *http.Client
+	eventBus              eventbus.EventBus
+	rotationHandler       *CertificateRotationHandler
+	revocationChecker      *CertificateRevocationChecker
+	timeSyncChecker        *TimeSyncChecker
+	retryConfig           vmgatewaytypes.RetryConfig
+	mu                    sync.RWMutex
+	vmEndpoint            string // VM HTTPS endpoint
+	edgeID                string // Edge ID for authentication
+	authenticated         bool   // Track if authentication with VM has succeeded
+	lastAuthError         error  // Track last authentication error
+}
+
+// SetRetryConfig sets the retry configuration for the HTTPS client.
+func (c *HTTPSClient) SetRetryConfig(config vmgatewaytypes.RetryConfig) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.retryConfig = config
+}
+
+// executeVMAPIRequest executes an HTTP request with retry logic for VM API calls.
+func (c *HTTPSClient) executeVMAPIRequest(ctx context.Context, operationName string, httpReq *http.Request) (*http.Response, error) {
+	// Get retry config for VM API calls (standard backoff: 1s, 2s, 4s, 8s, max 60s)
+	c.mu.RLock()
+	retryConfig := GetRetryConfigForVMAPI(c.retryConfig)
+	c.mu.RUnlock()
+
+	// Use retry logic for VM API call
+	return RetryHTTPRequest(ctx, retryConfig, c.logger, operationName, c.httpClient, httpReq)
 }
 
 // NewHTTPSClient creates a new HTTPS client for Edge → VM calls
-func NewHTTPSClient(clientCfg *httpsclienttypes.HTTPSClientConfig, tunnelClient tunnelclient.TunnelClientService, edgeID string, log *zap.Logger) (*HTTPSClient, error) {
+func NewHTTPSClient(clientCfg *httpsclienttypes.HTTPSClientConfig, tunnelClient tunnelclient.TunnelClientService, edgeID string, eventBus eventbus.EventBus, log *zap.Logger) (*HTTPSClient, error) {
 	// Use config values, with defaults for development (localhost mode)
 	clientCertPath := clientCfg.ClientCertPath
 	clientKeyPath := clientCfg.ClientKeyPath
@@ -131,12 +156,36 @@ func NewHTTPSClient(clientCfg *httpsclienttypes.HTTPSClientConfig, tunnelClient 
 			MinVersion:   tls.VersionTLS12,
 			ServerName:   serverName,
 		}
+
+		// Setup certificate pinning if configured
+		// Default to enabled if fingerprint is provided
+		pinningConfig := clientCfg.CertificatePinning
+		// If fingerprint is provided but pinning is not explicitly disabled, enable it
+		if pinningConfig.VMCAFingerprint != "" {
+			if !pinningConfig.PinningEnabled {
+				// Check if it was explicitly set to false (zero value means not set, so default to true)
+				// Since we can't distinguish zero value from explicit false in YAML, we default to enabled when fingerprint is present
+				pinningConfig.PinningEnabled = true
+			}
+			SetupCertificatePinning(tlsConfig, &pinningConfig, log)
+		}
 	} else {
 		// For localhost dev without certs, use InsecureSkipVerify (development only)
 		tlsConfig = &tls.Config{
 			InsecureSkipVerify: true, // Only for localhost development
 			MinVersion:         tls.VersionTLS12,
 		}
+	}
+
+		// Convert HTTPSClientConfig to VMGatewayConfig HTTPSClientConfig for rotation handler and revocation checker
+	clientCfgVMGateway := &vmgatewaytypes.HTTPSClientConfig{
+		VMEndpoint:            clientCfg.VMEndpoint,
+		ClientCertPath:        clientCfg.ClientCertPath,
+		ClientKeyPath:         clientCfg.ClientKeyPath,
+		CACertPath:            clientCfg.CACertPath,
+		Timeout:               clientCfg.Timeout,
+		CertificatePinning:    clientCfg.CertificatePinning,
+		CertificateRevocation: clientCfg.CertificateRevocation,
 	}
 
 	// Create HTTP client with TLS config
@@ -152,13 +201,49 @@ func NewHTTPSClient(clientCfg *httpsclienttypes.HTTPSClientConfig, tunnelClient 
 		Timeout:   timeout,
 	}
 
+	// Create certificate rotation handler
+	rotationHandler := NewCertificateRotationHandler(
+		clientCfgVMGateway,
+		httpClient,
+		log,
+		eventBus,
+	)
+
+	// Create certificate revocation checker
+	revocationChecker := NewCertificateRevocationChecker(
+		&clientCfgVMGateway.CertificateRevocation,
+		httpClient,
+		log,
+	)
+
+	// Setup certificate revocation checking if configured (only if TLS config was created)
+	if tlsConfig != nil && (clientCfg.CertificateRevocation.CRLEnabled || clientCfg.CertificateRevocation.OCSPEnabled) {
+		SetupCertificateRevocation(tlsConfig, revocationChecker, log)
+	}
+
+	// Create time synchronization checker
+	timeSyncChecker := NewTimeSyncChecker(
+		&clientCfg.TimeSync,
+		log,
+		eventBus,
+	)
+
+	// Setup time synchronization checking if configured (only if TLS config was created)
+	if tlsConfig != nil && clientCfg.TimeSync.Enabled {
+		SetupTimeSyncCheck(tlsConfig, timeSyncChecker, log)
+	}
+
 	return &HTTPSClient{
-		clientCfg:    clientCfg,
-		tunnelClient: tunnelClient,
-		logger:       log,
-		httpClient:   httpClient,
-		vmEndpoint:   vmEndpoint,
-		edgeID:       edgeID,
+		clientCfg:        clientCfg,
+		tunnelClient:     tunnelClient,
+		logger:           log,
+		httpClient:       httpClient,
+		eventBus:         eventBus,
+		rotationHandler:  rotationHandler,
+		revocationChecker: revocationChecker,
+		timeSyncChecker:  timeSyncChecker,
+		vmEndpoint:       vmEndpoint,
+		edgeID:           edgeID,
 	}, nil
 }
 
@@ -188,6 +273,23 @@ func (c *HTTPSClient) Start(ctx context.Context) error {
 		c.logger.Info("HTTPS client starting in localhost development mode")
 	}
 
+	// Emit transport.connecting event
+	if c.eventBus != nil {
+		event := evtbusstypes.Event[evtbusstypes.TransportConnectingEventData]{
+			Type:      evtbusstypes.EventTypeNetworkTransportConnecting,
+			Source:    c.Name(),
+			Timestamp: time.Now(),
+			Data: evtbusstypes.TransportConnectingEventData{
+				Service:  "https-client",
+				Endpoint: c.vmEndpoint,
+				Protocol: "https",
+			},
+		}
+		if err := eventbus.PublishTyped(c.eventBus, event); err != nil {
+			c.logger.Warn("Failed to publish transport connecting event", zap.Error(err))
+		}
+	}
+
 	// Wait for tunnel to be connected (skip in localhost mode)
 	if !isLocalhostMode && c.tunnelClient != nil && !c.tunnelClient.IsConnected() {
 		c.logger.Info("Waiting for tunnel connection...")
@@ -200,7 +302,26 @@ func (c *HTTPSClient) Start(ctx context.Context) error {
 			case <-ctx.Done():
 				return ctx.Err()
 			case <-timeout:
-				return fmt.Errorf("tunnel not connected after 30 seconds")
+				err := fmt.Errorf("tunnel not connected after 30 seconds")
+				// Emit transport.connection_error event
+				if c.eventBus != nil {
+					event := evtbusstypes.Event[evtbusstypes.TransportConnectionErrorEventData]{
+						Type:      evtbusstypes.EventTypeNetworkTransportConnectionError,
+						Source:    c.Name(),
+						Timestamp: time.Now(),
+						Data: evtbusstypes.TransportConnectionErrorEventData{
+							Service:   "https-client",
+							Endpoint:  c.vmEndpoint,
+							Protocol:  "https",
+							Error:     err.Error(),
+							Retryable: true,
+						},
+					}
+					if pubErr := eventbus.PublishTyped(c.eventBus, event); pubErr != nil {
+						c.logger.Warn("Failed to publish transport connection error event", zap.Error(pubErr))
+					}
+				}
+				return err
 			case <-ticker.C:
 				if c.tunnelClient.IsConnected() {
 					c.logger.Info("Tunnel connected, HTTPS client ready")
@@ -211,6 +332,23 @@ func (c *HTTPSClient) Start(ctx context.Context) error {
 	}
 
 	c.logger.Info("HTTPS client started", zap.String("vm_endpoint", c.vmEndpoint))
+
+	// Emit transport.connected event
+	if c.eventBus != nil {
+		event := evtbusstypes.Event[evtbusstypes.TransportConnectedEventData]{
+			Type:      evtbusstypes.EventTypeNetworkTransportConnected,
+			Source:    c.Name(),
+			Timestamp: time.Now(),
+			Data: evtbusstypes.TransportConnectedEventData{
+				Service:  "https-client",
+				Endpoint: c.vmEndpoint,
+				Protocol: "https",
+			},
+		}
+		if err := eventbus.PublishTyped(c.eventBus, event); err != nil {
+			c.logger.Warn("Failed to publish transport connected event", zap.Error(err))
+		}
+	}
 
 	// Authenticate with VM when HTTPS client starts (after tunnel is connected)
 	// This sets the connection state to "connected" in both VM and Edge
@@ -241,6 +379,24 @@ func (c *HTTPSClient) Stop(ctx context.Context) error {
 	defer c.mu.Unlock()
 
 	c.logger.Info("HTTPS client stopped")
+
+	// Emit transport.disconnected event
+	if c.eventBus != nil {
+		event := evtbusstypes.Event[evtbusstypes.TransportDisconnectedEventData]{
+			Type:      evtbusstypes.EventTypeNetworkTransportDisconnected,
+			Source:    c.Name(),
+			Timestamp: time.Now(),
+			Data: evtbusstypes.TransportDisconnectedEventData{
+				Service:  "https-client",
+				Endpoint: c.vmEndpoint,
+				Protocol: "https",
+				Reason:   "client stopped",
+			},
+		}
+		if err := eventbus.PublishTyped(c.eventBus, event); err != nil {
+			c.logger.Warn("Failed to publish transport disconnected event", zap.Error(err))
+		}
+	}
 
 	return nil
 }
@@ -284,7 +440,7 @@ func (c *HTTPSClient) Heartbeat(ctx context.Context, req *vmgatewaytypes.Heartbe
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.httpClient.Do(httpReq)
+	resp, err := c.executeVMAPIRequest(ctx, "Heartbeat", httpReq)
 	if err != nil {
 		return fmt.Errorf("failed to send heartbeat: %w", err)
 	}
@@ -356,8 +512,15 @@ func (c *HTTPSClient) SendTelemetry(ctx context.Context, data *vmgatewaytypes.Te
 func (c *HTTPSClient) SendEvents(ctx context.Context, events []*vmgatewaytypes.Event) error {
 	url := fmt.Sprintf("https://%s/api/v1/telemetry/events", c.vmEndpoint)
 
+	// Generate batch idempotency key for SendEvents
+	idempotencyKey := GenerateIdempotencyKey(c.edgeID, "send-events")
+	c.logger.Debug("Generated idempotency key for SendEvents batch",
+		zap.String("key", idempotencyKey),
+		zap.Int("event_count", len(events)))
+
 	reqBody := map[string]interface{}{
-		"events": events,
+		"idempotency_key": idempotencyKey,
+		"events":          events,
 	}
 
 	jsonBody, err := json.Marshal(reqBody)
@@ -369,8 +532,9 @@ func (c *HTTPSClient) SendEvents(ctx context.Context, events []*vmgatewaytypes.E
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("X-Idempotency-Key", idempotencyKey) // Add idempotency key header
 
-	resp, err := c.httpClient.Do(httpReq)
+	resp, err := c.executeVMAPIRequest(ctx, "SendEvents", httpReq)
 	if err != nil {
 		return fmt.Errorf("failed to send events: %w", err)
 	}
@@ -414,22 +578,35 @@ func (c *HTTPSClient) Authenticate(ctx context.Context, edgeID string) error {
 	if err != nil {
 		return fmt.Errorf("failed to marshal authentication request: %w", err)
 	}
+
+	// Get retry config for authentication (custom backoff: 10s, 20s, 40s, max 5min)
+	c.mu.RLock()
+	retryConfig := GetRetryConfigForAuthentication(c.retryConfig)
+	c.mu.RUnlock()
+
+	// Create HTTP request
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonBody))
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.httpClient.Do(httpReq)
+	// Use retry logic for authentication
+	resp, err := RetryHTTPRequest(ctx, retryConfig, c.logger, "Authenticate", c.httpClient, httpReq)
 	if err != nil {
-		return fmt.Errorf("failed to send authentication request: %w", err)
+		c.mu.Lock()
+		c.authenticated = false
+		c.lastAuthError = err
+		c.mu.Unlock()
+		return err
 	}
 	defer closeResponseBody(resp.Body, c.logger)
 
+	// Check status code (should be OK after retry, but verify)
 	if resp.StatusCode != http.StatusOK {
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			authErr := fmt.Errorf("authentication failed with status %d: failed to read response body: %w", resp.StatusCode, err)
+		body, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			authErr := fmt.Errorf("authentication failed with status %d: failed to read response body: %w", resp.StatusCode, readErr)
 			c.mu.Lock()
 			c.authenticated = false
 			c.lastAuthError = authErr
@@ -468,6 +645,24 @@ func (c *HTTPSClient) Authenticate(ctx context.Context, edgeID string) error {
 	c.lastAuthError = nil
 	c.mu.Unlock()
 	c.logger.Info("Edge authenticated with VM", zap.String("edge_id", result.EdgeID))
+
+	// Emit edge.authenticated event
+	if c.eventBus != nil {
+		event := evtbusstypes.Event[evtbusstypes.EdgeAuthenticatedEventData]{
+			Type:      evtbusstypes.EventTypeEdgeAuthenticated,
+			Source:    "vm-gateway",
+			Timestamp: time.Now(),
+			Data: evtbusstypes.EdgeAuthenticatedEventData{
+				EdgeID:     result.EdgeID,
+				VMEndpoint: c.vmEndpoint,
+				Timestamp:  time.Now(),
+			},
+		}
+		if err := eventbus.PublishTyped(c.eventBus, event); err != nil {
+			c.logger.Warn("Failed to publish edge authenticated event", zap.Error(err))
+		}
+	}
+
 	return nil
 }
 
@@ -481,7 +676,7 @@ func (c *HTTPSClient) GetConfig(ctx context.Context) (*vmgatewaytypes.GetConfigR
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.httpClient.Do(httpReq)
+	resp, err := c.executeVMAPIRequest(ctx, "GetConfig", httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("failed to call GetConfig: %w", err)
 	}
@@ -540,7 +735,7 @@ func (c *HTTPSClient) SyncCapabilities(ctx context.Context, req *vmgatewaytypes.
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.httpClient.Do(httpReq)
+	resp, err := c.executeVMAPIRequest(ctx, "SyncCapabilities", httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("failed to sync capabilities: %w", err)
 	}
@@ -555,18 +750,32 @@ func (c *HTTPSClient) SyncCapabilities(ctx context.Context, req *vmgatewaytypes.
 	}
 
 	var result struct {
-		Success      bool   `json:"success"`
-		ErrorMessage string `json:"error_message"`
+		Success                bool       `json:"success"`
+		ErrorMessage           string     `json:"error_message"`
+		CertRotationScheduledAt *time.Time `json:"cert_rotation_scheduled_at,omitempty"`
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
 
-	return &vmgatewaytypes.SyncCapabilitiesResponse{
-		Success:      result.Success,
-		ErrorMessage: result.ErrorMessage,
-	}, nil
+	response := &vmgatewaytypes.SyncCapabilitiesResponse{
+		Success:                result.Success,
+		ErrorMessage:           result.ErrorMessage,
+		CertRotationScheduledAt: result.CertRotationScheduledAt,
+	}
+
+	// Handle certificate rotation if scheduled
+	if response.CertRotationScheduledAt != nil {
+		if c.rotationHandler != nil {
+			if err := c.rotationHandler.HandleRotationScheduled(ctx, *response.CertRotationScheduledAt, c.vmEndpoint); err != nil {
+				c.logger.Warn("Failed to handle certificate rotation scheduled", zap.Error(err))
+				// Don't fail the capabilities sync if rotation handling fails
+			}
+		}
+	}
+
+	return response, nil
 }
 
 // SyncDevices syncs discovered devices to the VM. VM decides which devices should be enabled.
@@ -574,9 +783,13 @@ func (c *HTTPSClient) SyncCapabilities(ctx context.Context, req *vmgatewaytypes.
 func (c *HTTPSClient) SyncDevices(ctx context.Context, req *vmgatewaytypes.SyncDevicesRequest) (*vmgatewaytypes.SyncDevicesResponse, error) {
 	url := fmt.Sprintf("https://%s/api/v1/devices/sync", c.vmEndpoint)
 
+	// Ensure idempotency key is set
+	req.IdempotencyKey = EnsureIdempotencyKey(req.IdempotencyKey, req.EdgeID, "sync-devices", c.logger)
+
 	reqBody := map[string]interface{}{
-		"edge_id": req.EdgeID,
-		"devices": req.Devices,
+		"edge_id":         req.EdgeID,
+		"idempotency_key": req.IdempotencyKey,
+		"devices":         req.Devices,
 	}
 
 	jsonBody, err := json.Marshal(reqBody)
@@ -588,8 +801,9 @@ func (c *HTTPSClient) SyncDevices(ctx context.Context, req *vmgatewaytypes.SyncD
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("X-Idempotency-Key", string(req.IdempotencyKey)) // Add idempotency key header
 
-	resp, err := c.httpClient.Do(httpReq)
+	resp, err := c.executeVMAPIRequest(ctx, "SyncDevices", httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("failed to sync devices: %w", err)
 	}
@@ -626,10 +840,14 @@ func (c *HTTPSClient) SyncDevices(ctx context.Context, req *vmgatewaytypes.SyncD
 func (c *HTTPSClient) SyncDataUnits(ctx context.Context, req *vmgatewaytypes.SyncDataUnitsRequest) (*vmgatewaytypes.SyncDataUnitsResponse, error) {
 	url := fmt.Sprintf("https://%s/api/v1/data-units/sync", c.vmEndpoint)
 
+	// Ensure idempotency key is set
+	req.IdempotencyKey = EnsureIdempotencyKey(req.IdempotencyKey, req.EdgeID, "sync-data-units", c.logger)
+
 	reqBody := map[string]interface{}{
-		"edge_id":    req.EdgeID,
-		"device_id":  req.DeviceID,
-		"data_units": req.DataUnits,
+		"edge_id":         req.EdgeID,
+		"idempotency_key": req.IdempotencyKey,
+		"device_id":       req.DeviceID,
+		"data_units":      req.DataUnits,
 	}
 
 	jsonBody, err := json.Marshal(reqBody)
@@ -641,8 +859,9 @@ func (c *HTTPSClient) SyncDataUnits(ctx context.Context, req *vmgatewaytypes.Syn
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("X-Idempotency-Key", string(req.IdempotencyKey)) // Add idempotency key header
 
-	resp, err := c.httpClient.Do(httpReq)
+	resp, err := c.executeVMAPIRequest(ctx, "SyncDataUnits", httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("failed to sync data units: %w", err)
 	}
@@ -677,13 +896,17 @@ func (c *HTTPSClient) SyncDataUnits(ctx context.Context, req *vmgatewaytypes.Syn
 func (c *HTTPSClient) SyncAuditLogs(ctx context.Context, req *vmgatewaytypes.SyncAuditLogsRequest) (*vmgatewaytypes.SyncAuditLogsResponse, error) {
 	url := fmt.Sprintf("https://%s/api/v1/audit-logs/sync", c.vmEndpoint)
 
+	// Ensure idempotency key is set
+	req.IdempotencyKey = EnsureIdempotencyKey(req.IdempotencyKey, req.EdgeID, "sync-audit-logs", c.logger)
+
 	reqBody := map[string]interface{}{
-		"edge_id":     req.EdgeID,
-		"start_time":  req.StartTime,
-		"end_time":    req.EndTime,
-		"entry_count": req.EntryCount,
-		"entries":     req.Entries,
-		"format":      req.Format,
+		"edge_id":         req.EdgeID,
+		"idempotency_key": req.IdempotencyKey,
+		"start_time":      req.StartTime,
+		"end_time":        req.EndTime,
+		"entry_count":     req.EntryCount,
+		"entries":         req.Entries,
+		"format":          req.Format,
 	}
 
 	jsonBody, err := json.Marshal(reqBody)
@@ -696,8 +919,9 @@ func (c *HTTPSClient) SyncAuditLogs(ctx context.Context, req *vmgatewaytypes.Syn
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("X-Idempotency-Key", string(req.IdempotencyKey)) // Add idempotency key header
 
-	resp, err := c.httpClient.Do(httpReq)
+	resp, err := c.executeVMAPIRequest(ctx, "SyncAuditLogs", httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("failed to sync audit logs: %w", err)
 	}
@@ -752,7 +976,7 @@ func (c *HTTPSClient) ReportDeploymentStatus(ctx context.Context, deploymentID s
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("X-Edge-ID", c.edgeID)
 
-	resp, err := c.httpClient.Do(httpReq)
+	resp, err := c.executeVMAPIRequest(ctx, "ReportDeploymentStatus", httpReq)
 	if err != nil {
 		return fmt.Errorf("failed to send request: %w", err)
 	}
@@ -766,5 +990,37 @@ func (c *HTTPSClient) ReportDeploymentStatus(ctx context.Context, deploymentID s
 		return fmt.Errorf("VM returned status %d: %s", resp.StatusCode, string(body))
 	}
 
+	return nil
+}
+
+// GetCertificateRotationStatus returns the certificate rotation status.
+// This method is used for health metrics collection.
+func (c *HTTPSClient) GetCertificateRotationStatus() interface{} {
+	c.mu.RLock()
+	rotationHandler := c.rotationHandler
+	c.mu.RUnlock()
+	if rotationHandler == nil {
+		return nil
+	}
+	state := rotationHandler.GetRotationStatus()
+	if state == nil {
+		return nil
+	}
+	// Convert to GatewayStatus-compatible type
+	// We'll use a map to avoid import cycles
+	return map[string]interface{}{
+		"status":             state.Status,
+		"scheduled_at":       state.ScheduledAt,
+		"grace_period_end":   state.GracePeriodEnd,
+		"old_ca_fingerprint": state.OldCAFingerprint,
+		"new_ca_fingerprint": state.NewCAFingerprint,
+	}
+}
+
+// GetTimeSyncStatus returns the time synchronization status.
+// This method is used for health metrics collection.
+func (c *HTTPSClient) GetTimeSyncStatus() interface{} {
+	// Time sync status is checked during authentication, not stored
+	// Return nil for now - could be enhanced to track last check
 	return nil
 }

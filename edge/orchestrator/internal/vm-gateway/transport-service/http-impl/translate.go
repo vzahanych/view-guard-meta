@@ -24,6 +24,10 @@ func ToHTTPHTTPServerConfig(cfg *vmgatewaytypes.HTTPServerConfig) *httpsserverty
 		TunnelInterfaceWaitTimeout:     cfg.TunnelInterfaceWaitTimeout,
 		TunnelInterfaceCheckInterval:   cfg.TunnelInterfaceCheckInterval,
 		MultipartFormMaxMemory:         cfg.MultipartFormMaxMemory,
+		CertificatePinning:             cfg.CertificatePinning,
+		CertificateRevocation:          cfg.CertificateRevocation,
+		RateLimit:                      cfg.RateLimit,
+		Timeouts:                       cfg.Timeouts,
 	}
 }
 
@@ -33,11 +37,14 @@ func ToHTTPHTTPSClientConfig(cfg *vmgatewaytypes.HTTPSClientConfig) *httpsclient
 		return nil
 	}
 	return &httpsclienttypes.HTTPSClientConfig{
-		VMEndpoint:     cfg.VMEndpoint,
-		ClientCertPath: cfg.ClientCertPath,
-		ClientKeyPath:  cfg.ClientKeyPath,
-		CACertPath:     cfg.CACertPath,
-		Timeout:        cfg.Timeout,
+		VMEndpoint:            cfg.VMEndpoint,
+		ClientCertPath:        cfg.ClientCertPath,
+		ClientKeyPath:         cfg.ClientKeyPath,
+		CACertPath:            cfg.CACertPath,
+		Timeout:               cfg.Timeout,
+		CertificatePinning:    cfg.CertificatePinning,
+		CertificateRevocation: cfg.CertificateRevocation,
+		TimeSync:              cfg.TimeSync,
 	}
 }
 

@@ -1,6 +1,10 @@
 package types
 
-import "time"
+import (
+	"time"
+
+	vmgatewaytypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/vm-gateway/types"
+)
 
 // HTTPSClientConfig contains configuration for the HTTPS client
 // that communicates with the VM over the tunnel (WireGuard, OpenVPN, IPSec, etc.).
@@ -20,6 +24,15 @@ type HTTPSClientConfig struct {
 
 	// Timeout is the HTTP request timeout.
 	Timeout time.Duration `yaml:"timeout"`
+
+	// CertificatePinning contains certificate pinning configuration for client-side verification.
+	CertificatePinning vmgatewaytypes.CertificatePinningConfig `yaml:"certificate_pinning"`
+
+	// CertificateRevocation contains certificate revocation checking configuration.
+	CertificateRevocation vmgatewaytypes.CertificateRevocationConfig `yaml:"certificate_revocation"`
+
+	// TimeSync contains time synchronization checking configuration.
+	TimeSync vmgatewaytypes.TimeSyncConfig `yaml:"time_sync"`
 }
 
 // GetConfigResponse represents the response from the VM GetConfig HTTP endpoint.

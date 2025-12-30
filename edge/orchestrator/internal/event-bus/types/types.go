@@ -25,10 +25,14 @@ type EventType string
 // Event type constants - organized by category
 const (
 	// Network events
+	EventTypeNetworkTunnelConnecting      EventType = "network.tunnel.connecting"
 	EventTypeNetworkTunnelConnected       EventType = "network.tunnel.connected"
 	EventTypeNetworkTunnelDisconnected    EventType = "network.tunnel.disconnected"
+	EventTypeNetworkTunnelConnectionError EventType = "network.tunnel.connection_error"
+	EventTypeNetworkTransportConnecting   EventType = "network.transport.connecting"
 	EventTypeNetworkTransportConnected    EventType = "network.transport.connected"
 	EventTypeNetworkTransportDisconnected EventType = "network.transport.disconnected"
+	EventTypeNetworkTransportConnectionError EventType = "network.transport.connection_error"
 
 	// Edge/VM events
 	EventTypeEdgeAuthenticated        EventType = "edge.authenticated"
@@ -89,7 +93,7 @@ func (e EventType) String() string {
 //       Data: DeviceDiscoveredEventData{...},
 //   }
 type EventData interface {
-	ModelDeployedEventData | ModelDeploymentStatusEventData | SnapshotRequestedEventData | CapabilitiesReceivedEventData | NetworkEventData | DeviceEventData | DeviceFrameReceivedEventData | DeviceDiscoveredEventData | DeviceRegisteredEventData | DataUnitSavedEventData | DataUnitUpdatedEventData | DataUnitDeletedEventData | StorageEventData
+	ModelDeployedEventData | ModelDeploymentStatusEventData | SnapshotRequestedEventData | CapabilitiesReceivedEventData | NetworkEventData | TunnelConnectingEventData | TunnelConnectionErrorEventData | TunnelConnectedEventData | TunnelDisconnectedEventData | TransportConnectingEventData | TransportConnectionErrorEventData | TransportConnectedEventData | TransportDisconnectedEventData | EdgeAuthenticatedEventData | RateLimitExceededEventData | TimeSyncCriticalDriftEventData | TimeSyncDriftWarningEventData | CertificateRotationScheduledEventData | CertificateRotationCompletedEventData | CertificateRotationFailedEventData | DeviceEventData | DeviceFrameReceivedEventData | DeviceDiscoveredEventData | DeviceRegisteredEventData | DataUnitSavedEventData | DataUnitUpdatedEventData | DataUnitDeletedEventData | StorageEventData
 }
 
 // Event represents an application-level event flowing through the bus.
@@ -326,12 +330,127 @@ type CapabilitiesReceivedEventData struct {
 
 // NetworkEventData contains data for network-related events (tunnel.connected, tunnel.disconnected, etc.).
 // This is a flexible structure that can accommodate various network event payloads.
+// Note: For new events, prefer using specific typed event data structures instead of this generic one.
 type NetworkEventData struct {
 	Interface   string                 `json:"interface,omitempty"`   // Network interface name
 	Endpoint    string                 `json:"endpoint,omitempty"`    // Network endpoint
 	Reason      string                 `json:"reason,omitempty"`      // Disconnection reason
 	Reconnected bool                   `json:"reconnected,omitempty"` // Whether this is a reconnection
-	Metadata    map[string]interface{} `json:"metadata,omitempty"`    // Additional metadata
+	Metadata    map[string]interface{} `json:"metadata,omitempty"`    // Additional metadata (deprecated: use specific typed structures)
+}
+
+// TunnelConnectingEventData contains data for network.tunnel.connecting events.
+type TunnelConnectingEventData struct {
+	Interface string `json:"interface,omitempty"` // Network interface name
+	Endpoint  string `json:"endpoint,omitempty"` // Tunnel endpoint
+	Provider  string `json:"provider,omitempty"` // Tunnel provider (e.g., "wireguard", "openvpn")
+}
+
+// TunnelConnectionErrorEventData contains data for network.tunnel.connection_error events.
+type TunnelConnectionErrorEventData struct {
+	Interface string `json:"interface,omitempty"` // Network interface name
+	Endpoint  string `json:"endpoint,omitempty"`  // Tunnel endpoint
+	Provider  string `json:"provider,omitempty"`  // Tunnel provider
+	Error     string `json:"error"`               // Error message
+	Retryable bool   `json:"retryable,omitempty"` // Whether the error is retryable
+}
+
+// TunnelConnectedEventData contains data for network.tunnel.connected events.
+type TunnelConnectedEventData struct {
+	Interface   string `json:"interface"`              // Network interface name
+	Endpoint    string `json:"endpoint,omitempty"`     // Tunnel endpoint
+	Provider    string `json:"provider,omitempty"`     // Tunnel provider
+	Reconnected bool   `json:"reconnected,omitempty"` // Whether this is a reconnection
+	IPAddress   string `json:"ip_address,omitempty"`  // Assigned IP address
+}
+
+// TunnelDisconnectedEventData contains data for network.tunnel.disconnected events.
+type TunnelDisconnectedEventData struct {
+	Interface string `json:"interface"`          // Network interface name
+	Endpoint  string `json:"endpoint,omitempty"` // Tunnel endpoint
+	Provider  string `json:"provider,omitempty"` // Tunnel provider
+	Reason    string `json:"reason,omitempty"`   // Disconnection reason
+}
+
+// TransportConnectingEventData contains data for network.transport.connecting events.
+type TransportConnectingEventData struct {
+	Service   string `json:"service"`            // Transport service name (e.g., "https-server", "https-client")
+	Endpoint  string `json:"endpoint,omitempty"` // Transport endpoint
+	Protocol  string `json:"protocol,omitempty"`  // Transport protocol (e.g., "https", "http2")
+}
+
+// TransportConnectionErrorEventData contains data for network.transport.connection_error events.
+type TransportConnectionErrorEventData struct {
+	Service   string `json:"service"`            // Transport service name
+	Endpoint  string `json:"endpoint,omitempty"` // Transport endpoint
+	Protocol  string `json:"protocol,omitempty"`  // Transport protocol
+	Error     string `json:"error"`              // Error message
+	Retryable bool   `json:"retryable,omitempty"` // Whether the error is retryable
+}
+
+// TransportConnectedEventData contains data for network.transport.connected events.
+type TransportConnectedEventData struct {
+	Service    string `json:"service"`              // Transport service name
+	Endpoint   string `json:"endpoint,omitempty"`  // Transport endpoint
+	Protocol   string `json:"protocol,omitempty"`  // Transport protocol
+	Reconnected bool  `json:"reconnected,omitempty"` // Whether this is a reconnection
+}
+
+// TransportDisconnectedEventData contains data for network.transport.disconnected events.
+type TransportDisconnectedEventData struct {
+	Service string `json:"service"`            // Transport service name
+	Endpoint string `json:"endpoint,omitempty"` // Transport endpoint
+	Protocol string `json:"protocol,omitempty"` // Transport protocol
+	Reason   string `json:"reason,omitempty"`  // Disconnection reason
+}
+
+// EdgeAuthenticatedEventData contains data for edge.authenticated events.
+type EdgeAuthenticatedEventData struct {
+	EdgeID     string    `json:"edge_id"`              // Edge ID
+	VMEndpoint string    `json:"vm_endpoint,omitempty"` // VM endpoint
+	Timestamp  time.Time `json:"timestamp"`            // Authentication timestamp
+}
+
+// RateLimitExceededEventData contains data for vm_gateway.rate_limit_exceeded events.
+type RateLimitExceededEventData struct {
+	ClientFingerprint string `json:"client_fingerprint"` // Client certificate fingerprint
+	Endpoint          string `json:"endpoint"`           // Endpoint path
+	LimitPerMinute    int    `json:"limit_per_minute"`   // Rate limit per minute
+	RetryAfterSeconds int    `json:"retry_after_seconds"` // Retry after seconds
+}
+
+// TimeSyncCriticalDriftEventData contains data for time_sync.critical_drift events.
+type TimeSyncCriticalDriftEventData struct {
+	DriftMinutes      float64 `json:"drift_minutes"`       // Clock drift in minutes
+	CriticalThreshold float64 `json:"critical_threshold"`   // Critical drift threshold in minutes
+	EdgeTime          string  `json:"edge_time"`           // Edge time (RFC3339)
+	VMTime            string  `json:"vm_time"`            // VM time (RFC3339)
+	ToleranceMinutes  float64 `json:"tolerance_minutes"`   // Tolerance in minutes
+}
+
+// TimeSyncDriftWarningEventData contains data for time_sync.drift_warning events.
+type TimeSyncDriftWarningEventData struct {
+	DriftMinutes     float64 `json:"drift_minutes"`      // Clock drift in minutes
+	ToleranceMinutes float64 `json:"tolerance_minutes"`  // Tolerance in minutes
+	EdgeTime         string  `json:"edge_time"`          // Edge time (RFC3339)
+	VMTime           string  `json:"vm_time"`           // VM time (RFC3339)
+}
+
+// CertificateRotationScheduledEventData contains data for certificate.rotation_scheduled events.
+type CertificateRotationScheduledEventData struct {
+	ScheduledAt time.Time `json:"scheduled_at"` // Scheduled rotation time
+}
+
+// CertificateRotationCompletedEventData contains data for certificate.rotation_completed events.
+type CertificateRotationCompletedEventData struct {
+	OldFingerprint string    `json:"old_fingerprint"`  // Old certificate fingerprint
+	NewFingerprint string    `json:"new_fingerprint"`  // New certificate fingerprint
+	GracePeriodEnd time.Time `json:"grace_period_end"`  // Grace period end time
+}
+
+// CertificateRotationFailedEventData contains data for certificate.rotation_failed events.
+type CertificateRotationFailedEventData struct {
+	Error string `json:"error"` // Error message
 }
 
 // DeviceEventData contains data for device connection/disconnection events.

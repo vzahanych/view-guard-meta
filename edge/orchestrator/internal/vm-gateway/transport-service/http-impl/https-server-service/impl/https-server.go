@@ -18,7 +18,9 @@ import (
 	eventbus "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/event-bus"
 	evtbusstypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/event-bus/types"
 	metastorage "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/meta-storage"
+	metastoragetypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/meta-storage/types"
 	objectstorage "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/object-storage"
+	objectstoragetypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/object-storage/types"
 	httpsservertypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/vm-gateway/transport-service/http-impl/https-server-service/types"
 	tunnelclient "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/vm-gateway/tunnel-client-service"
 	"go.uber.org/zap"
@@ -36,6 +38,7 @@ type HTTPServer struct {
 	metaStorage   metastorage.MetaDataStore
 	objectStorage objectstorage.ObjectStorageService
 	edgeID        string // Edge ID for GetConfig
+	rateLimiter   *RateLimiter
 	mu            sync.RWMutex
 }
 
@@ -81,18 +84,13 @@ func (s *HTTPServer) deployModel(ctx context.Context, modelID string, deployment
 		framework = "onnx"
 	}
 
-	// Generate object storage keys
-	modelKey := fmt.Sprintf("models/%s/model.onnx", modelID)
-	metadataKey := fmt.Sprintf("models/%s/metadata.json", modelID)
-
 	// Prepare metadata JSON for object storage
-	deviceIDPtr := &deviceID // Convert to pointer for JSON storage
 	metadataJSON := map[string]interface{}{
 		"model_id":    modelID,
 		"version":     version,
 		"model_type":  modelType,
 		"framework":   framework,
-		"device_id":   deviceIDPtr,
+		"device_id":   deviceID,
 		"deployed_at": time.Now().Format(time.RFC3339),
 	}
 	if metadata.TrainingDatasetID != "" {
@@ -113,22 +111,47 @@ func (s *HTTPServer) deployModel(ctx context.Context, modelID string, deployment
 		return "", fmt.Errorf("failed to marshal metadata: %w", err)
 	}
 
-	// Store model file and metadata in object storage
-	if err := s.objectStorage.StoreModel(ctx, modelKey, modelData, metadataKey, metadataJSONBytes); err != nil {
-		return "", fmt.Errorf("failed to store model in object storage: %w", err)
+	// Convert deviceID to DeviceID type
+	deviceIDTyped := objectstoragetypes.DeviceID(deviceID)
+	
+	// Get device type from device metadata if available, default to camera
+	deviceType := metastoragetypes.DeviceTypeCamera
+	if s.metaStorage != nil {
+		device, found := s.metaStorage.GetDevice(ctx, deviceID)
+		if found {
+			deviceType = device.DeviceType
+		}
 	}
+
+	// Store model artifacts in object storage
+	artifacts := map[string][]byte{
+		"model":    modelData,
+		"metadata": metadataJSONBytes,
+	}
+	if err := s.objectStorage.StoreModelArtifacts(ctx, modelID, deviceIDTyped, nil, artifacts); err != nil {
+		return "", fmt.Errorf("failed to store model artifacts in object storage: %w", err)
+	}
+
+	// Get model paths from object storage (using GenerateModelKey)
+	modelKey := s.objectStorage.GenerateModelKey(modelID, deviceIDTyped, "model")
+	metadataKey := s.objectStorage.GenerateModelKey(modelID, deviceIDTyped, "metadata")
 
 	// Save model metadata in meta-storage
 	now := time.Now()
-	modelMetadata := metastorage.DeployedModelMetadata{
+	deploymentIDStr := ""
+	if deploymentID != nil {
+		deploymentIDStr = *deploymentID
+	}
+	modelMetadata := metastoragetypes.ModelDeploymentMetadata{
 		ModelID:      modelID,
-		DeploymentID: deploymentID,
-		ModelPath:    modelKey,    // Object storage key
-		MetadataPath: metadataKey, // Object storage key
+		DeploymentID: deploymentIDStr,
+		DeviceID:     metastoragetypes.DeviceID(deviceID),
+		DeviceType:   deviceType,
+		ModelPath:    modelKey,
+		MetadataPath: metadataKey,
 		DeployedAt:   now,
 		Status:       "active",
 		EdgeID:       edgeID,
-		CameraID:     deviceIDPtr, // TODO: MetaStorage should be updated to use DeviceID field name (reusing pointer from above)
 		Version:      version,
 		ModelType:    modelType,
 		Framework:    framework,
@@ -136,9 +159,9 @@ func (s *HTTPServer) deployModel(ctx context.Context, modelID string, deployment
 		UpdatedAt:    now,
 	}
 
-	if err := s.metaStorage.SaveDeployedModel(ctx, modelMetadata); err != nil {
+	if err := s.metaStorage.SaveModelDeployment(ctx, modelMetadata); err != nil {
 		// Try to clean up object storage on failure
-		_ = s.objectStorage.DeleteModel(ctx, modelKey, metadataKey)
+		_ = s.objectStorage.DeleteModelArtifacts(ctx, modelID, deviceIDTyped)
 		return "", fmt.Errorf("failed to save model metadata: %w", err)
 	}
 
@@ -192,6 +215,23 @@ func (s *HTTPServer) Start(ctx context.Context) error {
 
 	s.logger.Info("Starting Edge HTTPS server", zap.String("address", listenAddr))
 
+	// Emit transport.connecting event
+	if s.eventBus != nil {
+		event := evtbusstypes.Event[evtbusstypes.TransportConnectingEventData]{
+			Type:      evtbusstypes.EventTypeNetworkTransportConnecting,
+			Source:    s.Name(),
+			Timestamp: time.Now(),
+			Data: evtbusstypes.TransportConnectingEventData{
+				Service:  "https-server",
+				Endpoint: listenAddr,
+				Protocol: "https",
+			},
+		}
+		if err := eventbus.PublishTyped(s.eventBus, event); err != nil {
+			s.logger.Warn("Failed to publish transport connecting event", zap.Error(err))
+		}
+	}
+
 	// Wait for tunnel interface only if tunnel is enabled and not localhost
 	host, _, _ := net.SplitHostPort(listenAddr)
 	if s.isTunnelEnabled() && host != "localhost" && host != "127.0.0.1" {
@@ -221,6 +261,24 @@ func (s *HTTPServer) Start(ctx context.Context) error {
 
 	listener, err := net.Listen("tcp", listenAddr)
 	if err != nil {
+		// Emit transport.connection_error event
+		if s.eventBus != nil {
+			event := evtbusstypes.Event[evtbusstypes.TransportConnectionErrorEventData]{
+				Type:      evtbusstypes.EventTypeNetworkTransportConnectionError,
+				Source:    s.Name(),
+				Timestamp: time.Now(),
+				Data: evtbusstypes.TransportConnectionErrorEventData{
+					Service:   "https-server",
+					Endpoint:  listenAddr,
+					Protocol:  "https",
+					Error:     err.Error(),
+					Retryable: true,
+				},
+			}
+			if pubErr := eventbus.PublishTyped(s.eventBus, event); pubErr != nil {
+				s.logger.Warn("Failed to publish transport connection error event", zap.Error(pubErr))
+			}
+		}
 		return fmt.Errorf("failed to create listener on %s: %w", listenAddr, err)
 	}
 	s.listener = listener
@@ -275,6 +333,23 @@ func (s *HTTPServer) Start(ctx context.Context) error {
 			MinVersion:   tls.VersionTLS12,
 		}
 
+		// Setup certificate pinning if configured
+		// Default to enabled if fingerprint is provided
+		pinningConfig := s.serverCfg.CertificatePinning
+		// If fingerprint is provided but pinning is not explicitly disabled, enable it
+		if pinningConfig.EdgeCAFingerprint != "" {
+			if !pinningConfig.PinningEnabled {
+				// Default to enabled when fingerprint is present
+				pinningConfig.PinningEnabled = true
+			}
+			SetupServerCertificatePinning(tlsConfig, &pinningConfig, s.logger)
+		}
+
+		// Setup certificate revocation checking if configured
+		if s.serverCfg.CertificateRevocation.CRLEnabled || s.serverCfg.CertificateRevocation.OCSPEnabled {
+			SetupServerCertificateRevocation(tlsConfig, &s.serverCfg.CertificateRevocation, s.logger)
+		}
+
 		s.logger.Info("Loaded TLS credentials for HTTPS server (mTLS enabled)",
 			zap.String("server_cert", serverCertPath))
 	} else {
@@ -289,6 +364,16 @@ func (s *HTTPServer) Start(ctx context.Context) error {
 	// Create HTTP mux and setup routes
 	mux := http.NewServeMux()
 	s.setupRoutes(mux)
+
+	// Create rate limiter if enabled
+	var handler http.Handler = mux
+	if s.serverCfg.RateLimit.Enabled {
+		s.rateLimiter = NewRateLimiter(&s.serverCfg.RateLimit, s.logger, s.eventBus)
+		handler = RateLimitMiddleware(s.rateLimiter, s.logger)(mux)
+		s.logger.Info("Rate limiting enabled",
+			zap.Int("default_requests_per_minute", s.serverCfg.RateLimit.GetLimitForEndpoint("")),
+			zap.Int("burst_size", s.serverCfg.RateLimit.GetBurstSize()))
+	}
 
 	// Use config timeouts with defaults
 	readTimeout := s.serverCfg.ReadTimeout
@@ -307,7 +392,7 @@ func (s *HTTPServer) Start(ctx context.Context) error {
 	// Create HTTPS server
 	s.httpServer = &http.Server{
 		Addr:         listenAddr,
-		Handler:      mux,
+		Handler:      handler,
 		TLSConfig:    tlsConfig,
 		ReadTimeout:  readTimeout,
 		WriteTimeout: writeTimeout,
@@ -320,13 +405,50 @@ func (s *HTTPServer) Start(ctx context.Context) error {
 		// Use ServeTLS since we're providing TLS config
 		if err := s.httpServer.ServeTLS(listener, "", ""); err != nil && err != http.ErrServerClosed {
 			s.logger.Error("HTTPS server error", zap.Error(err))
+			// Emit transport.connection_error event if server fails after starting
+			if s.eventBus != nil {
+				event := evtbusstypes.Event[evtbusstypes.TransportConnectionErrorEventData]{
+					Type:      evtbusstypes.EventTypeNetworkTransportConnectionError,
+					Source:    s.Name(),
+					Timestamp: time.Now(),
+					Data: evtbusstypes.TransportConnectionErrorEventData{
+						Service:   "https-server",
+						Endpoint:  listenAddr,
+						Protocol:  "https",
+						Error:     err.Error(),
+						Retryable: true,
+					},
+				}
+				if pubErr := eventbus.PublishTyped(s.eventBus, event); pubErr != nil {
+					s.logger.Warn("Failed to publish transport connection error event", zap.Error(pubErr))
+				}
+			}
 		}
 	}()
 
 	// Give the server a moment to start accepting connections
+	// The server is started in a goroutine, so we return immediately
+	// The caller should use WaitForServerReady() or IsServerReady() to verify readiness
 	time.Sleep(100 * time.Millisecond)
 
-	s.logger.Info("Edge HTTPS server started", zap.String("address", listenAddr))
+	s.logger.Info("Edge HTTPS server started (checking readiness)", zap.String("address", listenAddr))
+
+	// Emit transport.connected event
+	if s.eventBus != nil {
+		event := evtbusstypes.Event[evtbusstypes.TransportConnectedEventData]{
+			Type:      evtbusstypes.EventTypeNetworkTransportConnected,
+			Source:    s.Name(),
+			Timestamp: time.Now(),
+			Data: evtbusstypes.TransportConnectedEventData{
+				Service:  "https-server",
+				Endpoint: listenAddr,
+				Protocol: "https",
+			},
+		}
+		if err := eventbus.PublishTyped(s.eventBus, event); err != nil {
+			s.logger.Warn("Failed to publish transport connected event", zap.Error(err))
+		}
+	}
 
 	return nil
 }
@@ -335,6 +457,12 @@ func (s *HTTPServer) Start(ctx context.Context) error {
 func (s *HTTPServer) Stop(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// Stop rate limiter if it exists
+	if s.rateLimiter != nil {
+		s.rateLimiter.Stop()
+		s.rateLimiter = nil
+	}
 
 	if s.httpServer != nil {
 		shutdownCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -351,6 +479,28 @@ func (s *HTTPServer) Stop(ctx context.Context) error {
 	}
 
 	s.logger.Info("Edge HTTPS server stopped")
+
+	// Emit transport.disconnected event
+	if s.eventBus != nil {
+		listenAddr := ""
+		if s.httpServer != nil {
+			listenAddr = s.httpServer.Addr
+		}
+		event := evtbusstypes.Event[evtbusstypes.TransportDisconnectedEventData]{
+			Type:      evtbusstypes.EventTypeNetworkTransportDisconnected,
+			Source:    s.Name(),
+			Timestamp: time.Now(),
+			Data: evtbusstypes.TransportDisconnectedEventData{
+				Service:  "https-server",
+				Endpoint: listenAddr,
+				Protocol: "https",
+				Reason:   "server stopped",
+			},
+		}
+		if err := eventbus.PublishTyped(s.eventBus, event); err != nil {
+			s.logger.Warn("Failed to publish transport disconnected event", zap.Error(err))
+		}
+	}
 
 	return nil
 }
@@ -406,10 +556,19 @@ func (s *HTTPServer) checkInterfaceHasIP(iface, expectedIP string) bool {
 	return false
 }
 
+// getVMCommandProcessingTimeout returns the VM command processing timeout with default.
+func (s *HTTPServer) getVMCommandProcessingTimeout() time.Duration {
+	if s.serverCfg.Timeouts.VMCommandProcessingTimeout > 0 {
+		return s.serverCfg.Timeouts.VMCommandProcessingTimeout
+	}
+	return 10 * time.Second // Default: 10 seconds
+}
+
 // setupRoutes configures all REST API endpoints
 func (s *HTTPServer) setupRoutes(mux *http.ServeMux) {
-	// Health check endpoint
+	// Health check endpoints
 	mux.HandleFunc("/health", s.handleHealth)
+	mux.HandleFunc("/api/health/ready", s.handleReadiness)
 
 	// API v1 endpoints
 	mux.HandleFunc("/api/v1/config/get", s.handleGetConfig)
@@ -432,6 +591,35 @@ func (s *HTTPServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":  "healthy",
 		"service": "edge-https-server",
+	})
+}
+
+// handleReadiness handles readiness check requests
+// This endpoint verifies that the HTTPS server is ready to accept connections.
+func (s *HTTPServer) handleReadiness(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Check if server is ready
+	if !s.IsServerReady() {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":  "not_ready",
+			"service": "edge-https-server",
+			"message": "HTTPS server is not ready",
+		})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":  "ready",
+		"service": "edge-https-server",
+		"message": "HTTPS server is ready to accept connections",
 	})
 }
 
@@ -479,6 +667,14 @@ func (s *HTTPServer) handleUpdateConfig(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Validate request body size (max 1MB for config update requests)
+	if r.ContentLength > 0 {
+		if err := ValidateRequestSize(r.ContentLength, 1*1024*1024); err != nil {
+			s.handleValidationError(w, err, s.logger)
+			return
+		}
+	}
+
 	var req struct {
 		ConfigJSON string `json:"config_json"`
 	}
@@ -488,7 +684,20 @@ func (s *HTTPServer) handleUpdateConfig(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Validate config JSON
+	if err := ValidateJSON("config_json", req.ConfigJSON, true); err != nil {
+		s.handleValidationError(w, err, s.logger)
+		return
+	}
+
+	// Use VM command processing timeout
+	ctx := r.Context()
+	timeout := s.getVMCommandProcessingTimeout()
+	timeoutCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
 	// TODO: Implement config update logic
+	_ = timeoutCtx // Use timeoutCtx when implementing config update
 	s.sendSuccessResponse(w, map[string]interface{}{
 		"message": "Config update not yet implemented",
 	})
@@ -510,57 +719,67 @@ func (s *HTTPServer) handleRequestDataUnitCapture(w http.ResponseWriter, r *http
 		Count       int32  `json:"count"`
 	}
 
+	// Validate request body size (max 1MB for data unit capture requests)
+	if r.ContentLength > 0 {
+		if err := ValidateRequestSize(r.ContentLength, 1*1024*1024); err != nil {
+			s.handleValidationError(w, err, s.logger)
+			return
+		}
+	}
+
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.sendErrorResponse(w, http.StatusBadRequest, fmt.Sprintf("invalid request: %v", err))
 		return
 	}
 
-	if req.DeviceID == "" {
-		s.sendErrorResponse(w, http.StatusBadRequest, "device_id is required")
+	// Validate and sanitize inputs
+	if err := ValidateDeviceID(req.DeviceID); err != nil {
+		s.handleValidationError(w, err, s.logger)
+		return
+	}
+	deviceID := SanitizeString(req.DeviceID)
+
+	if err := ValidateLabel(req.Label); err != nil {
+		// If label is empty, set default
+		if req.Label == "" {
+			req.Label = "normal"
+		} else {
+			s.handleValidationError(w, err, s.logger)
+			return
+		}
+	}
+
+	if err := ValidateCustomLabel(req.CustomLabel, req.Label == "custom"); err != nil {
+		s.handleValidationError(w, err, s.logger)
+		return
+	}
+	if req.CustomLabel != "" {
+		req.CustomLabel = SanitizeString(req.CustomLabel)
+	}
+
+	if err := ValidateCount(req.Count, 1, 1000); err != nil {
+		s.handleValidationError(w, err, s.logger)
 		return
 	}
 
-	deviceID := req.DeviceID
-
+	// Use VM command processing timeout
 	ctx := r.Context()
+	timeout := s.getVMCommandProcessingTimeout()
+	timeoutCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 
-	// Validate device exists in IoT inventory (meta-storage is the source of truth for discovered devices)
-	// Note: Currently using GetCamera for device validation (cameras are the primary device type)
-	// TODO: When generic device inventory is available in meta-storage, use GetDevice instead
+		// Validate device exists in IoT inventory (meta-storage is the source of truth for discovered devices)
 	if s.metaStorage != nil {
-		_, found := s.metaStorage.GetCamera(ctx, deviceID)
+		_, found := s.metaStorage.GetDevice(timeoutCtx, deviceID)
 		if !found {
 			s.sendErrorResponse(w, http.StatusBadRequest, fmt.Sprintf("device_id '%s' not found in device inventory", deviceID))
 			return
 		}
 	}
 
-	// Set defaults
+	// Set defaults (validation already handled above)
 	label := req.Label
-	if label == "" {
-		label = "normal"
-	}
 	count := req.Count
-	if count <= 0 {
-		count = 1
-	}
-
-	// Validate label
-	validLabels := map[string]bool{
-		"normal":   true,
-		"threat":   true,
-		"abnormal": true,
-		"custom":   true,
-	}
-	if !validLabels[label] {
-		s.sendErrorResponse(w, http.StatusBadRequest, fmt.Sprintf("invalid label: %s (must be normal, threat, abnormal, or custom)", label))
-		return
-	}
-
-	if label == "custom" && req.CustomLabel == "" {
-		s.sendErrorResponse(w, http.StatusBadRequest, "custom_label is required when label is 'custom'")
-		return
-	}
 
 	s.logger.Info("Received data unit capture request from VM",
 		zap.String("device_id", deviceID),
@@ -612,7 +831,23 @@ func (s *HTTPServer) handleDeployModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Use VM command processing timeout
 	ctx := r.Context()
+	timeout := s.getVMCommandProcessingTimeout()
+	timeoutCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	// Validate request body size (max 100MB for model deployments)
+	if r.ContentLength > 0 {
+		maxSize := s.serverCfg.MultipartFormMaxMemory
+		if maxSize == 0 {
+			maxSize = 100 << 20 // Default: 100MB
+		}
+		if err := ValidateRequestSize(r.ContentLength, maxSize); err != nil {
+			s.handleValidationError(w, err, s.logger)
+			return
+		}
+	}
 
 	// Parse multipart form using configured max memory (default: 100MB if not configured)
 	// Note: This is the memory limit for buffering; larger files will be written to temp files on disk
@@ -627,8 +862,8 @@ func (s *HTTPServer) handleDeployModel(w http.ResponseWriter, r *http.Request) {
 
 	// Get metadata
 	metadataJSON := r.FormValue("metadata")
-	if metadataJSON == "" {
-		s.sendErrorResponse(w, http.StatusBadRequest, "metadata field is required")
+	if err := ValidateJSON("metadata", metadataJSON, true); err != nil {
+		s.handleValidationError(w, err, s.logger)
 		return
 	}
 
@@ -637,6 +872,52 @@ func (s *HTTPServer) handleDeployModel(w http.ResponseWriter, r *http.Request) {
 	if err := json.Unmarshal([]byte(metadataJSON), &metadata); err != nil {
 		s.sendErrorResponse(w, http.StatusBadRequest, fmt.Sprintf("invalid metadata JSON: %v", err))
 		return
+	}
+
+	// Validate metadata fields
+	if err := ValidateModelID(metadata.ModelID); err != nil {
+		s.handleValidationError(w, err, s.logger)
+		return
+	}
+	if err := ValidateDeviceID(metadata.DeviceID); err != nil {
+		s.handleValidationError(w, err, s.logger)
+		return
+	}
+	if err := ValidateDeploymentID(metadata.DeploymentID); err != nil {
+		s.handleValidationError(w, err, s.logger)
+		return
+	}
+	if err := ValidateVersion(metadata.Version, false); err != nil {
+		s.handleValidationError(w, err, s.logger)
+		return
+	}
+	if err := ValidateModelType(metadata.ModelType, false); err != nil {
+		s.handleValidationError(w, err, s.logger)
+		return
+	}
+	if err := ValidateFramework(metadata.Framework, false); err != nil {
+		s.handleValidationError(w, err, s.logger)
+		return
+	}
+	if err := ValidateInputShape(metadata.InputShape); err != nil {
+		s.handleValidationError(w, err, s.logger)
+		return
+	}
+
+	// Sanitize string fields
+	metadata.ModelID = SanitizeString(metadata.ModelID)
+	metadata.DeviceID = SanitizeString(metadata.DeviceID)
+	if metadata.DeploymentID != "" {
+		metadata.DeploymentID = SanitizeString(metadata.DeploymentID)
+	}
+	if metadata.Version != "" {
+		metadata.Version = SanitizeString(metadata.Version)
+	}
+	if metadata.ModelType != "" {
+		metadata.ModelType = SanitizeString(metadata.ModelType)
+	}
+	if metadata.Framework != "" {
+		metadata.Framework = SanitizeString(metadata.Framework)
 	}
 
 	// Get model file
@@ -661,11 +942,7 @@ func (s *HTTPServer) handleDeployModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate device ID (required - models are trained on specific device datasets)
-	if metadata.DeviceID == "" {
-		s.sendErrorResponse(w, http.StatusBadRequest, httpsservertypes.ErrDeviceIDRequired.Error())
-		return
-	}
+	// Device ID validation already handled above
 
 	var deploymentID *string
 	if metadata.DeploymentID != "" {
@@ -673,7 +950,7 @@ func (s *HTTPServer) handleDeployModel(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Deploy model using meta-storage and object-storage
-	modelKey, err := s.deployModel(ctx, metadata.ModelID, deploymentID, s.edgeID, metadata.DeviceID, modelData, metadata)
+	modelKey, err := s.deployModel(timeoutCtx, metadata.ModelID, deploymentID, s.edgeID, metadata.DeviceID, modelData, metadata)
 	if err != nil {
 		s.logger.Error("Failed to deploy model", zap.Error(err), zap.String("model_id", metadata.ModelID))
 		s.sendErrorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to deploy model: %v", err))
@@ -710,7 +987,6 @@ func (s *HTTPServer) handleDeployModel(w http.ResponseWriter, r *http.Request) {
 	// Publish model deployment event to event bus
 	// State manager will listen for this event and notify AI gateway
 	if s.eventBus != nil {
-		ctx := r.Context()
 		// Get model metadata from meta-storage to include in event
 		eventData := evtbusstypes.ModelDeployedEventData{
 			ModelID:      metadata.ModelID,
@@ -718,7 +994,7 @@ func (s *HTTPServer) handleDeployModel(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if s.metaStorage != nil {
-			modelMeta, found := s.metaStorage.GetDeployedModel(ctx, metadata.ModelID)
+			modelMeta, found := s.metaStorage.GetModelDeployment(timeoutCtx, metadata.ModelID)
 			if found {
 				eventData.Version = modelMeta.Version
 				eventData.ModelType = modelMeta.ModelType
@@ -763,6 +1039,14 @@ func (s *HTTPServer) handleRestartService(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Validate request body size (max 1KB for service restart requests)
+	if r.ContentLength > 0 {
+		if err := ValidateRequestSize(r.ContentLength, 1*1024); err != nil {
+			s.handleValidationError(w, err, s.logger)
+			return
+		}
+	}
+
 	var req struct {
 		ServiceName string `json:"service_name"`
 	}
@@ -772,7 +1056,21 @@ func (s *HTTPServer) handleRestartService(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Validate service name
+	if err := ValidateString("service_name", req.ServiceName, 1, 255, true); err != nil {
+		s.handleValidationError(w, err, s.logger)
+		return
+	}
+	req.ServiceName = SanitizeString(req.ServiceName)
+
+	// Use VM command processing timeout
+	ctx := r.Context()
+	timeout := s.getVMCommandProcessingTimeout()
+	timeoutCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
 	// TODO: Implement service restart logic
+	_ = timeoutCtx // Use timeoutCtx when implementing service restart
 	s.sendSuccessResponse(w, map[string]interface{}{
 		"message": fmt.Sprintf("Service restart not yet implemented for: %s", req.ServiceName),
 	})
@@ -784,6 +1082,14 @@ func (s *HTTPServer) handleSyncCapabilities(w http.ResponseWriter, r *http.Reque
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
+	}
+
+	// Validate request body size (max 1MB for capabilities sync requests)
+	if r.ContentLength > 0 {
+		if err := ValidateRequestSize(r.ContentLength, 1*1024*1024); err != nil {
+			s.handleValidationError(w, err, s.logger)
+			return
+		}
 	}
 
 	var req struct {
@@ -800,10 +1106,20 @@ func (s *HTTPServer) handleSyncCapabilities(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// Validate capabilities map size (prevent DoS)
+	if len(req.Capabilities) > 1000 {
+		s.handleValidationError(w, &ValidationError{Field: "capabilities", Message: "must contain at most 1000 entries"}, s.logger)
+		return
+	}
+
 	// Store capabilities in meta-storage
 	if s.metaStorage != nil {
+		// Use VM command processing timeout
 		ctx := r.Context()
-		if err := s.metaStorage.SaveEdgeCapabilities(ctx, req.Capabilities); err != nil {
+		timeout := s.getVMCommandProcessingTimeout()
+		timeoutCtx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
+		if err := s.metaStorage.SaveEdgeCapabilities(timeoutCtx, req.Capabilities); err != nil {
 			s.logger.Error("Failed to save edge capabilities", zap.Error(err))
 			s.sendErrorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to save capabilities: %v", err))
 			return
@@ -866,4 +1182,23 @@ func loadCACertificate(caCertPath string) (*x509.CertPool, error) {
 		return nil, fmt.Errorf("failed to parse CA certificate")
 	}
 	return caCertPool, nil
+}
+
+// GetRateLimitStats returns rate limiting statistics.
+// This method is used for health metrics collection.
+func (s *HTTPServer) GetRateLimitStats() interface{} {
+	s.mu.RLock()
+	rateLimiter := s.rateLimiter
+	s.mu.RUnlock()
+	if rateLimiter == nil {
+		return nil
+	}
+	enabled, requestsPerMinute, burstSize, totalViolations, activeBuckets := rateLimiter.GetStats()
+	return map[string]interface{}{
+		"enabled":             enabled,
+		"requests_per_minute": requestsPerMinute,
+		"burst_size":          burstSize,
+		"total_violations":    totalViolations,
+		"active_buckets":      activeBuckets,
+	}
 }
