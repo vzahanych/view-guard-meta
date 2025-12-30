@@ -23,6 +23,7 @@ import (
 	objectstoragetypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/object-storage/types"
 	httpsservertypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/vm-gateway/transport-service/http-impl/https-server-service/types"
 	tunnelclient "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/vm-gateway/tunnel-client-service"
+	vmgatewaytypes "github.com/vzahanych/view-guard-meta/edge/orchestrator/internal/vm-gateway/types"
 	"go.uber.org/zap"
 )
 
@@ -39,6 +40,7 @@ type HTTPServer struct {
 	objectStorage objectstorage.ObjectStorageService
 	edgeID        string // Edge ID for GetConfig
 	rateLimiter   *RateLimiter
+	listenAddr    string // Listen address, stored during Start() for use in Stop() events
 	mu            sync.RWMutex
 }
 
@@ -52,6 +54,10 @@ func NewHTTPServer(
 	objectStore objectstorage.ObjectStorageService,
 	eventBus eventbus.EventBus,
 ) *HTTPServer {
+	// Normalize logger: if nil, use a no-op logger
+	if log == nil {
+		log = zap.NewNop()
+	}
 	return &HTTPServer{
 		serverCfg:     serverCfg,
 		tunnelClient:  tunnelClient,
@@ -284,6 +290,7 @@ func (s *HTTPServer) Start(ctx context.Context) error {
 	s.listener = listener
 
 	// Load TLS credentials for mTLS (zero-trust security)
+	// Certificates are always required - validate before proceeding
 	serverCertPath := s.serverCfg.ServerCertPath
 	serverKeyPath := s.serverCfg.ServerKeyPath
 	caCertPath := s.serverCfg.CACertPath
@@ -311,10 +318,30 @@ func (s *HTTPServer) Start(ctx context.Context) error {
 		}
 	}
 
+	// Certificates are required - fail fast if any are missing
+	if serverCertPath == "" || serverKeyPath == "" || caCertPath == "" {
+		missingFields := []string{}
+		if serverCertPath == "" {
+			missingFields = append(missingFields, "server_cert_path")
+		}
+		if serverKeyPath == "" {
+			missingFields = append(missingFields, "server_key_path")
+		}
+		if caCertPath == "" {
+			missingFields = append(missingFields, "ca_cert_path")
+		}
+		// Close listener before returning error
+		listener.Close()
+		s.listener = nil
+		return fmt.Errorf("TLS certificates are required for HTTPS server. Missing required fields: %s. "+
+			"Please provide server_cert_path, server_key_path, and ca_cert_path in the HTTPS server configuration",
+			strings.Join(missingFields, ", "))
+	}
+
 	var tlsConfig *tls.Config
 
-	// Load TLS if cert paths are provided (works for both production and localhost dev)
-	if serverCertPath != "" && serverKeyPath != "" && caCertPath != "" {
+	// Load TLS certificates (all paths are now guaranteed to be non-empty)
+	{
 		cert, err := tls.LoadX509KeyPair(serverCertPath, serverKeyPath)
 		if err != nil {
 			return fmt.Errorf("failed to load server certificate: %w", err)
@@ -352,13 +379,6 @@ func (s *HTTPServer) Start(ctx context.Context) error {
 
 		s.logger.Info("Loaded TLS credentials for HTTPS server (mTLS enabled)",
 			zap.String("server_cert", serverCertPath))
-	} else {
-		// For localhost dev without certs, use basic TLS without mTLS (development only)
-		tlsConfig = &tls.Config{
-			MinVersion: tls.VersionTLS12,
-		}
-		s.logger.Warn("HTTPS server running without TLS certificates (development mode only)",
-			zap.String("address", listenAddr))
 	}
 
 	// Create HTTP mux and setup routes
@@ -398,6 +418,9 @@ func (s *HTTPServer) Start(ctx context.Context) error {
 		WriteTimeout: writeTimeout,
 		IdleTimeout:  idleTimeout,
 	}
+
+	// Store listen address for use in Stop() disconnect events
+	s.listenAddr = listenAddr
 
 	// Start server in goroutine
 	go func() {
@@ -481,11 +504,9 @@ func (s *HTTPServer) Stop(ctx context.Context) error {
 	s.logger.Info("Edge HTTPS server stopped")
 
 	// Emit transport.disconnected event
+	// Use stored listenAddr (captured during Start()) since httpServer may be nil
 	if s.eventBus != nil {
-		listenAddr := ""
-		if s.httpServer != nil {
-			listenAddr = s.httpServer.Addr
-		}
+		listenAddr := s.listenAddr // Use stored address from Start()
 		event := evtbusstypes.Event[evtbusstypes.TransportDisconnectedEventData]{
 			Type:      evtbusstypes.EventTypeNetworkTransportDisconnected,
 			Source:    s.Name(),
@@ -501,6 +522,9 @@ func (s *HTTPServer) Stop(ctx context.Context) error {
 			s.logger.Warn("Failed to publish transport disconnected event", zap.Error(err))
 		}
 	}
+
+	// Clear stored listen address
+	s.listenAddr = ""
 
 	return nil
 }
@@ -667,19 +691,22 @@ func (s *HTTPServer) handleUpdateConfig(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Validate request body size (max 1MB for config update requests)
-	if r.ContentLength > 0 {
-		if err := ValidateRequestSize(r.ContentLength, 1*1024*1024); err != nil {
-			s.handleValidationError(w, err, s.logger)
-			return
-		}
-	}
+	// Limit request body size (max 1MB for config update requests)
+	// MaxBytesReader handles both Content-Length and chunked requests
+	LimitRequestBody(r, 1*1024*1024)
 
 	var req struct {
 		ConfigJSON string `json:"config_json"`
 	}
 
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil {
+		// Check if error is due to request body too large
+		if errStr := err.Error(); strings.Contains(errStr, "request body too large") {
+			s.handleValidationError(w, &ValidationError{Field: "request_body", Message: "exceeds maximum size of 1MB"}, s.logger)
+			return
+		}
 		s.sendErrorResponse(w, http.StatusBadRequest, fmt.Sprintf("invalid request: %v", err))
 		return
 	}
@@ -719,15 +746,18 @@ func (s *HTTPServer) handleRequestDataUnitCapture(w http.ResponseWriter, r *http
 		Count       int32  `json:"count"`
 	}
 
-	// Validate request body size (max 1MB for data unit capture requests)
-	if r.ContentLength > 0 {
-		if err := ValidateRequestSize(r.ContentLength, 1*1024*1024); err != nil {
-			s.handleValidationError(w, err, s.logger)
+	// Limit request body size (max 1MB for data unit capture requests)
+	// MaxBytesReader handles both Content-Length and chunked requests
+	LimitRequestBody(r, 1*1024*1024)
+
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil {
+		// Check if error is due to request body too large
+		if errStr := err.Error(); strings.Contains(errStr, "request body too large") {
+			s.handleValidationError(w, &ValidationError{Field: "request_body", Message: "exceeds maximum size of 1MB"}, s.logger)
 			return
 		}
-	}
-
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.sendErrorResponse(w, http.StatusBadRequest, fmt.Sprintf("invalid request: %v", err))
 		return
 	}
@@ -837,25 +867,26 @@ func (s *HTTPServer) handleDeployModel(w http.ResponseWriter, r *http.Request) {
 	timeoutCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	// Validate request body size (max 100MB for model deployments)
-	if r.ContentLength > 0 {
-		maxSize := s.serverCfg.MultipartFormMaxMemory
-		if maxSize == 0 {
-			maxSize = 100 << 20 // Default: 100MB
-		}
-		if err := ValidateRequestSize(r.ContentLength, maxSize); err != nil {
-			s.handleValidationError(w, err, s.logger)
-			return
-		}
+	// Limit request body size (max 100MB for model deployments)
+	// Note: For multipart forms, we still need to limit the overall body size,
+	// but ParseMultipartForm has its own maxMemory parameter for buffering.
+	maxSize := s.serverCfg.MultipartFormMaxMemory
+	if maxSize == 0 {
+		maxSize = 100 << 20 // Default: 100MB
 	}
+	// MaxBytesReader handles both Content-Length and chunked requests
+	LimitRequestBody(r, maxSize)
 
 	// Parse multipart form using configured max memory (default: 100MB if not configured)
 	// Note: This is the memory limit for buffering; larger files will be written to temp files on disk
-	maxMemory := s.serverCfg.MultipartFormMaxMemory
-	if maxMemory == 0 {
-		maxMemory = 100 << 20 // Default: 100MB
-	}
+	// maxMemory should match maxSize for consistency
+	maxMemory := maxSize
 	if err := r.ParseMultipartForm(maxMemory); err != nil {
+		// Check if error is due to request body too large
+		if errStr := err.Error(); strings.Contains(errStr, "request body too large") {
+			s.handleValidationError(w, &ValidationError{Field: "request_body", Message: fmt.Sprintf("exceeds maximum size of %d bytes", maxSize)}, s.logger)
+			return
+		}
 		s.sendErrorResponse(w, http.StatusBadRequest, fmt.Sprintf("failed to parse multipart form: %v", err))
 		return
 	}
@@ -1039,19 +1070,22 @@ func (s *HTTPServer) handleRestartService(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Validate request body size (max 1KB for service restart requests)
-	if r.ContentLength > 0 {
-		if err := ValidateRequestSize(r.ContentLength, 1*1024); err != nil {
-			s.handleValidationError(w, err, s.logger)
-			return
-		}
-	}
+	// Limit request body size (max 1KB for service restart requests)
+	// MaxBytesReader handles both Content-Length and chunked requests
+	LimitRequestBody(r, 1*1024)
 
 	var req struct {
 		ServiceName string `json:"service_name"`
 	}
 
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil {
+		// Check if error is due to request body too large
+		if err.Error() == "http: request body too large" {
+			s.handleValidationError(w, &ValidationError{Field: "request_body", Message: "exceeds maximum size of 1KB"}, s.logger)
+			return
+		}
 		s.sendErrorResponse(w, http.StatusBadRequest, fmt.Sprintf("invalid request: %v", err))
 		return
 	}
@@ -1084,19 +1118,22 @@ func (s *HTTPServer) handleSyncCapabilities(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Validate request body size (max 1MB for capabilities sync requests)
-	if r.ContentLength > 0 {
-		if err := ValidateRequestSize(r.ContentLength, 1*1024*1024); err != nil {
-			s.handleValidationError(w, err, s.logger)
-			return
-		}
-	}
+	// Limit request body size (max 1MB for capabilities sync requests)
+	// MaxBytesReader handles both Content-Length and chunked requests
+	LimitRequestBody(r, 1*1024*1024)
 
 	var req struct {
 		Capabilities map[string]interface{} `json:"capabilities"`
 	}
 
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil {
+		// Check if error is due to request body too large
+		if errStr := err.Error(); strings.Contains(errStr, "request body too large") {
+			s.handleValidationError(w, &ValidationError{Field: "request_body", Message: "exceeds maximum size of 1MB"}, s.logger)
+			return
+		}
 		s.sendErrorResponse(w, http.StatusBadRequest, fmt.Sprintf("invalid request: %v", err))
 		return
 	}
@@ -1184,9 +1221,21 @@ func loadCACertificate(caCertPath string) (*x509.CertPool, error) {
 	return caCertPool, nil
 }
 
+// GetCertificateRotationStatus returns the certificate rotation status.
+// HTTPServer doesn't implement certificate rotation (that's the client's job).
+func (s *HTTPServer) GetCertificateRotationStatus() *vmgatewaytypes.CertificateRotationStatus {
+	return nil
+}
+
+// GetTimeSyncStatus returns the time synchronization status.
+// HTTPServer doesn't implement time sync checking (that's the client's job).
+func (s *HTTPServer) GetTimeSyncStatus() *vmgatewaytypes.TimeSyncStatus {
+	return nil
+}
+
 // GetRateLimitStats returns rate limiting statistics.
 // This method is used for health metrics collection.
-func (s *HTTPServer) GetRateLimitStats() interface{} {
+func (s *HTTPServer) GetRateLimitStats() *vmgatewaytypes.RateLimitStats {
 	s.mu.RLock()
 	rateLimiter := s.rateLimiter
 	s.mu.RUnlock()
@@ -1194,11 +1243,11 @@ func (s *HTTPServer) GetRateLimitStats() interface{} {
 		return nil
 	}
 	enabled, requestsPerMinute, burstSize, totalViolations, activeBuckets := rateLimiter.GetStats()
-	return map[string]interface{}{
-		"enabled":             enabled,
-		"requests_per_minute": requestsPerMinute,
-		"burst_size":          burstSize,
-		"total_violations":    totalViolations,
-		"active_buckets":      activeBuckets,
+	return &vmgatewaytypes.RateLimitStats{
+		Enabled:          enabled,
+		RequestsPerMinute: requestsPerMinute,
+		BurstSize:        burstSize,
+		TotalViolations:  totalViolations,
+		ActiveBuckets:    activeBuckets,
 	}
 }

@@ -32,6 +32,10 @@ func NewHTTPTransportService(
 	timeoutConfig *types.TimeoutConfig,
 	logger *zap.Logger,
 ) *HTTPTransportService {
+	// Normalize logger: if nil, use a no-op logger
+	if logger == nil {
+		logger = zap.NewNop()
+	}
 	return &HTTPTransportService{
 		httpsServerService: httpsServerService,
 		httpsClientService: httpsClientService,
@@ -41,31 +45,32 @@ func NewHTTPTransportService(
 }
 
 // Start starts the HTTP transport service (both server and client).
+// Locking strategy: Copy service references under lock, perform blocking work outside lock.
 func (s *HTTPTransportService) Start(ctx context.Context) error {
+	// Acquire lock only to check started flag and copy service references
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if s.started {
+		s.mu.Unlock()
 		return fmt.Errorf("HTTP transport service is already started")
 	}
 
-	if s.logger != nil {
-		s.logger.Info("Starting HTTP transport service...")
-	}
+	// Copy service references under lock
+	serverSvc := s.httpsServerService
+	clientSvc := s.httpsClientService
+	s.mu.Unlock() // Release lock before blocking operations
 
-	// Start HTTPS server first
-	if s.httpsServerService != nil {
-		if s.logger != nil {
-			s.logger.Info("Starting HTTPS server service...")
-		}
-		if err := s.httpsServerService.Start(ctx); err != nil {
+	s.logger.Info("Starting HTTP transport service...")
+
+	// Start HTTPS server first (blocking operation, performed outside lock)
+	if serverSvc != nil {
+		s.logger.Info("Starting HTTPS server service...")
+		if err := serverSvc.Start(ctx); err != nil {
 			return fmt.Errorf("failed to start HTTPS server service: %w", err)
 		}
 
 		// Wait for server readiness using TransportEstablishmentTimeout
-		if s.logger != nil {
-			s.logger.Info("Waiting for HTTPS server readiness...")
-		}
+		// This is a blocking operation with time.Sleep, so must be outside lock
+		s.logger.Info("Waiting for HTTPS server readiness...")
 		readinessTimeout := s.getTransportEstablishmentTimeout()
 		readinessCtx, cancel := context.WithTimeout(ctx, readinessTimeout)
 		defer cancel()
@@ -79,13 +84,13 @@ func (s *HTTPTransportService) Start(ctx context.Context) error {
 		for time.Now().Before(readinessDeadline) {
 			select {
 			case <-readinessCtx.Done():
-				_ = s.httpsServerService.Stop(ctx)
+				_ = serverSvc.Stop(ctx)
 				return fmt.Errorf("context cancelled while waiting for server readiness: %w", readinessCtx.Err())
 			default:
 			}
 
 			// Check if server is ready
-			if s.httpsServerService.IsServerReady() {
+			if serverSvc.IsServerReady() {
 				ready = true
 				break
 			}
@@ -94,34 +99,36 @@ func (s *HTTPTransportService) Start(ctx context.Context) error {
 		}
 		
 		if !ready {
-			_ = s.httpsServerService.Stop(ctx)
+			_ = serverSvc.Stop(ctx)
 			return fmt.Errorf("HTTPS server did not become ready within %v", readinessTimeout)
 		}
 
-		if s.logger != nil {
-			s.logger.Info("HTTPS server is ready")
-		}
+		s.logger.Info("HTTPS server is ready")
 	}
 
-	// Start HTTPS client
-	if s.httpsClientService != nil {
-		if s.logger != nil {
-			s.logger.Info("Starting HTTPS client service...")
-		}
-		if err := s.httpsClientService.Start(ctx); err != nil {
+	// Start HTTPS client (blocking operation, performed outside lock)
+	if clientSvc != nil {
+		s.logger.Info("Starting HTTPS client service...")
+		if err := clientSvc.Start(ctx); err != nil {
 			// Try to stop server if client fails
-			if s.httpsServerService != nil {
-				_ = s.httpsServerService.Stop(ctx)
+			if serverSvc != nil {
+				_ = serverSvc.Stop(ctx)
 			}
 			return fmt.Errorf("failed to start HTTPS client service: %w", err)
 		}
 	}
 
-	s.started = true
-
-	if s.logger != nil {
-		s.logger.Info("HTTP transport service started successfully")
+	// Re-acquire lock only to set started flag
+	// Check again if already started (another goroutine might have started it)
+	s.mu.Lock()
+	if s.started {
+		s.mu.Unlock()
+		return fmt.Errorf("HTTP transport service is already started")
 	}
+	s.started = true
+	s.mu.Unlock()
+
+	s.logger.Info("HTTP transport service started successfully")
 
 	return nil
 }
@@ -142,17 +149,13 @@ func (s *HTTPTransportService) Stop(ctx context.Context) error {
 	serverSvc := s.httpsServerService
 	s.mu.Unlock()
 
-	if s.logger != nil {
-		s.logger.Info("Stopping HTTP transport service...")
-	}
+	s.logger.Info("Stopping HTTP transport service...")
 
 	var errs []error
 
 	// Stop HTTPS client first
 	if clientSvc != nil {
-		if s.logger != nil {
-			s.logger.Info("Stopping HTTPS client service...")
-		}
+		s.logger.Info("Stopping HTTPS client service...")
 		if err := clientSvc.Stop(ctx); err != nil {
 			errs = append(errs, fmt.Errorf("failed to stop HTTPS client service: %w", err))
 		}
@@ -160,9 +163,7 @@ func (s *HTTPTransportService) Stop(ctx context.Context) error {
 
 	// Stop HTTPS server
 	if serverSvc != nil {
-		if s.logger != nil {
-			s.logger.Info("Stopping HTTPS server service...")
-		}
+		s.logger.Info("Stopping HTTPS server service...")
 		if err := serverSvc.Stop(ctx); err != nil {
 			errs = append(errs, fmt.Errorf("failed to stop HTTPS server service: %w", err))
 		}
@@ -174,15 +175,11 @@ func (s *HTTPTransportService) Stop(ctx context.Context) error {
 	s.mu.Unlock()
 
 	if len(errs) > 0 {
-		if s.logger != nil {
-			s.logger.Error("Some services failed to stop", zap.Errors("errors", errs))
-		}
+		s.logger.Error("Some services failed to stop", zap.Errors("errors", errs))
 		return errors.Join(errs...)
 	}
 
-	if s.logger != nil {
-		s.logger.Info("HTTP transport service stopped successfully")
-	}
+	s.logger.Info("HTTP transport service stopped successfully")
 
 	return nil
 }
@@ -278,16 +275,12 @@ func (s *HTTPTransportService) Authenticate(ctx context.Context, edgeID string) 
 	authCtx, cancel := context.WithTimeout(ctx, authTimeout)
 	defer cancel()
 
-	if s.logger != nil {
-		s.logger.Debug("Authenticating with timeout", zap.Duration("timeout", authTimeout))
-	}
+	s.logger.Debug("Authenticating with timeout", zap.Duration("timeout", authTimeout))
 
 	err := clientSvc.Authenticate(authCtx, edgeID)
 	if err != nil {
 		if authCtx.Err() == context.DeadlineExceeded {
-			if s.logger != nil {
-				s.logger.Warn("Authentication timed out", zap.Duration("timeout", authTimeout))
-			}
+			s.logger.Warn("Authentication timed out", zap.Duration("timeout", authTimeout))
 			return fmt.Errorf("authentication timed out after %v: %w", authTimeout, err)
 		}
 		return err
@@ -438,31 +431,35 @@ func (s *HTTPTransportService) SendEvents(ctx context.Context, events []*types.E
 // GetHealthMetrics returns health metrics from the HTTP transport service.
 // This includes certificate rotation status, time sync status, and rate limit stats.
 // Returns nil for metrics that are not available.
-func (s *HTTPTransportService) GetHealthMetrics() (
-	certRotation interface{},
-	timeSync interface{},
-	rateLimit interface{},
-) {
+// GetCertificateRotationStatus returns the certificate rotation status.
+func (s *HTTPTransportService) GetCertificateRotationStatus() *types.CertificateRotationStatus {
 	// Get certificate rotation status from HTTPS client if available
 	if clientSvc, ok := s.httpsClientService.(interface {
-		GetCertificateRotationStatus() interface{}
+		GetCertificateRotationStatus() *types.CertificateRotationStatus
 	}); ok {
-		certRotation = clientSvc.GetCertificateRotationStatus()
+		return clientSvc.GetCertificateRotationStatus()
 	}
+	return nil
+}
 
+// GetTimeSyncStatus returns the time synchronization status.
+func (s *HTTPTransportService) GetTimeSyncStatus() *types.TimeSyncStatus {
 	// Get time sync status from HTTPS client if available
 	if clientSvc, ok := s.httpsClientService.(interface {
-		GetTimeSyncStatus() interface{}
+		GetTimeSyncStatus() *types.TimeSyncStatus
 	}); ok {
-		timeSync = clientSvc.GetTimeSyncStatus()
+		return clientSvc.GetTimeSyncStatus()
 	}
+	return nil
+}
 
+// GetRateLimitStats returns rate limiting statistics.
+func (s *HTTPTransportService) GetRateLimitStats() *types.RateLimitStats {
 	// Get rate limit stats from HTTPS server if available
 	if serverSvc, ok := s.httpsServerService.(interface {
-		GetRateLimitStats() interface{}
+		GetRateLimitStats() *types.RateLimitStats
 	}); ok {
-		rateLimit = serverSvc.GetRateLimitStats()
+		return serverSvc.GetRateLimitStats()
 	}
-
-	return certRotation, timeSync, rateLimit
+	return nil
 }

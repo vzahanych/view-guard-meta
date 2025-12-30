@@ -218,79 +218,21 @@ type GatewayStatus struct {
 	SubServices map[string]ServiceStatus `json:"sub_services"`
 
 	// CertificateRotationStatus contains certificate rotation status
-	CertificateRotationStatus *CertificateRotationStatus `json:"certificate_rotation_status,omitempty"`
+	CertificateRotationStatus *types.CertificateRotationStatus `json:"certificate_rotation_status,omitempty"`
 
 	// TimeSyncStatus contains time synchronization status
-	TimeSyncStatus *TimeSyncStatus `json:"time_sync_status,omitempty"`
+	TimeSyncStatus *types.TimeSyncStatus `json:"time_sync_status,omitempty"`
 
 	// RateLimitStats contains rate limiting statistics
-	RateLimitStats *RateLimitStats `json:"rate_limit_stats,omitempty"`
-
-	// RetryStats contains retry and backoff statistics
-	RetryStats *RetryStats `json:"retry_stats,omitempty"`
-
-	// EventEmissionStats contains event emission statistics
-	EventEmissionStats *EventEmissionStats `json:"event_emission_stats,omitempty"`
+	RateLimitStats *types.RateLimitStats `json:"rate_limit_stats,omitempty"`
 
 	// Timestamp is when this snapshot was taken
 	Timestamp time.Time `json:"timestamp"`
 }
 
-// CertificateRotationStatus represents the status of certificate rotation.
-type CertificateRotationStatus struct {
-	// Status is the current rotation status: "idle", "scheduled", "in_progress", "completed", "failed"
-	Status string `json:"status"`
-
-	// ScheduledAt is when the rotation is scheduled (if scheduled)
-	ScheduledAt *time.Time `json:"scheduled_at,omitempty"`
-
-	// GracePeriodEnd is when the grace period ends (if in progress or completed)
-	GracePeriodEnd *time.Time `json:"grace_period_end,omitempty"`
-
-	// OldCAFingerprint is the fingerprint of the old CA certificate
-	OldCAFingerprint string `json:"old_ca_fingerprint,omitempty"`
-
-	// NewCAFingerprint is the fingerprint of the new CA certificate
-	NewCAFingerprint string `json:"new_ca_fingerprint,omitempty"`
-}
-
-// TimeSyncStatus represents the status of time synchronization.
-type TimeSyncStatus struct {
-	// Status is the current sync status: "synced", "drift_warning", "drift_critical"
-	Status string `json:"status"`
-
-	// LastCheckTime is when the last time sync check was performed
-	LastCheckTime *time.Time `json:"last_check_time,omitempty"`
-
-	// DriftMinutes is the current clock drift in minutes (positive = Edge ahead, negative = Edge behind)
-	DriftMinutes float64 `json:"drift_minutes,omitempty"`
-
-	// ToleranceMinutes is the tolerance threshold in minutes
-	ToleranceMinutes float64 `json:"tolerance_minutes,omitempty"`
-
-	// CriticalDriftMinutes is the critical drift threshold in minutes
-	CriticalDriftMinutes float64 `json:"critical_drift_minutes,omitempty"`
-}
-
-// RateLimitStats represents rate limiting statistics.
-type RateLimitStats struct {
-	// Enabled indicates whether rate limiting is enabled
-	Enabled bool `json:"enabled"`
-
-	// RequestsPerMinute is the configured requests per minute limit
-	RequestsPerMinute int `json:"requests_per_minute,omitempty"`
-
-	// BurstSize is the configured burst size
-	BurstSize int `json:"burst_size,omitempty"`
-
-	// TotalViolations is the total number of rate limit violations
-	TotalViolations int64 `json:"total_violations,omitempty"`
-
-	// ActiveBuckets is the number of active rate limit buckets (per client/endpoint)
-	ActiveBuckets int `json:"active_buckets,omitempty"`
-}
-
 // RetryStats represents retry and backoff statistics.
+// Deprecated: Retry stats have been removed from GatewayStatus as they were never mutated.
+// Retry statistics are available via transport-specific metrics if needed.
 type RetryStats struct {
 	// MaxRetries is the configured maximum number of retries
 	MaxRetries int `json:"max_retries,omitempty"`
@@ -309,6 +251,8 @@ type RetryStats struct {
 }
 
 // EventEmissionStats represents event emission statistics.
+// Deprecated: Event emission stats have been removed from GatewayStatus as they were never mutated.
+// Event emission statistics are available via transport-specific metrics if needed.
 type EventEmissionStats struct {
 	// TotalEventsEmitted is the total number of events emitted
 	TotalEventsEmitted int64 `json:"total_events_emitted,omitempty"`
@@ -322,6 +266,18 @@ type EventEmissionStats struct {
 	// LastEmissionFailureTime is when the last emission failure occurred
 	LastEmissionFailureTime *time.Time `json:"last_emission_failure_time,omitempty"`
 }
+
+// CertificateRotationStatus is an alias for types.CertificateRotationStatus.
+// Deprecated: Use types.CertificateRotationStatus directly.
+type CertificateRotationStatus = types.CertificateRotationStatus
+
+// TimeSyncStatus is an alias for types.TimeSyncStatus.
+// Deprecated: Use types.TimeSyncStatus directly.
+type TimeSyncStatus = types.TimeSyncStatus
+
+// RateLimitStats is an alias for types.RateLimitStats.
+// Deprecated: Use types.RateLimitStats directly.
+type RateLimitStats = types.RateLimitStats
 
 // TunnelStatus represents the status of the tunnel service.
 // This is provider-agnostic and works with WireGuard, OpenVPN, IPSec, etc.

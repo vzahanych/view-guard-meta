@@ -144,6 +144,16 @@ func TestVMGatewayConfig_Validate(t *testing.T) {
 			errorMsg:    "https_server_config.server_key_path is required",
 		},
 		{
+			name: "Missing server CA cert path",
+			config: func() *VMGatewayConfig {
+				cfg := validConfig()
+				cfg.HTTPServerConfig.CACertPath = ""
+				return cfg
+			},
+			expectError: true,
+			errorMsg:    "https_server_config.ca_cert_path is required",
+		},
+		{
 			name: "Missing client endpoint",
 			config: func() *VMGatewayConfig {
 				cfg := validConfig()
@@ -219,6 +229,52 @@ func TestVMGatewayConfig_Validate(t *testing.T) {
 				return cfg
 			},
 			expectError: false,
+		},
+		{
+			name: "Valid config with AllowInsecureLocalhost=true and localhost endpoint (certificates optional)",
+			config: func() *VMGatewayConfig {
+				cfg := validConfig()
+				cfg.HTTPSClientConfig.AllowInsecureLocalhost = true
+				cfg.HTTPSClientConfig.VMEndpoint = "localhost:8443"
+				cfg.HTTPSClientConfig.ClientCertPath = "" // Optional when AllowInsecureLocalhost=true
+				cfg.HTTPSClientConfig.ClientKeyPath = ""
+				cfg.HTTPSClientConfig.CACertPath = ""
+				return cfg
+			},
+			expectError: false,
+		},
+		{
+			name: "Invalid: AllowInsecureLocalhost=true but non-localhost endpoint",
+			config: func() *VMGatewayConfig {
+				cfg := validConfig()
+				cfg.HTTPSClientConfig.AllowInsecureLocalhost = true
+				cfg.HTTPSClientConfig.VMEndpoint = "10.0.0.1:8443" // Non-localhost
+				// Enable tunnel to allow non-localhost endpoint (otherwise earlier validation fails)
+				cfg.Tunnel = TunnelConfig{
+					Enabled:     true,
+					Provider:    TunnelProviderWireGuard,
+					KVMEndpoint: "10.0.0.1:51820",
+					InterfaceName: "wg0",
+					RawConfig: map[string]interface{}{
+						"config_path": "/test/wg0.conf",
+					},
+				}
+				cfg.HTTPServerConfig.ListenAddress = "10.0.0.2:8443"
+				return cfg
+			},
+			expectError: true,
+			errorMsg:    "allow_insecure_localhost can only be enabled for localhost endpoints",
+		},
+		{
+			name: "Invalid: AllowInsecureLocalhost=false (default) and missing certificates",
+			config: func() *VMGatewayConfig {
+				cfg := validConfig()
+				cfg.HTTPSClientConfig.AllowInsecureLocalhost = false // Explicitly false (default)
+				cfg.HTTPSClientConfig.ClientCertPath = ""
+				return cfg
+			},
+			expectError: true,
+			errorMsg:    "client_cert_path is required",
 		},
 	}
 

@@ -68,6 +68,16 @@ const (
 	EventTypeStorageSchemaMigrationStarted  EventType = "storage.schema_migration_started"
 	EventTypeStorageSchemaMigrationCompleted EventType = "storage.schema_migration_completed"
 
+	// Audit log events
+	EventTypeAuditLogQueueFull      EventType = "audit_log.queue_full"
+	EventTypeAuditLogQueueResumed   EventType = "audit_log.queue_resumed"
+	EventTypeAuditLogSyncFailed     EventType = "audit_log.sync_failed"
+	EventTypeAuditLogSyncSucceeded  EventType = "audit_log.sync_succeeded"
+	EventTypeAuditLogTamperDetected EventType = "audit_log.tamper_detected"
+	EventTypeAuditLogCleanupStarted EventType = "audit_log.cleanup_started"
+	EventTypeAuditLogCleanupCompleted EventType = "audit_log.cleanup_completed"
+	EventTypeAuditLogHealthDegraded EventType = "audit_log.health_degraded"
+
 	// Security events
 	EventTypeSecurityEventCreated EventType = "security.event.created"
 
@@ -93,7 +103,7 @@ func (e EventType) String() string {
 //       Data: DeviceDiscoveredEventData{...},
 //   }
 type EventData interface {
-	ModelDeployedEventData | ModelDeploymentStatusEventData | SnapshotRequestedEventData | CapabilitiesReceivedEventData | NetworkEventData | TunnelConnectingEventData | TunnelConnectionErrorEventData | TunnelConnectedEventData | TunnelDisconnectedEventData | TransportConnectingEventData | TransportConnectionErrorEventData | TransportConnectedEventData | TransportDisconnectedEventData | EdgeAuthenticatedEventData | RateLimitExceededEventData | TimeSyncCriticalDriftEventData | TimeSyncDriftWarningEventData | CertificateRotationScheduledEventData | CertificateRotationCompletedEventData | CertificateRotationFailedEventData | DeviceEventData | DeviceFrameReceivedEventData | DeviceDiscoveredEventData | DeviceRegisteredEventData | DataUnitSavedEventData | DataUnitUpdatedEventData | DataUnitDeletedEventData | StorageEventData
+	ModelDeployedEventData | ModelDeploymentStatusEventData | SnapshotRequestedEventData | CapabilitiesReceivedEventData | NetworkEventData | TunnelConnectingEventData | TunnelConnectionErrorEventData | TunnelConnectedEventData | TunnelDisconnectedEventData | TransportConnectingEventData | TransportConnectionErrorEventData | TransportConnectedEventData | TransportDisconnectedEventData | EdgeAuthenticatedEventData | RateLimitExceededEventData | TimeSyncCriticalDriftEventData | TimeSyncDriftWarningEventData | CertificateRotationScheduledEventData | CertificateRotationCompletedEventData | CertificateRotationFailedEventData | DeviceEventData | DeviceFrameReceivedEventData | DeviceDiscoveredEventData | DeviceRegisteredEventData | DataUnitSavedEventData | DataUnitUpdatedEventData | DataUnitDeletedEventData | StorageEventData | AuditLogEventData
 }
 
 // Event represents an application-level event flowing through the bus.
@@ -535,4 +545,38 @@ type StorageEventData struct {
 	
 	// Additional metadata
 	Metadata         map[string]interface{} `json:"metadata,omitempty"`    // Additional event metadata
+}
+
+// AuditLogEventData contains data for audit log operational events.
+// Used for audit_log.queue_full, audit_log.queue_resumed, audit_log.sync_failed,
+// audit_log.sync_succeeded, audit_log.tamper_detected, audit_log.cleanup_started,
+// audit_log.cleanup_completed, and audit_log.health_degraded events.
+type AuditLogEventData struct {
+	// For queue events (queue_full, queue_resumed)
+	QueueDepth      *int     `json:"queue_depth,omitempty"`      // Current queue depth
+	QueueMaxSize    *int     `json:"queue_max_size,omitempty"`   // Maximum queue size
+	QueueUsagePercent *float64 `json:"queue_usage_percent,omitempty"` // Queue usage percentage (0-100)
+
+	// For sync events (sync_failed, sync_succeeded)
+	EntriesSynced   *int64   `json:"entries_synced,omitempty"`   // Number of entries synced
+	SyncDuration    *string  `json:"sync_duration,omitempty"`    // Sync duration (e.g., "5s")
+	ErrorMessage    *string  `json:"error_message,omitempty"`    // Error message (for sync_failed)
+
+	// For tamper detection events (tamper_detected)
+	BrokenLinks     *int     `json:"broken_links,omitempty"`     // Number of broken links detected
+	TamperIndicators *int    `json:"tamper_indicators,omitempty"` // Number of tamper indicators
+	VerifiedEntries *int     `json:"verified_entries,omitempty"` // Number of verified entries
+	TotalEntries    *int     `json:"total_entries,omitempty"`    // Total entries in chain
+
+	// For cleanup events (cleanup_started, cleanup_completed)
+	EntriesDeleted  *int64   `json:"entries_deleted,omitempty"`  // Number of entries deleted
+	EntriesSkipped  *int64   `json:"entries_skipped,omitempty"`  // Number of entries skipped
+	CleanupDuration *string  `json:"cleanup_duration,omitempty"` // Cleanup duration (e.g., "30s")
+
+	// For health events (health_degraded)
+	HealthStatus    *string  `json:"health_status,omitempty"`    // Health status (e.g., "degraded", "warning")
+	HealthReason    *string  `json:"health_reason,omitempty"`    // Reason for degraded health
+
+	// Additional metadata
+	Metadata        map[string]interface{} `json:"metadata,omitempty"` // Additional event metadata
 }

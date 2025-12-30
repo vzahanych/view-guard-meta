@@ -191,6 +191,18 @@ func DefaultEventDropPolicy() *EventDropPolicy {
 			EventType("event_bus.cleanup_started"):   EventCategoryOperationalHealth,
 			EventType("event_bus.cleanup_completed"): EventCategoryOperationalHealth,
 			EventType("event_bus.health_degraded"):   EventCategoryOperationalHealth,
+
+			// Operational/health (must NOT be dropped) - Audit log events
+			EventTypeAuditLogQueueFull:      EventCategoryOperationalHealth,
+			EventTypeAuditLogQueueResumed:   EventCategoryOperationalHealth,
+			EventTypeAuditLogSyncFailed:     EventCategoryOperationalHealth,
+			EventTypeAuditLogSyncSucceeded:  EventCategoryOperationalHealth,
+			EventTypeAuditLogCleanupStarted: EventCategoryOperationalHealth,
+			EventTypeAuditLogCleanupCompleted: EventCategoryOperationalHealth,
+			EventTypeAuditLogHealthDegraded: EventCategoryOperationalHealth,
+
+			// Critical (must NOT be dropped, highest priority) - Audit log tamper detection
+			EventTypeAuditLogTamperDetected: EventCategoryCritical,
 		},
 		DefaultCategory: EventCategoryWorkflowTrigger, // Default: workflow triggers can be dropped
 	}

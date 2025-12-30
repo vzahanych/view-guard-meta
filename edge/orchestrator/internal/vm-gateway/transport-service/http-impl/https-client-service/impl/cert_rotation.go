@@ -47,6 +47,10 @@ func NewCertificateRotationHandler(
 	logger *zap.Logger,
 	eventBus eventbus.EventBus,
 ) *CertificateRotationHandler {
+	// Normalize logger: if nil, use a no-op logger
+	if logger == nil {
+		logger = zap.NewNop()
+	}
 	return &CertificateRotationHandler{
 		clientCfg:  clientCfg,
 		httpClient: httpClient,
@@ -195,12 +199,12 @@ func (h *CertificateRotationHandler) downloadNewCACertificate(ctx context.Contex
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := readLimitedBody(resp.Body, 64<<10) // Limit to 64KB for error response
 		return nil, fmt.Errorf("failed to download CA certificate: status %d, body: %s", resp.StatusCode, string(body))
 	}
 
-	// Read certificate PEM data
-	certPEM, err := io.ReadAll(resp.Body)
+	// Read certificate PEM data (limit to 64KB - certificates are typically much smaller)
+	certPEM, err := readLimitedBody(resp.Body, 64<<10)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read certificate data: %w", err)
 	}

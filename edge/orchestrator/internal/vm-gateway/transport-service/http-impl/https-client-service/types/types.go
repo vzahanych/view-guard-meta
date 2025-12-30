@@ -22,6 +22,12 @@ type HTTPSClientConfig struct {
 	// CACertPath is the path to the CA certificate used to verify the VM certificate.
 	CACertPath string `yaml:"ca_cert_path"`
 
+	// AllowInsecureLocalhost allows insecure TLS connections (InsecureSkipVerify) when set to true
+	// AND the endpoint is localhost/127.0.0.1. This is for development only and must never be
+	// enabled in production. When false, certificates are always required.
+	// Default: false (certificates always required)
+	AllowInsecureLocalhost bool `yaml:"allow_insecure_localhost"`
+
 	// Timeout is the HTTP request timeout.
 	Timeout time.Duration `yaml:"timeout"`
 

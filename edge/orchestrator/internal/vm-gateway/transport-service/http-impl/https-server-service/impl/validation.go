@@ -226,7 +226,17 @@ func ValidateInputShape(inputShape []int) error {
 	return nil
 }
 
+// LimitRequestBody wraps the request body with MaxBytesReader to limit the maximum
+// size of the request body. This works for both Content-Length and chunked requests.
+// Returns an error if the body exceeds maxBytes.
+func LimitRequestBody(r *http.Request, maxBytes int64) error {
+	r.Body = http.MaxBytesReader(nil, r.Body, maxBytes)
+	return nil
+}
+
 // ValidateRequestSize validates the request body size.
+// Deprecated: Use LimitRequestBody with MaxBytesReader instead, which handles both
+// Content-Length and chunked requests.
 func ValidateRequestSize(contentLength int64, maxSize int64) error {
 	if contentLength > maxSize {
 		return &ValidationError{Field: "request_body", Message: fmt.Sprintf("exceeds maximum size of %d bytes", maxSize)}

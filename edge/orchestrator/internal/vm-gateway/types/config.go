@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"net"
 	"strings"
 	"time"
 )
@@ -491,6 +492,12 @@ type HTTPSClientConfig struct {
 	// CACertPath is the path to the CA certificate used to verify the VM certificate.
 	CACertPath string `yaml:"ca_cert_path"`
 
+	// AllowInsecureLocalhost allows insecure TLS connections (InsecureSkipVerify) when set to true
+	// AND the endpoint is localhost/127.0.0.1. This is for development only and must never be
+	// enabled in production. When false, certificates are always required.
+	// Default: false (certificates always required)
+	AllowInsecureLocalhost bool `yaml:"allow_insecure_localhost"`
+
 	// Timeout is the HTTP request timeout.
 	Timeout time.Duration `yaml:"timeout"`
 
@@ -613,26 +620,46 @@ func (c *VMGatewayConfig) Validate() error {
 		}
 	}
 
-	// Validate HTTPS server configuration
+	// Validate HTTPS server configuration - certificates are always required
 	if c.HTTPServerConfig.ServerCertPath == "" {
 		return fmt.Errorf("https_server_config.server_cert_path is required")
 	}
 	if c.HTTPServerConfig.ServerKeyPath == "" {
 		return fmt.Errorf("https_server_config.server_key_path is required")
 	}
+	if c.HTTPServerConfig.CACertPath == "" {
+		return fmt.Errorf("https_server_config.ca_cert_path is required")
+	}
 
 	// Validate HTTPS client configuration
 	if c.HTTPSClientConfig.VMEndpoint == "" {
 		return fmt.Errorf("https_client_config.vm_endpoint is required")
 	}
-	if c.HTTPSClientConfig.ClientCertPath == "" {
-		return fmt.Errorf("https_client_config.client_cert_path is required")
-	}
-	if c.HTTPSClientConfig.ClientKeyPath == "" {
-		return fmt.Errorf("https_client_config.client_key_path is required")
-	}
-	if c.HTTPSClientConfig.CACertPath == "" {
-		return fmt.Errorf("https_client_config.ca_cert_path is required")
+
+	// If AllowInsecureLocalhost is enabled, verify endpoint is localhost
+	if c.HTTPSClientConfig.AllowInsecureLocalhost {
+		host, _, err := net.SplitHostPort(c.HTTPSClientConfig.VMEndpoint)
+		if err != nil {
+			// If SplitHostPort fails, try parsing as host-only
+			host = c.HTTPSClientConfig.VMEndpoint
+		}
+		isLocalhost := host == "localhost" || host == "127.0.0.1" || strings.HasPrefix(host, "localhost:") || strings.HasPrefix(host, "127.0.0.1:")
+		if !isLocalhost {
+			return fmt.Errorf("https_client_config.allow_insecure_localhost can only be enabled for localhost endpoints (got: %s). "+
+				"This flag is for development only and must never be enabled in production", c.HTTPSClientConfig.VMEndpoint)
+		}
+		// When AllowInsecureLocalhost is true, certificate paths are optional
+	} else {
+		// When AllowInsecureLocalhost is false (default), certificates are required
+		if c.HTTPSClientConfig.ClientCertPath == "" {
+			return fmt.Errorf("https_client_config.client_cert_path is required (or set allow_insecure_localhost=true for localhost development)")
+		}
+		if c.HTTPSClientConfig.ClientKeyPath == "" {
+			return fmt.Errorf("https_client_config.client_key_path is required (or set allow_insecure_localhost=true for localhost development)")
+		}
+		if c.HTTPSClientConfig.CACertPath == "" {
+			return fmt.Errorf("https_client_config.ca_cert_path is required (or set allow_insecure_localhost=true for localhost development)")
+		}
 	}
 
 	// Validate certificate pinning configuration

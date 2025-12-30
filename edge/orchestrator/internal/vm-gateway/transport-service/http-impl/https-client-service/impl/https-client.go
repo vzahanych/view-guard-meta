@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -28,6 +29,14 @@ func closeResponseBody(body io.Closer, logger *zap.Logger) {
 	if err := body.Close(); err != nil {
 		logger.Warn("Failed to close response body", zap.Error(err))
 	}
+}
+
+// readLimitedBody reads the response body with a size limit to prevent reading
+// large error responses into memory. Returns the body content (truncated if larger
+// than maxBytes) and any error encountered.
+func readLimitedBody(body io.Reader, maxBytes int64) ([]byte, error) {
+	limitedReader := io.LimitReader(body, maxBytes)
+	return io.ReadAll(limitedReader)
 }
 
 // TelemetryClient interface for sending telemetry data to the VM.
@@ -78,6 +87,10 @@ func (c *HTTPSClient) executeVMAPIRequest(ctx context.Context, operationName str
 
 // NewHTTPSClient creates a new HTTPS client for Edge → VM calls
 func NewHTTPSClient(clientCfg *httpsclienttypes.HTTPSClientConfig, tunnelClient tunnelclient.TunnelClientService, edgeID string, eventBus eventbus.EventBus, log *zap.Logger) (*HTTPSClient, error) {
+	// Normalize logger: if nil, use a no-op logger
+	if log == nil {
+		log = zap.NewNop()
+	}
 	// Use config values, with defaults for development (localhost mode)
 	clientCertPath := clientCfg.ClientCertPath
 	clientKeyPath := clientCfg.ClientKeyPath
@@ -127,7 +140,24 @@ func NewHTTPSClient(clientCfg *httpsclienttypes.HTTPSClientConfig, tunnelClient 
 	var tlsConfig *tls.Config
 	var httpClient *http.Client
 
-	// Only load TLS if cert paths are provided (allows localhost dev without certs)
+	// Determine if we should use InsecureSkipVerify (strictly gated)
+	allowInsecure := clientCfg.AllowInsecureLocalhost
+	if allowInsecure {
+		// Verify endpoint is localhost when insecure is allowed
+		host, _, err := net.SplitHostPort(vmEndpoint)
+		if err != nil {
+			host = vmEndpoint
+		}
+		isLocalhost := host == "localhost" || host == "127.0.0.1"
+		if !isLocalhost {
+			return nil, fmt.Errorf("allow_insecure_localhost can only be enabled for localhost endpoints (got: %s). "+
+				"This flag is for development only and must never be enabled in production", vmEndpoint)
+		}
+		log.Warn("HTTPS client configured with InsecureSkipVerify for localhost development - " +
+			"this must never be enabled in production")
+	}
+
+	// Load TLS certificates if provided
 	if clientCertPath != "" && clientKeyPath != "" && caCertPath != "" {
 		log.Info("Loading TLS credentials for HTTPS client (mTLS enabled)",
 			zap.String("client_cert", clientCertPath),
@@ -169,12 +199,29 @@ func NewHTTPSClient(clientCfg *httpsclienttypes.HTTPSClientConfig, tunnelClient 
 			}
 			SetupCertificatePinning(tlsConfig, &pinningConfig, log)
 		}
-	} else {
-		// For localhost dev without certs, use InsecureSkipVerify (development only)
+	} else if allowInsecure {
+		// Only use InsecureSkipVerify if explicitly allowed and endpoint is localhost
+		// (already verified above)
 		tlsConfig = &tls.Config{
-			InsecureSkipVerify: true, // Only for localhost development
+			InsecureSkipVerify: true, // Only when allow_insecure_localhost=true and endpoint is localhost
 			MinVersion:         tls.VersionTLS12,
 		}
+	} else {
+		// Certificates are required when allow_insecure_localhost is false
+		missingFields := []string{}
+		if clientCertPath == "" {
+			missingFields = append(missingFields, "client_cert_path")
+		}
+		if clientKeyPath == "" {
+			missingFields = append(missingFields, "client_key_path")
+		}
+		if caCertPath == "" {
+			missingFields = append(missingFields, "ca_cert_path")
+		}
+		return nil, fmt.Errorf("TLS certificates are required for HTTPS client. Missing required fields: %s. "+
+			"Please provide client_cert_path, client_key_path, and ca_cert_path in the HTTPS client configuration, "+
+			"or set allow_insecure_localhost=true for localhost development only",
+			strings.Join(missingFields, ", "))
 	}
 
 		// Convert HTTPSClientConfig to VMGatewayConfig HTTPSClientConfig for rotation handler and revocation checker
@@ -183,6 +230,7 @@ func NewHTTPSClient(clientCfg *httpsclienttypes.HTTPSClientConfig, tunnelClient 
 		ClientCertPath:        clientCfg.ClientCertPath,
 		ClientKeyPath:         clientCfg.ClientKeyPath,
 		CACertPath:            clientCfg.CACertPath,
+		AllowInsecureLocalhost: clientCfg.AllowInsecureLocalhost,
 		Timeout:               clientCfg.Timeout,
 		CertificatePinning:    clientCfg.CertificatePinning,
 		CertificateRevocation: clientCfg.CertificateRevocation,
@@ -254,8 +302,9 @@ func (c *HTTPSClient) Name() string {
 
 // Start starts the HTTPS client service
 func (c *HTTPSClient) Start(ctx context.Context) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	// Note: We do not hold the lock for the entire method to avoid deadlocks.
+	// vmEndpoint and edgeID are read-only after construction, so no lock needed to read them.
+	// Authenticate() handles its own locking when updating authenticated/lastAuthError.
 
 	// Allow localhost mode even when tunnel is disabled
 	isLocalhostMode := false
@@ -355,19 +404,15 @@ func (c *HTTPSClient) Start(ctx context.Context) error {
 	// Note: Authentication is done synchronously to ensure the service is fully ready
 	// before Start() returns. If authentication fails, we log the error but don't fail
 	// startup - it can be retried on next heartbeat or by calling Authenticate again.
+	// Authenticate() handles its own locking when updating authenticated/lastAuthError,
+	// so we don't need to lock here.
 	if err := c.Authenticate(ctx, c.edgeID); err != nil {
-		c.mu.Lock()
-		c.authenticated = false
-		c.lastAuthError = err
-		c.mu.Unlock()
 		c.logger.Error("Failed to authenticate with VM during startup", zap.Error(err))
 		// Don't fail startup - will retry on next heartbeat or can be retried
+		// Authenticate() has already updated authenticated=false and lastAuthError internally
 	} else {
-		c.mu.Lock()
-		c.authenticated = true
-		c.lastAuthError = nil
-		c.mu.Unlock()
 		c.logger.Info("Successfully authenticated with VM", zap.String("edge_id", c.edgeID))
+		// Authenticate() has already updated authenticated=true and lastAuthError=nil internally
 	}
 
 	return nil
@@ -447,7 +492,7 @@ func (c *HTTPSClient) Heartbeat(ctx context.Context, req *vmgatewaytypes.Heartbe
 	defer closeResponseBody(resp.Body, c.logger)
 
 	if resp.StatusCode != http.StatusOK {
-		body, err := io.ReadAll(resp.Body)
+		body, err := readLimitedBody(resp.Body, 64<<10) // Limit to 64KB
 		if err != nil {
 			return fmt.Errorf("heartbeat failed with status %d: failed to read response body: %w", resp.StatusCode, err)
 		}
@@ -498,7 +543,7 @@ func (c *HTTPSClient) SendTelemetry(ctx context.Context, data *vmgatewaytypes.Te
 	defer closeResponseBody(resp.Body, c.logger)
 
 	if resp.StatusCode != http.StatusOK {
-		body, err := io.ReadAll(resp.Body)
+		body, err := readLimitedBody(resp.Body, 64<<10) // Limit to 64KB
 		if err != nil {
 			return fmt.Errorf("telemetry failed with status %d: failed to read response body: %w", resp.StatusCode, err)
 		}
@@ -541,7 +586,7 @@ func (c *HTTPSClient) SendEvents(ctx context.Context, events []*vmgatewaytypes.E
 	defer closeResponseBody(resp.Body, c.logger)
 
 	if resp.StatusCode != http.StatusOK {
-		body, err := io.ReadAll(resp.Body)
+		body, err := readLimitedBody(resp.Body, 64<<10) // Limit to 64KB
 		if err != nil {
 			return fmt.Errorf("send events failed with status %d: failed to read response body: %w", resp.StatusCode, err)
 		}
@@ -604,7 +649,7 @@ func (c *HTTPSClient) Authenticate(ctx context.Context, edgeID string) error {
 
 	// Check status code (should be OK after retry, but verify)
 	if resp.StatusCode != http.StatusOK {
-		body, readErr := io.ReadAll(resp.Body)
+		body, readErr := readLimitedBody(resp.Body, 64<<10) // Limit to 64KB
 		if readErr != nil {
 			authErr := fmt.Errorf("authentication failed with status %d: failed to read response body: %w", resp.StatusCode, readErr)
 			c.mu.Lock()
@@ -683,7 +728,7 @@ func (c *HTTPSClient) GetConfig(ctx context.Context) (*vmgatewaytypes.GetConfigR
 	defer closeResponseBody(resp.Body, c.logger)
 
 	if resp.StatusCode != http.StatusOK {
-		body, err := io.ReadAll(resp.Body)
+		body, err := readLimitedBody(resp.Body, 64<<10) // Limit to 64KB
 		if err != nil {
 			return nil, fmt.Errorf("GetConfig failed with status %d: failed to read response body: %w", resp.StatusCode, err)
 		}
@@ -742,7 +787,7 @@ func (c *HTTPSClient) SyncCapabilities(ctx context.Context, req *vmgatewaytypes.
 	defer closeResponseBody(resp.Body, c.logger)
 
 	if resp.StatusCode != http.StatusOK {
-		body, err := io.ReadAll(resp.Body)
+		body, err := readLimitedBody(resp.Body, 64<<10) // Limit to 64KB
 		if err != nil {
 			return nil, fmt.Errorf("sync capabilities failed with status %d: failed to read response body: %w", resp.StatusCode, err)
 		}
@@ -810,7 +855,7 @@ func (c *HTTPSClient) SyncDevices(ctx context.Context, req *vmgatewaytypes.SyncD
 	defer closeResponseBody(resp.Body, c.logger)
 
 	if resp.StatusCode != http.StatusOK {
-		body, err := io.ReadAll(resp.Body)
+		body, err := readLimitedBody(resp.Body, 64<<10) // Limit to 64KB
 		if err != nil {
 			return nil, fmt.Errorf("sync devices failed with status %d: failed to read response body: %w", resp.StatusCode, err)
 		}
@@ -868,7 +913,7 @@ func (c *HTTPSClient) SyncDataUnits(ctx context.Context, req *vmgatewaytypes.Syn
 	defer closeResponseBody(resp.Body, c.logger)
 
 	if resp.StatusCode != http.StatusOK {
-		body, err := io.ReadAll(resp.Body)
+		body, err := readLimitedBody(resp.Body, 64<<10) // Limit to 64KB
 		if err != nil {
 			return nil, fmt.Errorf("sync data units failed with status %d: failed to read response body: %w", resp.StatusCode, err)
 		}
@@ -928,7 +973,7 @@ func (c *HTTPSClient) SyncAuditLogs(ctx context.Context, req *vmgatewaytypes.Syn
 	defer closeResponseBody(resp.Body, c.logger)
 
 	if resp.StatusCode != http.StatusOK {
-		body, err := io.ReadAll(resp.Body)
+		body, err := readLimitedBody(resp.Body, 64<<10) // Limit to 64KB
 		if err != nil {
 			return nil, fmt.Errorf("sync audit logs failed with status %d: failed to read response body: %w", resp.StatusCode, err)
 		}
@@ -983,7 +1028,7 @@ func (c *HTTPSClient) ReportDeploymentStatus(ctx context.Context, deploymentID s
 	defer closeResponseBody(resp.Body, c.logger)
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, err := io.ReadAll(resp.Body)
+		body, err := readLimitedBody(resp.Body, 64<<10) // Limit to 64KB
 		if err != nil {
 			return fmt.Errorf("VM returned status %d: failed to read response body: %w", resp.StatusCode, err)
 		}
@@ -995,7 +1040,7 @@ func (c *HTTPSClient) ReportDeploymentStatus(ctx context.Context, deploymentID s
 
 // GetCertificateRotationStatus returns the certificate rotation status.
 // This method is used for health metrics collection.
-func (c *HTTPSClient) GetCertificateRotationStatus() interface{} {
+func (c *HTTPSClient) GetCertificateRotationStatus() *vmgatewaytypes.CertificateRotationStatus {
 	c.mu.RLock()
 	rotationHandler := c.rotationHandler
 	c.mu.RUnlock()
@@ -1006,21 +1051,32 @@ func (c *HTTPSClient) GetCertificateRotationStatus() interface{} {
 	if state == nil {
 		return nil
 	}
-	// Convert to GatewayStatus-compatible type
-	// We'll use a map to avoid import cycles
-	return map[string]interface{}{
-		"status":             state.Status,
-		"scheduled_at":       state.ScheduledAt,
-		"grace_period_end":   state.GracePeriodEnd,
-		"old_ca_fingerprint": state.OldCAFingerprint,
-		"new_ca_fingerprint": state.NewCAFingerprint,
+	// Convert RotationState to CertificateRotationStatus
+	return &vmgatewaytypes.CertificateRotationStatus{
+		Status:             state.Status,
+		ScheduledAt:        state.ScheduledAt,
+		GracePeriodEnd:     state.GracePeriodEnd,
+		OldCAFingerprint:   state.OldCAFingerprint,
+		NewCAFingerprint:   state.NewCAFingerprint,
 	}
 }
 
 // GetTimeSyncStatus returns the time synchronization status.
 // This method is used for health metrics collection.
-func (c *HTTPSClient) GetTimeSyncStatus() interface{} {
-	// Time sync status is checked during authentication, not stored
-	// Return nil for now - could be enhanced to track last check
+func (c *HTTPSClient) GetTimeSyncStatus() *vmgatewaytypes.TimeSyncStatus {
+	c.mu.RLock()
+	timeSyncChecker := c.timeSyncChecker
+	c.mu.RUnlock()
+	if timeSyncChecker == nil {
+		return nil
+	}
+	// TODO: Enhance TimeSyncChecker to track last check status
+	// For now, return nil as time sync is checked during authentication, not stored
+	return nil
+}
+
+// GetRateLimitStats returns rate limiting statistics.
+// HTTPSClient doesn't implement rate limiting (that's the server's job).
+func (c *HTTPSClient) GetRateLimitStats() *vmgatewaytypes.RateLimitStats {
 	return nil
 }

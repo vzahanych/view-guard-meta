@@ -113,8 +113,11 @@ func convertToCEF(entry interface{}) (string, error) {
 			"cs1":     e.ModelID,
 			"cs2":     e.ModelVersion,
 		}
-		if e.CameraID != "" {
-			extension["cs3"] = e.CameraID
+		if e.DeviceID != "" {
+			extension["cs3"] = string(e.DeviceID)
+		}
+		if e.DeviceType != "" {
+			extension["cs4"] = string(e.DeviceType)
 		}
 	case types.SecurityEventEntry:
 		baseEntry = e.AuditEntry
@@ -127,6 +130,49 @@ func convertToCEF(entry interface{}) (string, error) {
 			"outcome": e.Result,
 			"cs1":     e.EventType,
 			"msg":     e.Description,
+		}
+	case types.DatasetLifecycleEntry:
+		baseEntry = e.AuditEntry
+		entryType = "DatasetLifecycle"
+		severity = getSeverityForResult(e.Result)
+		extension = map[string]string{
+			"act":     e.Action,
+			"duser":   e.AuditEntry.UserID,
+			"srcip":   e.AuditEntry.IPAddress,
+			"outcome": e.Result,
+			"cs1":     e.DatasetID,
+		}
+		if e.DeviceID != "" {
+			extension["cs2"] = string(e.DeviceID)
+		}
+		if e.DeviceType != "" {
+			extension["cs3"] = string(e.DeviceType)
+		}
+		if e.DataUnitCount > 0 {
+			extension["cs4"] = fmt.Sprintf("%d", e.DataUnitCount)
+		}
+	case types.RecoveryActionEntry:
+		baseEntry = e.AuditEntry
+		entryType = "RecoveryAction"
+		severity = "critical" // Recovery actions are always critical
+		extension = map[string]string{
+			"act":     "recovery",
+			"duser":   e.AuditEntry.UserID,
+			"srcip":   e.AuditEntry.IPAddress,
+			"outcome": e.Result,
+			"cs1":     e.RecoveryReason,
+		}
+		if e.DeviceID != "" {
+			extension["cs2"] = string(e.DeviceID)
+		}
+		if e.DeviceType != "" {
+			extension["cs3"] = string(e.DeviceType)
+		}
+		if len(e.CorruptedResources) > 0 {
+			extension["cs4"] = strings.Join(e.CorruptedResources, ",")
+		}
+		if e.VMResponseStatus != "" {
+			extension["cs5"] = e.VMResponseStatus
 		}
 	default:
 		return "", fmt.Errorf("unsupported entry type: %T", entry)

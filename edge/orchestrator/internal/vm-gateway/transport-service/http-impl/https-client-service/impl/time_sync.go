@@ -26,6 +26,10 @@ func NewTimeSyncChecker(
 	logger *zap.Logger,
 	eventBus eventbus.EventBus,
 ) *TimeSyncChecker {
+	// Normalize logger: if nil, use a no-op logger
+	if logger == nil {
+		logger = zap.NewNop()
+	}
 	return &TimeSyncChecker{
 		config:  config,
 		logger:  logger,

@@ -8,7 +8,6 @@ import (
 	"crypto/x509/pkix"
 	"encoding/asn1"
 	"fmt"
-	"io"
 	"net/http"
 	"sync"
 	"time"
@@ -51,6 +50,10 @@ func NewCertificateRevocationChecker(
 	httpClient *http.Client,
 	logger *zap.Logger,
 ) *CertificateRevocationChecker {
+	// Normalize logger: if nil, use a no-op logger
+	if logger == nil {
+		logger = zap.NewNop()
+	}
 	cacheTTL := config.RevocationCacheTTL
 	if cacheTTL == 0 {
 		cacheTTL = 1 * time.Hour // Default: 1 hour
@@ -178,8 +181,8 @@ func (c *CertificateRevocationChecker) checkOCSP(ctx context.Context, cert *x509
 		return RevocationStatusError, fmt.Errorf("OCSP request failed with status %d", resp.StatusCode)
 	}
 
-	// Read OCSP response
-	ocspRespBytes, err := io.ReadAll(resp.Body)
+	// Read OCSP response (limit to 4KB - OCSP responses are typically very small)
+	ocspRespBytes, err := readLimitedBody(resp.Body, 4<<10)
 	if err != nil {
 		return RevocationStatusError, fmt.Errorf("failed to read OCSP response: %w", err)
 	}
@@ -235,8 +238,8 @@ func (c *CertificateRevocationChecker) checkCRL(ctx context.Context, cert *x509.
 		return RevocationStatusError, fmt.Errorf("CRL download failed with status %d", resp.StatusCode)
 	}
 
-	// Read CRL
-	crlBytes, err := io.ReadAll(resp.Body)
+	// Read CRL (limit to 256KB - CRLs can be legitimately large)
+	crlBytes, err := readLimitedBody(resp.Body, 256<<10)
 	if err != nil {
 		return RevocationStatusError, fmt.Errorf("failed to read CRL: %w", err)
 	}

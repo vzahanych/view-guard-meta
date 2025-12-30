@@ -26,25 +26,6 @@ type vmGatewayImpl struct {
 	logger                 *zap.Logger
 	mu                     sync.RWMutex
 	started                bool
-	
-	// Health metrics tracking
-	retryStats             RetryMetrics
-	eventEmissionStats    EventEmissionMetrics
-	healthMetricsMu       sync.RWMutex
-}
-
-// RetryMetrics tracks retry statistics.
-type RetryMetrics struct {
-	TotalRetries      int64 `json:"total_retries"`
-	TotalRetryFailures int64 `json:"total_retry_failures"`
-}
-
-// EventEmissionMetrics tracks event emission statistics.
-type EventEmissionMetrics struct {
-	TotalEventsEmitted      int64     `json:"total_events_emitted"`
-	TotalEmissionFailures    int64     `json:"total_emission_failures"`
-	LastEmissionTime         *time.Time `json:"last_emission_time,omitempty"`
-	LastEmissionFailureTime  *time.Time `json:"last_emission_failure_time,omitempty"`
 }
 
 // NewVMGatewayImpl creates a new VMGateway implementation that uses transport-service.
@@ -57,6 +38,10 @@ func NewVMGatewayImpl(
 	eventBus eventbus.EventBus,
 	logger *zap.Logger,
 ) (*vmGatewayImpl, error) {
+	// Normalize logger: if nil, use a no-op logger
+	if logger == nil {
+		logger = zap.NewNop()
+	}
 	// Step 1: Get tunnel config (provider-agnostic)
 	tunnelCfg := cfg.GetTunnelConfig()
 	var tunnelSvc tunnelclient.TunnelClientService
@@ -87,8 +72,6 @@ func NewVMGatewayImpl(
 		transportService:       transportSvc,
 		connectionStateMachine:  impl.NewConnectionStateMachine(),
 		logger:                  logger,
-		retryStats:             RetryMetrics{},
-		eventEmissionStats:    EventEmissionMetrics{},
 	}, nil
 }
 
@@ -111,29 +94,21 @@ func (g *vmGatewayImpl) Start(ctx context.Context) error {
 	transportSvc := g.transportService
 	g.mu.Unlock()
 
-	if g.logger != nil {
-		g.logger.Info("Starting VM Gateway (all services)")
-	}
+	g.logger.Info("Starting VM Gateway (all services)")
 
 	// Step 1: Start tunnel service first (required for transport services in production)
 	// Skip tunnel if disabled (for localhost dev mode)
 	if tunnelSvc != nil {
-		if g.logger != nil {
-			g.logger.Info("Starting tunnel service...")
-		}
+		g.logger.Info("Starting tunnel service...")
 		if err := tunnelSvc.Start(ctx); err != nil {
 			return fmt.Errorf("start tunnel service: %w", err)
 		}
 	} else {
-		if g.logger != nil {
-			g.logger.Info("Tunnel disabled - skipping tunnel startup (localhost dev mode)")
-		}
+		g.logger.Info("Tunnel disabled - skipping tunnel startup (localhost dev mode)")
 	}
 
 	// Step 2: Start transport service (depends on tunnel in production, localhost for dev)
-	if g.logger != nil {
-		g.logger.Info("Starting transport service...")
-	}
+	g.logger.Info("Starting transport service...")
 	if transportSvc != nil {
 		if err := transportSvc.Start(ctx); err != nil {
 			// Try to stop tunnel if transport service fails (only if it was started)
@@ -149,9 +124,7 @@ func (g *vmGatewayImpl) Start(ctx context.Context) error {
 	g.started = true
 	g.mu.Unlock()
 
-	if g.logger != nil {
-		g.logger.Info("VM Gateway started successfully (all services running)")
-	}
+	g.logger.Info("VM Gateway started successfully (all services running)")
 
 	return nil
 }
@@ -171,16 +144,12 @@ func (g *vmGatewayImpl) Stop(ctx context.Context) error {
 	tunnelSvc := g.tunnelService
 	g.mu.Unlock()
 
-	if g.logger != nil {
-		g.logger.Info("Stopping VM Gateway (all services)")
-	}
+	g.logger.Info("Stopping VM Gateway (all services)")
 
 	var errs []error
 
 	// Stop transport service first
-	if g.logger != nil {
-		g.logger.Info("Stopping transport service...")
-	}
+	g.logger.Info("Stopping transport service...")
 	if transportSvc != nil {
 		if err := transportSvc.Stop(ctx); err != nil {
 			errs = append(errs, fmt.Errorf("stop transport service: %w", err))
@@ -188,9 +157,7 @@ func (g *vmGatewayImpl) Stop(ctx context.Context) error {
 	}
 
 	// Stop tunnel service last
-	if g.logger != nil {
-		g.logger.Info("Stopping tunnel service...")
-	}
+	g.logger.Info("Stopping tunnel service...")
 	if tunnelSvc != nil {
 		if err := tunnelSvc.Stop(ctx); err != nil {
 			errs = append(errs, fmt.Errorf("stop tunnel service: %w", err))
@@ -203,15 +170,11 @@ func (g *vmGatewayImpl) Stop(ctx context.Context) error {
 	g.mu.Unlock()
 
 	if len(errs) > 0 {
-		if g.logger != nil {
-			g.logger.Error("Some services failed to stop", zap.Errors("errors", errs))
-		}
+		g.logger.Error("Some services failed to stop", zap.Errors("errors", errs))
 		return errors.Join(errs...)
 	}
 
-	if g.logger != nil {
-		g.logger.Info("VM Gateway stopped successfully")
-	}
+	g.logger.Info("VM Gateway stopped successfully")
 
 	return nil
 }
@@ -506,60 +469,18 @@ func (g *vmGatewayImpl) HealthSnapshot() GatewayStatus {
 		}
 	}
 
-	// Get health metrics
-	g.healthMetricsMu.RLock()
-	retryStats := RetryStats{
-		TotalRetries:      g.retryStats.TotalRetries,
-		TotalRetryFailures: g.retryStats.TotalRetryFailures,
-	}
-	eventEmissionStats := EventEmissionStats{
-		TotalEventsEmitted:     g.eventEmissionStats.TotalEventsEmitted,
-		TotalEmissionFailures:   g.eventEmissionStats.TotalEmissionFailures,
-		LastEmissionTime:        g.eventEmissionStats.LastEmissionTime,
-		LastEmissionFailureTime: g.eventEmissionStats.LastEmissionFailureTime,
-	}
-	g.healthMetricsMu.RUnlock()
-
 	// Get transport-specific health metrics (certificate rotation, time sync, rate limiting)
-	// Try to get metrics from HTTP transport service if available
-	var certRotationStatus *CertificateRotationStatus
-	var timeSyncStatus *TimeSyncStatus
-	var rateLimitStats *RateLimitStats
+	// Use typed HealthReporter interface instead of interface{} and map parsing
+	var certRotationStatus *types.CertificateRotationStatus
+	var timeSyncStatus *types.TimeSyncStatus
+	var rateLimitStats *types.RateLimitStats
 	
-		// Use type assertion to access HTTP transport service health metrics
-		if httpTransport, ok := transportSvc.(interface {
-			GetHealthMetrics() (interface{}, interface{}, interface{})
-		}); ok {
-			certRot, _, rateLimit := httpTransport.GetHealthMetrics()
-			if certRot != nil {
-				if crMap, ok := certRot.(map[string]interface{}); ok {
-					certRotationStatus = &CertificateRotationStatus{
-						Status: getString(crMap, "status"),
-					}
-					if scheduledAt, ok := crMap["scheduled_at"].(*time.Time); ok && scheduledAt != nil {
-						scheduledAtCopy := *scheduledAt
-						certRotationStatus.ScheduledAt = &scheduledAtCopy
-					}
-					if gracePeriodEnd, ok := crMap["grace_period_end"].(*time.Time); ok && gracePeriodEnd != nil {
-						gracePeriodEndCopy := *gracePeriodEnd
-						certRotationStatus.GracePeriodEnd = &gracePeriodEndCopy
-					}
-					certRotationStatus.OldCAFingerprint = getString(crMap, "old_ca_fingerprint")
-					certRotationStatus.NewCAFingerprint = getString(crMap, "new_ca_fingerprint")
-				}
-			}
-			if rateLimit != nil {
-				if rlMap, ok := rateLimit.(map[string]interface{}); ok {
-					rateLimitStats = &RateLimitStats{
-						Enabled:          getBool(rlMap, "enabled"),
-						RequestsPerMinute: getInt(rlMap, "requests_per_minute"),
-						BurstSize:        getInt(rlMap, "burst_size"),
-						TotalViolations:  getInt64(rlMap, "total_violations"),
-						ActiveBuckets:    getInt(rlMap, "active_buckets"),
-					}
-				}
-			}
-		}
+	// Use type assertion to access HTTP transport service health metrics via HealthReporter interface
+	if healthReporter, ok := transportSvc.(types.HealthReporter); ok {
+		certRotationStatus = healthReporter.GetCertificateRotationStatus()
+		timeSyncStatus = healthReporter.GetTimeSyncStatus()
+		rateLimitStats = healthReporter.GetRateLimitStats()
+	}
 
 	return GatewayStatus{
 		ConnectionState:          connectionStateInfo,
@@ -569,44 +490,10 @@ func (g *vmGatewayImpl) HealthSnapshot() GatewayStatus {
 		CertificateRotationStatus: certRotationStatus,
 		TimeSyncStatus:           timeSyncStatus,
 		RateLimitStats:           rateLimitStats,
-		RetryStats:               &retryStats,
-		EventEmissionStats:       &eventEmissionStats,
 		Timestamp:                time.Now(),
 	}
 }
 
-// Helper functions for extracting values from map[string]interface{}
-func getString(m map[string]interface{}, key string) string {
-	if v, ok := m[key].(string); ok {
-		return v
-	}
-	return ""
-}
+// Remove helper functions - no longer needed with typed interface
 
-func getBool(m map[string]interface{}, key string) bool {
-	if v, ok := m[key].(bool); ok {
-		return v
-	}
-	return false
-}
-
-func getInt(m map[string]interface{}, key string) int {
-	if v, ok := m[key].(int); ok {
-		return v
-	}
-	if v, ok := m[key].(int64); ok {
-		return int(v)
-	}
-	return 0
-}
-
-func getInt64(m map[string]interface{}, key string) int64 {
-	if v, ok := m[key].(int64); ok {
-		return v
-	}
-	if v, ok := m[key].(int); ok {
-		return int64(v)
-	}
-	return 0
-}
 
